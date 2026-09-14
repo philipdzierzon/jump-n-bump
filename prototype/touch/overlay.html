@@ -111,10 +111,13 @@ html, body { touch-action: none; -webkit-user-select: none; user-select: none; -
   }
 
   function buttons() {
-    var pad = 24, r = 40, y = H() - pad - r, jx, lx, rx;
-    if (swapped) { lx = W() - pad - r; rx = W() - pad - 3 * r - 12; jx = pad + r; }
-    else { lx = pad + r; rx = pad + 3 * r + 12; jx = W() - pad - r; }
-    return { r: r, left: { x: lx, y: y }, right: { x: rx, y: y }, up: { x: jx, y: y, r: r + 12 } };
+    // same size as jump; shrinks only on a screen too narrow for three of them
+    var pad = 24, r = Math.min(52, Math.floor((W() - 92) / 6)), y = H() - pad - r;
+    var outer = pad + r, inner = pad + 3 * r + 12;
+    // swapping moves the pair to the other side; ◀ stays to the left of ▶
+    var pair = swapped ? { left: W() - inner, right: W() - outer } : { left: outer, right: inner };
+    return { r: r, left: { x: pair.left, y: y }, right: { x: pair.right, y: y },
+             up: { x: swapped ? pad + r : W() - pad - r, y: y, r: r } };
   }
   function hit(t, b, r) { return Math.hypot(t.clientX - b.x, t.clientY - b.y) <= r; }
   function readButtons(touches) {

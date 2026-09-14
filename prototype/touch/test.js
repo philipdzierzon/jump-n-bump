@@ -33,5 +33,13 @@ const b = pt.buttons();
 assert.deepStrictEqual(pt.readButtons([t(1, b.left.x, b.left.y), t(2, b.up.x, b.up.y)]),
   { left: true, right: false, up: true });
 assert.deepStrictEqual(pt.readButtons([t(1, 400, 200)]), { left: false, right: false, up: false });
+// swapping moves the pair across, it never reverses ◀ and ▶
+for (const s of [false, true]) {
+  pt.setSwap(s);
+  const c = pt.buttons();
+  assert.ok(c.left.x < c.right.x, "left button stays left of right button, swapped=" + s);
+  assert.ok(Math.abs(c.up.x - c.right.x) > 2 * c.r, "jump button stays clear of the pair");
+}
+pt.setSwap(false);
 
 console.log("ok");
