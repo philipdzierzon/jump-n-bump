@@ -45,8 +45,15 @@ The three findings that decide it, in order of weight:
 
 Against that, DOs win one real thing: **per-room placement**. A DO lands near its players; a Docker box is
 nailed to one city forever. For an all-EU room and an all-US room served by one EU box, the US room eats the
-Atlantic. That is a genuine, load-bearing advantage for a global playerbase — and it is the one reason to
-revisit this. See [Latency](#3-latency).
+Atlantic.
+
+That advantage is real but **smaller than it first appears, and it comes with a new cost**. Measured placement
+data ([§3](#3-latency)) shows Durable Objects run in only **32 colos — 10.99% of Cloudflare's PoPs** — with
+none at all in South America, Africa, India or the Middle East, and placement is **non-deterministic for 67% of
+requesting colos**. So within one well-served region the gain over a fixed box is single-digit milliseconds,
+and the same four players can get different placement, and a different derived input delay, on each room
+creation — with nothing queryable to explain it. Cross-continent, the gain is genuine and is the one reason to
+revisit this.
 
 The tiebreaker is that Option B is already proven in the owner's other projects, and the ticket asked for
 "boring and known" to be weighed honestly. It's worth about two weeks of not-fighting-the-platform.
@@ -393,6 +400,66 @@ while the VPS bill is flat until the box saturates, which on these numbers is a 
 Eastern North America). "Hints are a best effort and not a guarantee." Only the **first** `get()` respects it,
 and relocation is "planned for the future."
 
+### Measured: "close to" is coarser than it sounds
+
+[`where.durableobjects.live`](https://where.durableobjects.live/) — a community project, but the one
+Cloudflare's own data-location page points at — continuously creates and destroys Durable Objects worldwide and
+publishes the resulting placement map (`/api/v3/data.json`, updated every 5 minutes). Pulled 2026-09-14:
+602,063 objects created in the preceding hour, across **291 requesting colos**.
+
+Three facts from that dataset, and they matter:
+
+**1. Durable Objects run in 32 colos, not 330.** The dataset reports `"coverage": 0.1099` — **10.99% of
+Cloudflare PoPs** — and the observed host set is exactly 32:
+
+```
+AKL AMS ARN ATL BNE CDG DEN DFW EWR FRA HKG IAD ICN KIX LAX LHR LIS MAD
+MEL MIA MRS MXP NRT ORD OTP PRG SEA SIN SJC SYD VIE WAW
+```
+
+So "a data center close to where the initial `get()` request is made" means *the nearest of 32*, not the
+client's local edge. The site's own live example, rendered on page load: a request from **Dortmund** hit a
+worker in **Frankfurt (FRA)** which created the object in **Amsterdam (AMS)** — a different country.
+
+Note what is *absent*: **no South American colo, no African colo, no Indian colo, no Middle Eastern colo.**
+São Paulo (GRU) clients get objects in **Miami** (63%) or **Newark** (37%). Dakar (DKR) gets Lisbon or
+Marseille. Hyderabad (HYD) gets Sydney, Seoul or Melbourne. This matches the docs' footnote that `sam`, `afr`
+and `me` "currently do not spawn" — but seeing it in the data makes the size of the gap concrete.
+
+**2. Placement is non-deterministic for two thirds of the world.** **194 of 291 requesting colos (67%)** have
+more than one possible host colo. Frankfurt clients land in Amsterdam 71% of the time and Frankfurt 29%. Paris
+splits 41% London / 41% Paris / 12% Amsterdam / 5% Madrid. Vienna splits three ways across Frankfurt, Warsaw
+and Vienna.
+
+This is a genuinely new argument against Option A that neither the ticket nor the docs raise: **the same four
+players creating the same room twice can get materially different placement, and therefore a different derived
+input delay, with no change on their side and nothing to look at afterwards.** #6 derives input delay from the
+room's worst RTT, so this surfaces directly as "why is it laggy this time?" — a question with no answer you can
+reach, because you cannot query where a room landed. A fixed origin is mediocre in a *predictable, debuggable*
+way.
+
+**3. But the intra-regional penalty is small — and the dataset's latency column does not mean what it looks
+like.** The per-pair `latency` values cannot be read as network RTT, because **same-colo pairs are not near
+zero**: `EWR → EWR` reads 60 ms, `SIN → SIN` 38 ms, `ORD → ORD` 80 ms. A colo cannot be 60 ms from itself. The
+figure evidently includes **object creation / cold-start**, which is what the site is actually measuring. Taking
+that 35–60 ms as a baseline and differencing:
+
+| Client colo | Lands in | Measured | Same-colo baseline | Implied network delta |
+| --- | --- | --- | --- | --- |
+| FRA | AMS (71%) | 55 ms | FRA→FRA 52 ms | **~3 ms** |
+| HAM | AMS (69%) | 56 ms | FRA→FRA 35 ms | ~20 ms |
+| DUS | AMS (62%) | 52 ms | FRA 47 ms | ~5 ms |
+| LAX | SJC (72%) | 63 ms | LAX→LAX 117 ms | negative — noise-dominated |
+| GRU | MIA (63%) | 101 ms | EWR→EWR 60 ms | ~40 ms |
+
+The European deltas are **single-digit to low-tens of milliseconds**. The 32 colos, while sparse globally, are
+well distributed across exactly the regions with players — Europe has AMS/FRA/CDG/LHR/MAD/MXP/MRS/ARN/VIE/WAW/
+PRG/LIS/OTP, North America has EWR/IAD/ATL/MIA/ORD/DFW/DEN/SEA/SJC/LAX. **Within a well-served region, DO
+placement costs very little.**
+
+I am not going to put a headline number on the per-frame penalty, because this dataset cannot support one — it
+measures creation, not steady-state RTT on an established WebSocket. See [Unverified](#unverified).
+
 ### The comparison is closer than the ticket assumes
 
 The ticket frames this as "DO placement vs a single fixed Docker origin". But **the Docker origin is behind a
@@ -411,33 +478,54 @@ What differentiates them is one thing: **where the terminating process sits.**
 
 | | DO | Docker + Tunnel |
 | --- | --- | --- |
-| Regional room (all-EU) | lands in EU | wherever the box is — EU if the box is EU, +Atlantic if not |
-| Regional room (all-US) | lands in US | +Atlantic every time, if the box is EU |
+| Regional room (all-EU) | nearest of 13 EU colos — for a EU box, roughly a wash | wherever the box is |
+| Regional room (all-US) | nearest of 9 US colos | +Atlantic every frame, if the box is EU |
 | Split room (EU + AU) | wherever the *first* client was | fixed, predictable |
-| Can be steered | `locationHint`, once, at creation | no — one box, forever |
+| Room from São Paulo / Lagos / Mumbai | **another continent** — no `sam`/`afr`/`me` colos exist | fixed, predictable |
+| Reproducible placement | **No — 67% of colos split across ≥2 hosts** | Yes, trivially |
+| Can be steered | `locationHint`, once, at creation, best-effort | no — one box, forever |
 | Can follow the room as players join | no, "do not currently change locations" | n/a |
 
 **Does nearest-to-first-client hurt a geographically split room, versus a single fixed origin?** Answering the
-question as asked:
+question as asked, now with the placement data in hand:
 
 - **For a split room specifically: no worse, and often better.** A fixed origin is *always* far from somebody.
-  A DO is far from somebody too, but at least it's near *someone*. The DO's worst case (first client is the
-  geographic outlier — one Australian joins first, three Europeans follow, DO lands in Sydney) is genuinely
-  bad and genuinely worse than a well-placed fixed box. But it is a *coin flip on join order*, not a standing
-  condition, and `locationHint` is the fix.
-- **For regional rooms — the common case, and the case #6's matchmaking is explicitly designed to produce
-  ("Matchmaking prefers nearby players") — the DO wins clearly.** An all-US room served by an EU box eats a
-  trans-Atlantic round trip on *every* frame, forever. A DO doesn't.
+  A DO is far from somebody too, but at least it's near *someone*. The DO's worst case — the first client is
+  the geographic outlier, one Australian joins first and three Europeans follow, object lands in Sydney — is
+  genuinely bad and genuinely worse than a well-placed fixed box. But it is a coin flip on join order, not a
+  standing condition, and `locationHint` is the fix.
+- **For regional rooms — the common case, and the one #6's matchmaking is designed to produce ("Matchmaking
+  prefers nearby players") — the DO still wins, but by less than the docs' phrasing suggests.** An all-US room
+  served by an EU box eats a trans-Atlantic round trip on every frame, forever, and a DO doesn't: that part
+  holds. But within Europe the measured delta between "DO lands in Amsterdam" and "box sits in Frankfurt" is
+  single-digit milliseconds. **For a European owner with a European box serving mostly European players, the
+  DO placement advantage is close to zero.**
 
 Because input delay is derived from the **worst** RTT in the room (#6), this lands directly on game feel: the
 whole room is slowed to its most distant member's one-way trip.
 
 ### What this means for the recommendation
 
-This is the one axis where Option A is straightforwardly better, and it is the reason to keep the port on the
-table. It only bites if the playerbase is genuinely multi-continental. For a game shared with friends, or a
-playerbase that clusters where the owner's box already is, one fixed origin is fine and the DO advantage is
-theoretical.
+Before pulling the placement data, this was "the one axis where Option A is straightforwardly better." The data
+**narrows that advantage and adds a new cost on the same axis**:
+
+- The advantage is **real but regional**, not global. It is worth having only when the playerbase spans
+  continents the box is not on. Within one well-served region it is worth a few milliseconds.
+- The new cost is **non-determinism**. Two thirds of the world's colos split placement across multiple hosts,
+  so the same room, created twice by the same people, can land in different countries and derive a different
+  input delay — with nothing queryable to explain it. Given that Option A also cannot show you a live room
+  ([§6](#6-operational-shape)), "it felt laggy that one time" is an unanswerable bug report on Workers and a
+  five-minute one on a box you can log into.
+
+**Net: this strengthens the recommendation rather than overturning it.** The escape hatch stands unchanged — if
+the playerbase does go multi-continental, a second Node instance joined to the same tunnel with room-id →
+region pinning buys the same locality, deterministically, and the relay is small enough to port to DOs in a day
+if that's ever the better trade.
+
+**Mitigation if Option A is chosen anyway:** pass an explicit `locationHint` from the *host's* region at room
+creation rather than letting the first `get()` decide. It does not make placement deterministic — hints remain
+best-effort, and there is no hint that can conjure a colo in South America, Africa, India or the Middle East,
+because none exists.
 
 **Mitigations if Option B is chosen and the playerbase does go global:** a second Node instance in another
 region joined to the same tunnel, with room-id → region pinning; or switch to Option A at that point, since
@@ -686,9 +774,11 @@ except on Workers it happens every time you change a variable.
 | Connections per instance | 32,768 | OS limits, far beyond 4 |
 | 10 KB snapshot | In-memory instance var, free | Same |
 | Seat map | `serializeAttachment`, ≤16 KB | Plain object |
-| Placement | Near first client; `locationHint` once, best-effort; never relocates | One fixed city, forever |
-| Regional rooms | **Wins** — lands near the players | Loses if players aren't near the box |
+| Placement | Nearest of **32** colos (10.99% of PoPs); `locationHint` once, best-effort; never relocates | One fixed city, forever |
+| Regional rooms | Wins across continents; ~single-digit ms within one | Loses if players aren't near the box |
 | Split rooms | Coin-flip on join order | Predictably mediocre |
+| Reproducible placement | **No** — 67% of colos split across ≥2 hosts | Yes |
+| South America / Africa / India / Middle East | **No colo exists** — lands on another continent | Predictable |
 | Broadcast | `getWebSockets()` loop | `clients.forEach` loop |
 | Live logs | **Withheld until client disconnects** | `docker logs -f` |
 | Persisted logs | Workers Logs, 7-day retention | Whatever you want |
@@ -706,12 +796,21 @@ Stated explicitly, per the ticket's instruction not to guess. **Every Cloudflare
 load-bearing quotation in this document was verified against the live docs site** — what follows is what was
 *not*.
 
-1. **No RTT measurements.** The latency section reasons from Cloudflare's documented placement behaviour, not
-   from measurement. Actual figures for "EU client → DO in `enam`" vs "EU client → Tunnel origin in EU" were
-   not measured and are not in the docs. `https://where.durableobjects.live/` — referenced by Cloudflare's own
-   data-location page as the way to find where objects actually land — returns **403 and was not reachable**
-   even after the network policy was relaxed. **This is the one open question that could overturn the
-   recommendation**; if the playerbase is multi-continental, measure before choosing.
+1. **No steady-state RTT measurement.** Placement *is* now measured — `where.durableobjects.live` was
+   reachable after the policy was relaxed, and its data is used in [§3](#3-latency). But its `latency` column
+   **cannot be read as network RTT**: same-colo pairs report 38–80 ms (`EWR → EWR` 60 ms, `SIN → SIN` 38 ms),
+   which is only explicable as object-creation/cold-start time being included. The implied network deltas in
+   §3 are differences against that baseline, and are indicative, not authoritative. **Nobody has measured the
+   thing that actually matters: steady-state round-trip on an already-established WebSocket**, for a real
+   client against a DO versus against a Tunnel origin. That is a half-hour experiment with `wscat` and should
+   be run before any decision that hinges on tens of milliseconds. It is no longer likely to overturn the
+   recommendation — the placement data narrowed Option A's latency advantage rather than widening it — but it
+   is still the softest number in this document.
+   Also note the dataset is a **community project, not a Cloudflare product**; Cloudflare's data-location page
+   links to it, which is the whole of its standing. 4 of 555 pair measurements (0.7%) are visibly garbage
+   (`KTM → HKG` 4,205 ms, `RIC → IAD` 1,148 ms for a 170 km hop), so it is noisy at the tail. The structural
+   findings — 32 host colos, 10.99% coverage, 67% non-deterministic, no `sam`/`afr`/`me` colo — do not depend
+   on the latency column and are robust.
 2. **Cloudflare's WebSocket idle timeout for non-Enterprise plans has no published number** — the docs say
    only "a period of time", with custom values Enterprise-only. The 400 s client keep-alive and 900 s proxy
    idle limits *are* published. Both options need a heartbeat; the exact interval should be set empirically.
@@ -765,6 +864,7 @@ cross-checked verbatim against the live pages at `developers.cloudflare.com`.
 Non-Cloudflare-docs sources:
 
 - DO object-list API shape — [`cloudflare/cloudflare-go`](https://github.com/cloudflare/cloudflare-go) @ `main`, `durable_objects/namespaceobject.go`
+- Measured DO placement (32 host colos, 10.99% coverage, 67% non-deterministic, per-colo host map) — [`where.durableobjects.live/api/v3/data.json`](https://where.durableobjects.live/api/v3/data.json), pulled 2026-09-14; community-run ([source](https://github.com/helloimalastair/where-durableobjects-live)), linked from Cloudflare's data-location page
 - Droplet pricing — [digitalocean.com/pricing/droplets](https://www.digitalocean.com/pricing/droplets)
 - Cloud server specs (prices unavailable) — [hetzner.com/cloud/cost-optimized](https://www.hetzner.com/cloud/cost-optimized/)
 - Architecture context — jump-n-bump issues [#3](https://github.com/philipdzierzon/jump-n-bump/issues/3), [#6](https://github.com/philipdzierzon/jump-n-bump/issues/6), [#7](https://github.com/philipdzierzon/jump-n-bump/issues/7), [#23](https://github.com/philipdzierzon/jump-n-bump/issues/23)
