@@ -57,7 +57,7 @@ export function Renderer(canvas, img, level) {
     function resize_canvas() {
         var x_scale = window.innerWidth / level.image.width;
         var y_scale = window.innerHeight / level.image.height;
-        var new_scale = Math.floor(Math.min(x_scale, y_scale));
+        var new_scale = Math.max(1, Math.floor(Math.min(x_scale, y_scale)));
 
         if (canvas_scale != new_scale) {
             canvas_scale = new_scale;
