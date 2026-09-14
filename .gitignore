@@ -10,3 +10,4 @@ game/jnb.html
 /node_modules/
 /game/index.html
 /game/jump-n-bump.js
+.DS_Store
