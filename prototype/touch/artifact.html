@@ -1,0 +1,293 @@
+<title>JNB Touch Prototype</title>
+    <style type="text/css">
+        body, html { width: 100%; height: 100%; margin: 0; padding:0; overflow:hidden; }
+        canvas { margin:auto; border: 0px solid black; }
+        img { float:right; }
+        br { clear: both; }
+        body { color: #cccccc; background-color: black}
+        a { color: #bbbbbb; }
+        .resource { display:none; }
+        .top-bar { margin: 0 auto; }
+        .top-bar * { display: inline-block; text-align: center; }
+        .top-bar li { margin: 0 10px; }
+        .scores { margin-top: 50px; margin-bottom: 50px; }
+        .scores * { font-size: 32px; }
+        .scores th,td { padding: 8px; text-align: center; }
+        .centre-column { margin: 0 auto; max-width: 600px; }
+        .canvas-container { text-align: center; }
+    </style>
+    <img class="resource" id='level' src='levels/default/level.png' alt=""/>
+    <img class="resource" id='mask' src='levels/default/mask.png' alt=""/>
+    <img class="resource" id='objects' src='sprites/objects.png' alt=""/>
+    <img class="resource" id='numbers' src='sprites/numbers.png' alt=""/>
+    <img class="resource" id='rabbits' src='sprites/rabbit.png' alt=""/>
+    <div data-bind="visible: current_page() !== Page.Instructions" class="top-bar">
+        <button data-bind="visible: current_page() === Page.Game, click: current_game().pause" >Pause game (P)</button>
+        <button data-bind="visible: current_page() === Page.Scores, click: current_game().unpause">Unpause game (P)</button>
+        <ul>
+            <li>F11: full screen</li>
+            <li>M: toggle sound</li>
+            <li>P: toggle pause</li>
+            <li>1-4: toggle player 1-4</li>
+            <li>Alt + 1-4: toggle AI for player 1-4</li>
+            <li>Arrows: control player 1</li>
+            <li>WAD: control player 2</li>
+            <li>JIL: control player 3</li>
+            <li>NumPad: control player 4</li>
+        </ul>
+    </div>
+    <div data-bind="visible: current_page() === Page.Game" class="canvas-container">
+        <canvas id="screen" width="1200" height="768"></canvas>
+    </div>
+    <div data-bind="visible: current_page() == Page.Scores" class="centre-column">
+        <table data-bind="with: scores_viewmodel" class="scores">
+            <tr>
+                <!-- ko foreach: player_row -->
+                    <th data-bind="text: $data"></th>
+                <!-- /ko -->
+            </tr>
+            <tbody>
+                <!-- ko foreach: score_rows -->
+                    <tr>
+                        <th data-bind="text: $data[0]"></th>
+                        <!-- ko foreach: $data -->
+                            <!-- ko if: $index() != 0 -->
+                                <td data-bind="text: $data"></td>
+                            <!-- /ko -->
+                        <!-- /ko -->
+                    </tr>
+                <!-- /ko -->
+            </tbody>
+        </table>
+
+        <br />
+        
+    </div>
+    <div data-bind="visible: current_page() == Page.Instructions" class="centre-column">
+        <h2>Jump 'n' Bump</h2>
+        <img src="jbcircle.png" alt="small preview of the game"/>
+        <p>
+            This game is a HTML5 reimplementation of a <a href="https://github.com/fschulze/jumpnbump">open source</a> <a href="https://icculus.org/jumpnbump/">DOS classic</a>. As of July 2015, it is still in development.
+            Maybe you would like to take a look at the <a href="https://github.com/GrahamTheCoder/jump-n-bump">Source code</a>?
+        </p>
+    </div>
+    <div data-bind="visible: current_page() != Page.Game" class="centre-column">
+        <button data-bind="click: restart, disabled: loading_level">Start new game</button>
+        <h3>Load level:</h3>
+        <p>Load any of the levels found on <a href="http://www.brainchilddesign.com/games/jumpnbump/levels/levels1.html" target="_blank">Brainchild Design's website</a></p>
+        <input id="level_input" type="file" accept=".dat" data-bind="event: { change: load_level }" />
+        <br />
+    </div>
+<script type="text/javascript" src="jump-n-bump.js"></script>
+<!--
+  PROTOTYPE, throwaway. Question: what do the touch controls look like? (issue #9)
+  Three variants of the touch layer over the *real* game, switchable via ?variant=A|B|C.
+  Injected into the built game/index.html body by build.sh.
+-->
+<style>
+html, body { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; overscroll-behavior: none; }
+.top-bar { display: none !important; }            /* keyboard hints are noise on a phone */
+.canvas-container { position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center; }
+#screen { image-rendering: pixelated; width: 100vw; height: auto; }
+@media (min-aspect-ratio: 400/256) {              /* landscape: fit height instead */
+  .canvas-container { align-items: center; }
+  #screen { width: auto; height: 100dvh; }
+}
+#pt-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 10; font: 12px/1.4 system-ui, sans-serif; }
+#pt-art { position: absolute; inset: 0; }
+#pt-art .btn { position: absolute; border: 2px solid rgba(255,255,255,.55); border-radius: 50%;
+               background: rgba(255,255,255,.10); color: rgba(255,255,255,.7);
+               display: flex; align-items: center; justify-content: center; font-size: 28px; }
+#pt-art .btn.on { background: rgba(255,255,255,.35); }
+#pt-art .hint { position: absolute; background: rgba(255,255,255,.12); }
+#pt-art .anchor { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px;
+                  border: 2px dashed rgba(255,255,255,.5); border-radius: 50%; }
+#pt-hud { position: absolute; left: 6px; bottom: 6px; color: #fff; background: rgba(0,0,0,.55);
+          padding: 6px 8px; border-radius: 6px; white-space: pre; }
+#pt-hud b { display: inline-block; width: 22px; text-align: center; border-radius: 3px;
+            background: #333; color: #777; margin-right: 2px; }
+#pt-hud b.on { background: #3c3; color: #000; }
+#pt-bar { position: absolute; top: 4px; left: 50%; transform: translateX(-50%); pointer-events: auto;
+          display: flex; gap: 4px; align-items: center; background: rgba(0,0,0,.7); color: #fff;
+          padding: 4px 6px; border-radius: 999px; box-shadow: 0 2px 8px rgba(0,0,0,.6); }
+#pt-bar button { font: inherit; padding: 4px 10px; border: 0; border-radius: 999px;
+                 background: #eee; color: #111; }
+#pt-bar span { padding: 0 6px; }
+</style>
+
+<div id="pt-overlay">
+  <div id="pt-art"></div>
+  <div id="pt-bar">
+    <button id="pt-prev">◀</button><span id="pt-name"></span><button id="pt-next">▶</button>
+    <button id="pt-swap">swap hands</button>
+  </div>
+  <div id="pt-hud"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var KEY = { left: 37, right: 39, up: 38 };   // player 0's arrow keys (game.js:15)
+  var DEAD = 14;                               // px, variant B dead zone either side of the anchor
+
+  var VARIANTS = {
+    A: { name: "A invisible halves", read: readHalves, art: artHalves },
+    B: { name: "B thumb anchor",     read: readAnchor, art: artAnchor },
+    C: { name: "C visible buttons",  read: readButtons, art: artButtons }
+  };
+
+  var params = new URLSearchParams(location.search);
+  var variant = VARIANTS[(params.get("variant") || "A").toUpperCase()] ? (params.get("variant") || "A").toUpperCase() : "A";
+  var swapped = params.get("swap") === "1";
+  var state = { left: false, right: false, up: false };
+  var anchors = {};                            // touch identifier -> anchor x (variant B)
+  var stats = { combos: 0, maxTouches: 0 };
+  var art = document.getElementById("pt-art");
+  var hud = document.getElementById("pt-hud");
+
+  // --- plumbing: the game reads keys_pressed, fed by document.onkeydown/up (game_session.js:114) -----
+  function fire(down, code, alt) {
+    var h = down ? document.onkeydown : document.onkeyup;
+    if (h) h({ keyCode: code, altKey: !!alt });
+  }
+  function apply(next) {
+    ["left", "right", "up"].forEach(function (k) {
+      if (next[k] === state[k]) return;
+      if (k === "up" && next.up && (state.left || state.right)) stats.combos++;
+      state[k] = next[k];
+      fire(next[k], KEY[k]);
+    });
+  }
+  function playing() {
+    var c = document.querySelector(".canvas-container");
+    return c && c.style.display !== "none";
+  }
+
+  // --- geometry ------------------------------------------------------------------------------------
+  function W() { return window.innerWidth; }
+  function H() { return window.innerHeight; }
+  function isSteer(x) { return swapped ? x > W() / 2 : x < W() / 2; }
+  function steerLeftEdge() { return swapped ? W() / 2 : 0; }   // left edge of the steering half
+
+  function readHalves(touches) {
+    var r = { left: false, right: false, up: false };
+    touches.forEach(function (t) {
+      if (!isSteer(t.clientX)) { r.up = true; return; }
+      if (t.clientX < steerLeftEdge() + W() / 4) r.left = true; else r.right = true;
+    });
+    return r;
+  }
+
+  function readAnchor(touches) {
+    var r = { left: false, right: false, up: false }, live = {};
+    touches.forEach(function (t) {
+      live[t.identifier] = true;
+      if (!isSteer(t.clientX)) { r.up = true; return; }
+      if (anchors[t.identifier] === undefined) anchors[t.identifier] = t.clientX;
+      var dx = t.clientX - anchors[t.identifier];
+      if (dx < -DEAD) r.left = true; else if (dx > DEAD) r.right = true;
+    });
+    Object.keys(anchors).forEach(function (id) { if (!live[id]) delete anchors[id]; });
+    return r;
+  }
+
+  function buttons() {
+    // same size as jump; shrinks only on a screen too narrow for three of them
+    var pad = 24, r = Math.min(52, Math.floor((W() - 92) / 6)), y = H() - pad - r;
+    var outer = pad + r, inner = pad + 3 * r + 12;
+    // swapping moves the pair to the other side; ◀ stays to the left of ▶
+    var pair = swapped ? { left: W() - inner, right: W() - outer } : { left: outer, right: inner };
+    return { r: r, left: { x: pair.left, y: y }, right: { x: pair.right, y: y },
+             up: { x: swapped ? pad + r : W() - pad - r, y: y, r: r } };
+  }
+  function hit(t, b, r) { return Math.hypot(t.clientX - b.x, t.clientY - b.y) <= r; }
+  function readButtons(touches) {
+    var b = buttons(), r = { left: false, right: false, up: false };
+    touches.forEach(function (t) {
+      if (hit(t, b.left, b.r)) r.left = true;
+      else if (hit(t, b.right, b.r)) r.right = true;
+      else if (hit(t, b.up, b.up.r)) r.up = true;
+    });
+    return r;
+  }
+
+  // --- what each variant draws ---------------------------------------------------------------------
+  function artHalves() {   // invisible: one hairline so the split is learnable, nothing else
+    var x = steerLeftEdge() + W() / 4;
+    art.innerHTML = '<div class="hint" style="left:' + (x - 1) + 'px;top:0;width:2px;height:100%"></div>'
+      + '<div class="hint" style="left:' + (W() / 2 - 1) + 'px;top:0;width:2px;height:100%"></div>';
+  }
+  function artAnchor() {
+    art.innerHTML = Object.keys(anchors).map(function (id) {
+      return '<div class="anchor" style="left:' + anchors[id] + 'px;top:' + (H() - 90) + 'px"></div>';
+    }).join("");
+  }
+  function artButtons() {
+    var b = buttons();
+    function el(c, s, label, on) {
+      return '<div class="btn' + (on ? ' on' : '') + '" style="left:' + (c.x - s) + 'px;top:' + (c.y - s)
+        + 'px;width:' + 2 * s + 'px;height:' + 2 * s + 'px">' + label + '</div>';
+    }
+    art.innerHTML = el(b.left, b.r, "◀", state.left) + el(b.right, b.r, "▶", state.right)
+      + el(b.up, b.up.r, "▲", state.up);
+  }
+
+  function render() {
+    VARIANTS[variant].art();
+    document.getElementById("pt-name").textContent = VARIANTS[variant].name + (swapped ? " (swapped)" : "");
+    hud.innerHTML = '<b class="' + (state.left ? "on" : "") + '">L</b>'
+      + '<b class="' + (state.right ? "on" : "") + '">R</b>'
+      + '<b class="' + (state.up ? "on" : "") + '">U</b>'
+      + "  touch " + stats.maxTouches + "  jump-while-moving " + stats.combos;
+  }
+
+  // --- input ---------------------------------------------------------------------------------------
+  function onTouch(e) {
+    if (!playing()) return;
+    e.preventDefault();
+    var touches = Array.prototype.slice.call(e.touches);
+    stats.maxTouches = Math.max(stats.maxTouches, touches.length);
+    apply(VARIANTS[variant].read(touches));
+    render();
+  }
+  ["touchstart", "touchmove", "touchend", "touchcancel"].forEach(function (t) {
+    document.addEventListener(t, onTouch, { passive: false });
+  });
+  window.addEventListener("resize", render);
+
+  // --- switcher ------------------------------------------------------------------------------------
+  function go(v, s) {
+    apply({ left: false, right: false, up: false });
+    anchors = {};
+    variant = v; swapped = s;
+    params.set("variant", v); params.set("swap", s ? "1" : "0");
+    history.replaceState(null, "", "?" + params + location.hash);
+    render();
+  }
+  var keys = Object.keys(VARIANTS);
+  document.getElementById("pt-prev").onclick = function () { go(keys[(keys.indexOf(variant) + keys.length - 1) % keys.length], swapped); };
+  document.getElementById("pt-next").onclick = function () { go(keys[(keys.indexOf(variant) + 1) % keys.length], swapped); };
+  document.getElementById("pt-swap").onclick = function () { go(variant, !swapped); };
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") return;   // those are player 1
+    if (e.key === "[") document.getElementById("pt-prev").onclick();
+    if (e.key === "]") document.getElementById("pt-next").onclick();
+  });
+
+  // three AI opponents, so there is something to bump on a phone (alt+2/3 toggle AI, keyboard.js:26)
+  var started = false;
+  setInterval(function () {
+    if (started || !playing()) return;
+    started = true;
+    fire(false, 50, true); fire(false, 51, true);
+  }, 300);
+
+  render();
+
+  // exposed for prototype/touch/test.js; `module` is undefined in the browser
+  if (typeof module !== "undefined") module.exports = {
+    readHalves: readHalves, readAnchor: readAnchor, readButtons: readButtons, buttons: buttons,
+    setSwap: function (v) { swapped = v; }
+  };
+})();
+</script>
