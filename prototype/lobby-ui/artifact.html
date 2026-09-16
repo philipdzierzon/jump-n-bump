@@ -1,0 +1,501 @@
+<!-- PROTOTYPE, throwaway (issue #10). Three structurally different takes on the whole
+     room flow, switchable with ?variant=A|B|C&step=<key>&vp=<key>. No game code. -->
+<title>Room Flow Prototype</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --ground:#100f0d; --panel:#1b1815; --panel-2:#252019; --line:#37302a;
+  --ink:#ece5d8; --ink-2:#a2988a; --ink-3:#6f665c;
+  --amber:#f0a202; --amber-soft:#f0a20222; --warn:#e4572e; --ok:#7fb069;
+  --s0:#e4572e; --s1:#4c9be8; --s2:#e8c547; --s3:#b47ae0;
+  --disp:"Silkscreen",ui-monospace,monospace;
+  --body:"IBM Plex Sans",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--body);margin:0;
+  display:flex;flex-direction:column;min-height:100vh}
+
+/* ---- prototype chrome (deliberately not part of the design under review) ---- */
+.proto-head{padding-block:10px;padding-inline:16px;border-bottom:1px solid var(--line);
+  display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+.proto-head b{font-family:var(--disp);font-size:13px;letter-spacing:.5px;color:var(--amber)}
+.proto-head span{font-size:12px;color:var(--ink-3)}
+.proto-bar{position:sticky;bottom:0;background:var(--panel);border-top:1px solid var(--line);
+  padding-block:8px;padding-inline:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;z-index:50}
+.proto-bar button{font:inherit;font-size:12px;background:var(--panel-2);color:var(--ink);
+  border:1px solid var(--line);border-radius:4px;padding:5px 9px;cursor:pointer}
+.proto-bar button:hover{border-color:var(--amber)}
+.proto-bar button[aria-pressed="true"]{background:var(--amber);color:#1a1200;border-color:var(--amber);font-weight:600}
+.proto-bar .vname{font-family:var(--disp);font-size:12px;color:var(--amber);min-width:15ch}
+.proto-bar .grp{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.proto-bar .lbl{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+
+.stagewrap{flex:1;display:flex;flex-direction:column;align-items:center;padding-block:16px;padding-inline:16px;gap:12px}
+#stage{width:100%;max-width:1100px;flex:1;min-height:460px;background:var(--panel);
+  border:1px solid var(--line);overflow:auto;container-type:size;position:relative}
+#stage.vp-desktop{max-width:1000px;height:620px;flex:none}
+#stage.vp-portrait{max-width:390px;height:760px;flex:none}
+#stage.vp-landscape{max-width:780px;height:390px;flex:none}
+.notes{width:100%;max-width:1100px;font-size:12.5px;color:var(--ink-2);line-height:1.6}
+.notes b{color:var(--ink);font-weight:600}
+
+/* ---- shared atoms ---- */
+.scr{padding:18px;display:flex;flex-direction:column;gap:14px;min-height:100%}
+h1,h2,h3{margin:0;text-wrap:balance}
+.d1{font-family:var(--disp);font-size:26px;line-height:1.3;letter-spacing:.5px}
+.d2{font-family:var(--disp);font-size:15px;letter-spacing:.5px;color:var(--amber)}
+.eyebrow{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+.muted{color:var(--ink-2);font-size:13px;line-height:1.55}
+.rid{font-family:var(--mono);font-weight:500;letter-spacing:.22em}
+.btn{font:inherit;font-size:14px;background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
+  border-radius:3px;padding:10px 14px;cursor:pointer;text-align:center}
+.btn.pri{background:var(--amber);border-color:var(--amber);color:#1a1200;font-weight:600}
+.btn.big{font-family:var(--disp);font-size:14px;padding:16px 18px;letter-spacing:.5px}
+.btn.sm{padding:6px 9px;font-size:12px}
+.fld{font:inherit;background:#0c0b0a;color:var(--ink);border:1px solid var(--line);border-radius:3px;padding:9px 11px;width:100%}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.col{display:flex;flex-direction:column;gap:8px}
+.q{display:inline-block;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--amber);
+  border:1px dashed var(--amber);border-radius:99px;padding:2px 8px}
+.banner{background:var(--amber-soft);border-left:3px solid var(--amber);padding:10px 12px;font-size:13px;line-height:1.5}
+.banner b{color:var(--amber)}
+
+.seat{display:flex;gap:10px;align-items:center;padding:9px 11px;background:var(--panel-2);border:1px solid var(--line);border-radius:3px}
+.seat .sw{width:14px;height:14px;border-radius:2px;flex:none}
+.seat .who{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.seat .who em{font-style:normal;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seat .who small{font-size:10.5px;color:var(--ink-3);letter-spacing:.04em}
+.seat.empty{border-style:dashed;background:transparent;color:var(--ink-3)}
+.tag{font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:2px 6px;border-radius:2px;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+.tag.you{border-color:var(--amber);color:var(--amber)}
+.tag.ai{border-color:var(--ink-3)}
+.tag.rdy{border-color:var(--ok);color:var(--ok)}
+.tag.wait{border-color:var(--warn);color:var(--warn)}
+
+table.board{border-collapse:collapse;font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;width:100%}
+table.board th,table.board td{border:1px solid var(--line);padding:5px 6px;text-align:center}
+table.board th{color:var(--ink-2);font-weight:500}
+table.board td.self{color:var(--ink-3)}
+.boardwrap{overflow-x:auto}
+
+.cvs{aspect-ratio:400/256;width:100%;background:
+  linear-gradient(#1d2b3a,#16212c 62%,#20180f 62%,#2a2016);border:1px solid var(--line);
+  position:relative;image-rendering:pixelated;overflow:hidden}
+.cvs .bun{position:absolute;width:7%;aspect-ratio:1;border-radius:2px}
+.cvs .cap{position:absolute;left:6px;bottom:5px;font-family:var(--mono);font-size:10px;color:#ffffff55}
+.cvs .hud{position:absolute;left:6px;top:5px;display:flex;gap:7px;font-family:var(--disp);font-size:10px}
+
+.roomrow{display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:center;
+  padding:9px 11px;border:1px solid var(--line);border-radius:3px;background:var(--panel-2)}
+.roomrow .rid{font-size:13px}
+.roomrow .lv{font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.cfg{display:grid;grid-template-columns:1fr auto;gap:7px 12px;align-items:center;font-size:13px}
+.cfg .k{color:var(--ink-2)}
+.cfg .v{font-family:var(--mono);font-size:12.5px}
+.cfg .v.staged{color:var(--amber)}
+
+/* ---- A: kiosk ---- */
+.kiosk{align-items:center;justify-content:center;text-align:center}
+.kiosk .inner{width:100%;max-width:430px;display:flex;flex-direction:column;gap:14px;text-align:left}
+.kiosk .center{text-align:center}
+.codebox{display:flex;gap:6px;justify-content:center}
+.codebox span{width:44px;height:56px;border:1px solid var(--line);border-bottom:2px solid var(--amber);
+  display:grid;place-items:center;font-family:var(--disp);font-size:22px;background:#0c0b0a}
+.stepdots{display:flex;gap:6px;justify-content:center}
+.stepdots i{width:6px;height:6px;border-radius:99px;background:var(--line)}
+.stepdots i.on{background:var(--amber)}
+
+/* ---- B: table ---- */
+.tbl{display:flex;flex-direction:column;height:100%}
+.tbl .top{padding:12px 14px 0}
+.tbl .strip{flex:1;border-top:1px solid var(--line);margin-top:12px;padding:12px 14px;
+  display:flex;flex-direction:column;gap:12px;background:var(--panel-2)}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:-12px -14px 0;padding:0 14px}
+.tabs button{font:inherit;font-size:12px;background:none;border:0;border-bottom:2px solid transparent;
+  color:var(--ink-3);padding:9px 10px;cursor:pointer}
+.tabs button[aria-pressed="true"]{color:var(--amber);border-bottom-color:var(--amber)}
+.seatstrip{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+.seatstrip .seat{flex-direction:column;align-items:flex-start;gap:5px}
+.seatstrip .seat .who em{font-size:12.5px}
+
+/* ---- C: deck ---- */
+.deck{position:relative;height:100%;display:flex;overflow:hidden}
+.deck .bg{position:absolute;inset:0;display:grid;place-items:center;padding:8px}
+.deck .bg .cvs{max-height:100%;width:auto;height:100%;aspect-ratio:400/256}
+.deck .scrim{position:absolute;inset:0;background:#0c0b0acc}
+.deck .rail{position:relative;margin-left:auto;width:330px;background:var(--panel);
+  border-left:1px solid var(--line);padding:14px;display:flex;flex-direction:column;gap:12px;overflow:auto}
+.deck .rail .grab{display:none}
+.deck .rail h2{font-family:var(--disp);font-size:13px;color:var(--amber);letter-spacing:.5px}
+.deck .chips{display:flex;gap:6px;flex-wrap:wrap}
+
+@container (max-width:560px){
+  .deck{flex-direction:column}
+  .deck .rail{margin-left:0;margin-top:auto;width:100%;max-height:74%;border-left:0;
+    border-top:1px solid var(--line);border-radius:12px 12px 0 0}
+  .deck .rail .grab{display:block;width:38px;height:4px;border-radius:99px;background:var(--line);margin:0 auto 2px}
+  .seatstrip{grid-template-columns:repeat(2,1fr)}
+  .d1{font-size:21px}
+  .kiosk .inner{max-width:100%}
+  /* portrait: canvas pinned top, control band below (#9) */
+  .match{flex-direction:column}
+  .match .field{order:1;padding:10px 10px 0}
+  .match .field .cvs{width:100%;height:auto}
+  .match .bars{order:2;width:100%;flex-direction:row;align-items:center;
+    border-inline:0;border-top:1px solid var(--line)}
+  .match .ctl{flex-direction:row;flex-wrap:wrap}
+  .match .bars:first-child{margin-top:auto;border-top:1px solid var(--line)}
+}
+
+/* short viewport = phone landscape: pillarbox chrome from #9 */
+.match{height:100%;display:flex}
+.match .bars{width:115px;flex:none;background:var(--panel-2);border-inline:1px solid var(--line);
+  display:flex;flex-direction:column;justify-content:space-between;padding:10px 8px;gap:8px}
+.match .field{flex:1;display:grid;place-items:center;padding:6px;min-width:0}
+.match .field .cvs{height:100%;width:auto;max-width:100%}
+.match .touch{display:flex;gap:6px;justify-content:center}
+.match .touch b{width:38px;height:38px;border-radius:99px;border:1px solid var(--line);
+  display:grid;place-items:center;font-size:14px;color:var(--ink-2);background:#ffffff0a}
+.match .ctl{display:flex;flex-direction:column;gap:5px}
+.matchPortrait{display:flex;flex-direction:column;height:100%}
+.matchPortrait .band{margin-top:auto;background:var(--panel-2);border-top:1px solid var(--line);
+  padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+@media (prefers-reduced-motion:no-preference){.scr,.tbl,.deck{animation:fade .18s ease-out}}
+@keyframes fade{from{opacity:.3}to{opacity:1}}
+</style>
+
+<div class="proto-head">
+  <b>Room Flow Prototype</b>
+  <span>throwaway &mdash; issue #10 &middot; three structurally different takes on the same flow &middot; &larr;/&rarr; variant, &uarr;/&darr; step</span>
+</div>
+
+<div class="stagewrap">
+  <div id="stage"></div>
+  <div class="notes" id="notes"></div>
+</div>
+
+<div class="proto-bar">
+  <div class="grp">
+    <button id="prev" aria-label="previous variant">&larr;</button>
+    <span class="vname" id="vname"></span>
+    <button id="next" aria-label="next variant">&rarr;</button>
+  </div>
+  <div class="grp"><span class="lbl">step</span><span id="steps" class="grp"></span></div>
+  <div class="grp"><span class="lbl">viewport</span><span id="vps" class="grp"></span></div>
+</div>
+
+<script>
+const SEATS = [
+  {bunny:'Dott', c:'var(--s0)', name:'phil',  driver:'you',    scheme:'Arrows',  host:true,  ready:true},
+  {bunny:'Jiffy',c:'var(--s1)', name:'ella',  driver:'you',    scheme:'A D W',   host:false, ready:true},
+  {bunny:'Fizz', c:'var(--s2)', name:'kumo',  driver:'remote', scheme:'—',  host:false, ready:false},
+  {bunny:'Miji', c:'var(--s3)', name:'—',driver:'ai',     scheme:'—',  host:false, ready:true},
+];
+const ROOMS = [
+  {id:'BKZTQ', level:'Jungle Gym',  seats:'3/4', locked:false, phase:'in-game'},
+  {id:'PXVNR', level:'jumpbump',    seats:'1/4', locked:true,  phase:'lobby'},
+  {id:'HWDGS', level:'Bunny Hop 2', seats:'2/4', locked:false, phase:'lobby'},
+];
+const BOARD = [[0,4,2,1],[3,0,0,5],[1,2,0,0],[0,1,3,0]];
+
+const tag = (t,k='') => `<span class="tag ${k}">${t}</span>`;
+const q   = t => `<span class="q">open &middot; ${t}</span>`;
+
+function seat(s,i,{scheme=true,ready=true}={}){
+  return `<div class="seat">
+    <span class="sw" style="background:${s.c}"></span>
+    <span class="who"><em>${s.name==='—'?'<span style="color:var(--ink-3)">empty &rarr; AI</span>':s.name}</em>
+      <small>seat ${i} &middot; ${s.bunny}${scheme&&s.scheme!=='—'?' &middot; '+s.scheme:''}</small></span>
+    ${s.host?tag('host'):''}
+    ${s.driver==='you'?tag('you','you'):s.driver==='ai'?tag('ai','ai'):''}
+    ${ready?(s.ready?tag('ready','rdy'):tag('not ready','wait')):''}
+  </div>`;
+}
+const seatList = o => SEATS.map((s,i)=>seat(s,i,o)).join('');
+
+function board(){
+  const n = SEATS.map(s=>s.name==='—'?s.bunny:s.name);
+  return `<div class="boardwrap"><table class="board">
+    <tr><th>bumped &darr; / by &rarr;</th>${n.map(x=>`<th>${x}</th>`).join('')}<th>deaths</th></tr>
+    ${BOARD.map((row,i)=>`<tr><th>${n[i]}</th>${row.map((v,j)=>
+      `<td class="${i===j?'self':''}">${i===j?'—':v}</td>`).join('')}
+      <th>${row.reduce((a,b)=>a+b,0)}</th></tr>`).join('')}
+  </table></div>`;
+}
+function rooms(){
+  return ROOMS.map(r=>`<div class="roomrow">
+    <span class="rid">${r.id}</span>
+    <span class="lv">${r.level}${r.locked?' &middot; \u{1F512} password':''}</span>
+    <span class="tag">${r.phase}</span>
+    <span class="tag">${r.seats}</span>
+  </div>`).join('');
+}
+function canvas(hud=true,cap='400 × 256 canvas'){
+  const pos=[[18,64],[40,30],[66,70],[80,44]];
+  return `<div class="cvs">
+    ${hud?`<div class="hud">${SEATS.map(s=>`<span style="color:${s.c}">${s.bunny[0]}:3</span>`).join('')}</div>`:''}
+    ${pos.map((p,i)=>`<span class="bun" style="left:${p[0]}%;top:${p[1]}%;background:${SEATS[i].c}"></span>`).join('')}
+    <span class="cap">${cap}</span></div>`;
+}
+const cfgRows = staged => `<div class="cfg">
+  <span class="k">Level</span><span class="v ${staged?'staged':''}">${staged?'Jungle Gym *':'jumpbump.dat'}</span>
+  <span class="k">Win score</span><span class="v ${staged?'staged':''}">${staged?'10 *':'off (endless)'}</span>
+  <span class="k">Fill empty seats with AI</span><span class="v">on</span>
+  <span class="k">Password</span><span class="v">set &middot; applies now</span>
+  <span class="k">List publicly</span><span class="v">yes</span>
+  <span class="k">Gore / pogostick / jetpack / space / flies / blood</span><span class="v">defaults</span>
+</div>`;
+
+/* ---------------- A. Kiosk: one job per full screen ---------------- */
+const A = {
+  name:'A · Kiosk',
+  landing:()=>`<div class="scr kiosk"><div class="inner center col">
+    <div class="d1">JUMP &rsquo;N BUMP</div>
+    <p class="muted">Four bunnies. One goal: lagomorphic cranial domination.</p>
+    <button class="btn pri big">Create a room</button>
+    <button class="btn big">Join with a room code</button>
+    <div class="row" style="justify-content:center">
+      <button class="btn sm">Browse rooms</button>
+      <button class="btn sm">Quick match</button>
+      <button class="btn sm">Play offline</button>
+    </div></div></div>`,
+  join:()=>`<div class="scr kiosk"><div class="inner col">
+    <div class="stepdots"><i class="on"></i><i class="on"></i><i></i></div>
+    <div class="eyebrow">joining</div>
+    <div class="codebox">${'QMFTX'.split('').map(c=>`<span>${c}</span>`).join('')}</div>
+    <p class="muted center">This room needs a password.</p>
+    <input class="fld" id="a-pw" type="password" placeholder="Password" value="••••••">
+    <button class="btn pri">Continue</button>
+    <p class="muted center" style="font-size:12px">Wrong password and &ldquo;no such room&rdquo; give the same answer &mdash; <span class="rid">ROOM_UNAVAILABLE</span>.</p>
+    <hr style="border:0;border-top:1px solid var(--line);width:100%">
+    <div class="eyebrow">then: who is playing on this keyboard?</div>
+    <p class="muted">Press the jump key of each control scheme you want to use. No form &mdash; the keyboard is the form.</p>
+    <div class="col">
+      <div class="seat"><span class="sw" style="background:var(--s0)"></span>
+        <span class="who"><em>phil</em><small>Arrows &middot; pressed ↑</small></span>${tag('you','you')}</div>
+      <div class="seat"><span class="sw" style="background:var(--s1)"></span>
+        <span class="who"><em><input class="fld" id="a-n2" value="ella" style="padding:4px 6px"></em><small>A D W &middot; pressed W</small></span></div>
+      <div class="seat empty"><span class="who"><em>press <b>I</b> or <b>NumPad 8</b> to add another</em><small>up to 4 on this keyboard</small></span></div>
+    </div>
+    <button class="btn pri">Take the seats</button></div></div>`,
+  full:()=>`<div class="scr kiosk"><div class="inner center col">
+    <div class="d2">ROOM <span class="rid">QMFTX</span></div>
+    <div class="d1">All four seats taken</div>
+    <p class="muted">Spectating is out of scope, so there is nothing to watch. ${q('#10 — what does a 5th person get?')}</p>
+    <button class="btn pri">Wait here for a seat</button>
+    <p class="muted" style="font-size:12px">You&rsquo;ll drop in the moment someone leaves.</p>
+    <button class="btn">Browse other rooms</button></div></div>`,
+  browse:()=>`<div class="scr"><div class="eyebrow">public rooms</div>
+    <h2 class="d1" style="font-size:20px">3 rooms open</h2>
+    <div class="col">${rooms()}</div>
+    <div class="banner">Nothing you like? <b>Quick match</b> queues your whole keyboard together, seats and all. ${q('#14 owns the queue')}</div>
+    <div class="row"><button class="btn pri">Quick match</button><button class="btn">Create a room</button></div>
+    <p class="muted" style="font-size:12px">Columns and refresh behaviour belong to ${q('#15 public room list')}</p></div>`,
+  lobby:()=>`<div class="scr"><div class="row" style="justify-content:space-between">
+      <div><div class="eyebrow">lobby</div><div class="d2"><span class="rid">QMFTX</span> &middot; jumpbump.dat</div></div>
+      <button class="btn sm">Copy join link</button></div>
+    <div class="col">${seatList()}</div>
+    <div class="banner">Waiting on <b>kumo</b>. Ready is per keyboard, not per bunny &mdash; you readied both your seats at once.</div>
+    <div class="row"><button class="btn pri">Start now</button><button class="btn">Start in 10s anyway</button>
+      <span class="muted" style="font-size:12px">countdown length is a server setting</span></div>
+    <details><summary class="muted" style="cursor:pointer">Host settings</summary><div style="padding-top:10px">${cfgRows(false)}</div></details></div>`,
+  staged:()=>`<div class="scr"><div class="eyebrow">lobby &middot; host is changing things</div>
+    <div class="banner"><b>Host staged: level &rarr; Jungle Gym, win score &rarr; 10.</b><br>
+      Everyone&rsquo;s ready was cleared and the countdown stopped. Applies when the match starts.</div>
+    <div class="col">${SEATS.map((s,i)=>seat({...s,ready:s.driver==='ai'},i)).join('')}</div>
+    <div class="row"><button class="btn pri">Ready</button><span class="muted" style="font-size:12px">0 of 3 keyboards ready</span></div>
+    ${cfgRows(true)}</div>`,
+  game:()=>matchScreen('A'),
+  boardStep:()=>`<div class="scr"><div class="eyebrow">match over &middot; back in the lobby</div>
+    <h2 class="d1" style="font-size:20px">ella wins, 10 bumps</h2>
+    ${board()}
+    <div class="banner">This board stays up, read-only, until the next match starts &mdash; late arrivals see it too. It zeroes at <b>start</b>, not now.</div>
+    <div class="row"><button class="btn pri">Ready</button><button class="btn">Change settings</button><button class="btn">Leave</button></div></div>`,
+};
+
+/* ---------------- B. Table: the canvas never leaves the screen ---------------- */
+function B_shell(tab, body, cap){
+  return `<div class="tbl"><div class="top">${canvas(tab==='in-match', cap||'400 × 256 canvas')}</div>
+    <div class="strip"><div class="tabs">
+      ${['create','join','browse','room'].map(t=>
+        `<button aria-pressed="${t===tab}">${t}</button>`).join('')}
+    </div>${body}</div></div>`;
+}
+const B = {
+  name:'B · Table',
+  landing:()=>B_shell('join',`
+    <p class="muted">The game is always on the table. Everything else is the strip underneath it &mdash; the page never changes, only this panel does.</p>
+    <div class="row"><input class="fld" id="b-id" style="flex:1;min-width:120px" placeholder="ROOM CODE" value="QMFTX">
+      <button class="btn pri">Join</button></div>
+    <div class="row"><button class="btn sm">Create</button><button class="btn sm">Browse</button>
+      <button class="btn sm">Quick match</button><button class="btn sm">Offline</button></div>`,
+    'attract mode — AI bunnies playing'),
+  join:()=>B_shell('join',`
+    <div class="row" style="justify-content:space-between"><span class="d2"><span class="rid">QMFTX</span></span>${tag('password needed','wait')}</div>
+    <p class="muted">You can already see the level you&rsquo;re joining &mdash; that&rsquo;s the point of keeping the canvas up.</p>
+    <input class="fld" id="b-pw" type="password" placeholder="Password" value="••••••">
+    <div class="seatstrip">
+      <div class="seat"><span class="who"><em>phil</em><small>Arrows</small></span>${tag('you','you')}</div>
+      <div class="seat"><span class="who"><em>ella</em><small>A D W</small></span>${tag('you','you')}</div>
+      <div class="seat empty"><span class="who"><em>press J</em><small>to add</small></span></div>
+      <div class="seat empty"><span class="who"><em>press NumPad 8</em><small>to add</small></span></div>
+    </div>
+    <button class="btn pri">Enter room</button>`, 'the room’s level, before you join'),
+  full:()=>B_shell('join',`
+    <div class="row" style="justify-content:space-between"><span class="d2"><span class="rid">QMFTX</span></span>${tag('4 / 4 full','wait')}</div>
+    <p class="muted">You can watch the level, not the match &mdash; spectating is out of scope, so the canvas stays in attract mode. ${q('5th person behaviour')}</p>
+    <div class="row"><button class="btn pri">Queue for the next free seat</button><button class="btn">Browse</button></div>`,
+    'attract mode — not the live match'),
+  browse:()=>B_shell('browse',`${rooms()}
+    <div class="row"><button class="btn pri">Quick match</button><button class="btn">Create</button></div>
+    <p class="muted" style="font-size:12px">Hovering a room previews its level on the canvas above. ${q('#15 owns the columns')}</p>`,
+    'preview: Jungle Gym'),
+  lobby:()=>B_shell('room',`
+    <div class="row" style="justify-content:space-between">
+      <span class="d2"><span class="rid">QMFTX</span> &middot; lobby</span>
+      <span class="row"><button class="btn sm">Copy link</button><button class="btn sm">Settings</button></span></div>
+    <div class="seatstrip">${SEATS.map((s,i)=>seat(s,i,{scheme:true})).join('')}</div>
+    <div class="row"><button class="btn pri">Start now</button><button class="btn">Countdown (10s)</button>
+      <span class="muted" style="font-size:12px">2 of 3 keyboards ready</span></div>`,
+    'level preview — jumpbump.dat'),
+  staged:()=>B_shell('room',`
+    <div class="banner"><b>Host is staging changes.</b> Ready cleared, countdown cancelled.</div>
+    ${cfgRows(true)}
+    <div class="seatstrip">${SEATS.map((s,i)=>seat({...s,ready:false},i)).join('')}</div>
+    <button class="btn pri">Ready</button>`, 'preview switches to Jungle Gym as the host picks'),
+  game:()=>matchScreen('B'),
+  boardStep:()=>B_shell('room',`
+    <div class="d2">Final board &mdash; ella wins</div>
+    ${board()}
+    <p class="muted" style="font-size:12px">In-match this same table is the local <b>P</b> overlay, drawn over a still-running sim.</p>
+    <div class="row"><button class="btn pri">Ready</button><button class="btn">Settings</button><button class="btn">Leave</button></div>`,
+    'the level, still there'),
+};
+
+/* ---------------- C. Deck: the game is the page, everything else is a sheet ------- */
+function C_shell(title, body, scrim=true, chips=''){
+  return `<div class="deck">
+    <div class="bg">${canvas(!scrim)}</div>${scrim?'<div class="scrim"></div>':''}
+    <div class="rail"><span class="grab"></span>
+      <h2>${title}</h2>${chips?`<div class="chips">${chips}</div>`:''}${body}</div></div>`;
+}
+const C = {
+  name:'C · Deck',
+  landing:()=>C_shell('JUMP ’N BUMP',`
+    <p class="muted">A demo match is already running behind this sheet. Nothing is ever a separate page &mdash; the sheet slides up from the bottom on a phone, sits as a rail on a desktop.</p>
+    <input class="fld" id="c-id" placeholder="ROOM CODE" value="">
+    <button class="btn pri">Join</button>
+    <button class="btn">Create a room</button>
+    <div class="chips"><button class="btn sm">Browse</button><button class="btn sm">Quick match</button><button class="btn sm">Offline</button></div>`, false),
+  join:()=>C_shell('Room QMFTX',`
+    ${tag('password needed','wait')}
+    <input class="fld" id="c-pw" type="password" placeholder="Password" value="••••••">
+    <p class="muted">Add a player by pressing that scheme&rsquo;s jump key. The sheet grows a row per press.</p>
+    <div class="col">
+      <div class="seat"><span class="sw" style="background:var(--s0)"></span><span class="who"><em>phil</em><small>Arrows</small></span>${tag('you','you')}</div>
+      <div class="seat"><span class="sw" style="background:var(--s1)"></span><span class="who"><em>ella</em><small>A D W</small></span>${tag('you','you')}</div>
+      <div class="seat empty"><span class="who"><em>press J / NumPad 8</em><small>to add a third</small></span></div>
+    </div>
+    <button class="btn pri">Enter</button>`),
+  full:()=>C_shell('Room is full',`
+    <p class="muted">Four of four. No spectating, so there is nothing behind this sheet worth showing &mdash; it dims to the level art. ${q('5th person behaviour')}</p>
+    <button class="btn pri">Queue for a seat</button><button class="btn">Browse rooms</button>`),
+  browse:()=>C_shell('Rooms', `${rooms()}<button class="btn pri">Quick match</button>
+    <p class="muted" style="font-size:12px">${q('#15 public room list')} ${q('#14 matchmaking')}</p>`),
+  lobby:()=>C_shell('Lobby · QMFTX', `
+    <div class="col">${seatList()}</div>
+    <button class="btn pri">Start now</button>
+    <div class="row"><button class="btn sm">Countdown 10s</button><button class="btn sm">Settings</button><button class="btn sm">Copy link</button></div>
+    <p class="muted" style="font-size:12px">Drag the sheet down to watch the level while you wait.</p>`, false),
+  staged:()=>C_shell('Lobby · changes pending', `
+    <div class="banner"><b>Host is restaging.</b> Ready cleared, countdown cancelled.</div>
+    ${cfgRows(true)}
+    <button class="btn pri">Ready</button>`, false,
+    tag('level → Jungle Gym','wait')+tag('win score → 10','wait')),
+  game:()=>matchScreen('C'),
+  boardStep:()=>C_shell('Final board', `${board()}
+    <p class="muted" style="font-size:12px">Same sheet, same place, whether it is the end-of-match board or the local <b>P</b> overlay mid-match.</p>
+    <div class="row"><button class="btn pri">Ready</button><button class="btn">Leave</button></div>`, true),
+};
+
+/* in-match chrome is a shared question (#9 handed it here), so all three share a shape
+   and differ only in what sits in the bars */
+function matchScreen(v){
+  const ctl = {
+    A:['Scoreboard (P)','Settings','Back to lobby','Leave'],
+    B:['Scoreboard (P)','Settings','Lobby','Leave'],
+    C:['☰ Sheet','Scoreboard','Leave'],
+  }[v];
+  const bar = side => `<div class="bars">
+    ${side==='l'?`<div class="ctl">${ctl.map(c=>`<button class="btn sm">${c}</button>`).join('')}</div>
+       <div class="touch"><b>◀</b><b>▶</b></div>`
+      :`<div class="ctl"><span class="eyebrow">QMFTX</span><span class="muted" style="font-size:11px">4 seats · tick 3120</span></div>
+        <div class="touch"><b>▲</b></div>`}</div>`;
+  return `<div class="match">${bar('l')}<div class="field">${canvas(true,'landscape: pillarboxed, canvas never covered')}</div>${bar('r')}</div>`;
+}
+
+const VARIANTS = {A,B,C};
+const STEPS = [
+  ['landing','Landing'], ['join','Join link'], ['full','Room full'], ['browse','Browse'],
+  ['lobby','Lobby'], ['staged','Config staged'], ['game','In-match'], ['boardStep','Scoreboard'],
+];
+const VPS = [['fit','Fit'],['desktop','Desktop'],['portrait','Phone ↑'],['landscape','Phone →']];
+const NOTE = {
+  landing:'Does the first screen make <b>join a room</b> as cheap as <b>create</b>? A shared link is the main way people arrive.',
+  join:'<b>Password on a join link</b>, and <b>several usernames without a form</b>: each variant answers by listening for a keypress on the scheme instead of asking for one more text field.',
+  full:'<b>Room full.</b> Spectating is out of scope, so the only honest options are queue or leave. Still an open question.',
+  browse:'The public room list and quick match live in other tickets &mdash; here the only question is where they sit in the flow.',
+  lobby:'Ready is per keyboard (#21), the countdown length is a server setting to render, and AI-filled seats are implicitly ready.',
+  staged:'<b>Staged config seen by everyone else.</b> Readiness clearing has to read as intentional, not as a bug.',
+  game:'In-match chrome handed over from #9: landscape pillarbox bars, host-sized and player-sized sets without relayout. Switch to <b>Phone →</b>.',
+  boardStep:'The final board rides into the lobby read-only; the same table is the local <b>P</b> overlay mid-match.',
+};
+
+const p = new URLSearchParams(location.search);
+let vk = p.get('variant') || 'A', sk = p.get('step') || 'landing', vp = p.get('vp') || 'fit';
+if(!VARIANTS[vk]) vk='A';
+if(!STEPS.some(s=>s[0]===sk)) sk='landing';
+
+function render(){
+  const stage = document.getElementById('stage');
+  stage.className = 'vp-'+vp;
+  stage.innerHTML = VARIANTS[vk][sk]();
+  stage.scrollTop = 0;
+  document.getElementById('vname').textContent = VARIANTS[vk].name;
+  document.getElementById('notes').innerHTML = NOTE[sk];
+  document.getElementById('steps').innerHTML = STEPS.map(([k,l])=>
+    `<button data-step="${k}" aria-pressed="${k===sk}">${l}</button>`).join('');
+  document.getElementById('vps').innerHTML = VPS.map(([k,l])=>
+    `<button data-vp="${k}" aria-pressed="${k===vp}">${l}</button>`).join('');
+  history.replaceState(null,'','?variant='+vk+'&step='+sk+'&vp='+vp);
+}
+function cycle(d){
+  const ks = Object.keys(VARIANTS);
+  vk = ks[(ks.indexOf(vk)+d+ks.length)%ks.length]; render();
+}
+function cycleStep(d){
+  const i = STEPS.findIndex(s=>s[0]===sk);
+  sk = STEPS[(i+d+STEPS.length)%STEPS.length][0]; render();
+}
+document.getElementById('prev').onclick = ()=>cycle(-1);
+document.getElementById('next').onclick = ()=>cycle(1);
+document.addEventListener('click', e=>{
+  const b = e.target.closest('[data-step],[data-vp]');
+  if(!b) return;
+  if(b.dataset.step) sk = b.dataset.step; else vp = b.dataset.vp;
+  render();
+});
+document.addEventListener('keydown', e=>{
+  if(/^(INPUT|TEXTAREA)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+  if(e.key==='ArrowLeft') cycle(-1);
+  else if(e.key==='ArrowRight') cycle(1);
+  else if(e.key==='ArrowUp') cycleStep(-1);
+  else if(e.key==='ArrowDown') cycleStep(1);
+  else return;
+  e.preventDefault();
+});
+render();
+</script>

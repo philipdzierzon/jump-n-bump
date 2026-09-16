@@ -1,0 +1,11 @@
+services:
+  game:
+    build: .
+    restart: unless-stopped
+    networks: [jump-n-bump]
+
+# Joined by the cloudflared compose project as `external: true`; its Public
+# Hostname points at http://game:8080. No port is published on the host.
+networks:
+  jump-n-bump:
+    name: jump-n-bump
