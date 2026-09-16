@@ -4,17 +4,7 @@ import { SET_BAN_MAP } from "../game/level.js";
 
 export let player = [];
 
-export function Game(
-    movement,
-    ai,
-    animation,
-    renderer,
-    objects,
-    read_input,
-    level,
-    is_server,
-    rnd,
-) {
+export function Game(movement, ai, animation, renderer, objects, room, level, is_server, rnd) {
     "use strict";
     var next_time = 0;
     var playing = false;
@@ -49,14 +39,15 @@ export function Game(
         return new Date().getTime();
     }
 
-    // Who drives a seat: this client if `read_input` hands back a frame for it, the AI if
-    // nobody holds it (#32, #7). That one rule replaces the `alt+1-4` toggles -- four humans
-    // on one keyboard is a client holding four seats, and a seat it lets go is AI-filled.
-    // ponytail: AI-fill is unconditional here. upgrade path: room config can turn it off,
-    // and a seat nobody holds then goes `enabled = false` and the match runs short (#7).
+    // Who drives a seat: whoever the room delivers a frame for this tick, the AI if nobody
+    // does (#32, #7). Input reaches the simulation only through the room, so a local room
+    // and a networked one steer identically -- only the transport under the room differs
+    // (#16). That one rule also replaces the `alt+1-4` toggles: four humans on one keyboard
+    // is a client holding four seats, and a seat it lets go is AI-filled.
     function update_player_actions() {
+        var frames = room.step();
         for (var i = 0; i != player.length; ++i) {
-            var frame = read_input(i);
+            var frame = frames[i];
             player[i].ai = !frame;
             if (!frame) continue;
             player[i].action_left = frame.left;
