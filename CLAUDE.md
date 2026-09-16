@@ -5,8 +5,8 @@ then open `game/index.html` directly — offline play needs no server, and there
 so rendering, sound and input are verified manually: build, open, play.
 
 Online play needs the relay in `server/`, which has dependencies of its own: `npm ci` in
-`server/` once, then `node server/index.js` from that directory serves the built client and
-the WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
+`server/` once, then `node server/index.js` from anywhere serves the built client and the
+WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
 `Dockerfile` is how it actually ships.
 
 `npm test` runs two files. `test/replay.test.mjs` replays the simulation twice from one seed

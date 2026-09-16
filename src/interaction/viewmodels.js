@@ -83,24 +83,35 @@ function ViewModel() {
     this.room_error = ko.observable("");
 
     function connect(entry) {
-        // Leaving the room this client was in, if it was in one: a socket left open holds
-        // an empty room alive on the relay.
-        if (transport.close) transport.close();
+        var leaving = transport;
         var socket = new WebSocket_Transport(
             relay_url(),
             entry,
             function (joined) {
+                // Only once the new room is in: a refused join leaves this client in the
+                // room it already had, rather than in neither.
+                if (leaving.close) leaving.close();
                 transport = socket;
                 host = joined.host;
                 // The bare fragment is the only link ever generated: it stays out of the
                 // relay's HTTP logs and out of Referer (#8).
                 window.location.hash = joined.id;
                 self.room_id(joined.id);
-                self.room_error("");
+                // The host started before this client arrived, so there is nothing to
+                // join until the next match -- which this session picks up when it comes
+                // (#37, #40).
+                self.room_error(joined.started ? "match in progress, waiting" : "");
                 self.restart();
             },
             function (code) {
                 self.room_error(code);
+                // A socket that died under a live room leaves this client with no
+                // transport at all: falling back to a local one keeps the game playable
+                // without a reload. upgrade path: reconnect into the seat (#42).
+                if (code === "DISCONNECTED" && transport === socket) {
+                    transport = new Loopback_Transport();
+                    host = true;
+                }
             },
         );
     }

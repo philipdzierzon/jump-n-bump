@@ -46,6 +46,10 @@ export function Game_Session(level, config, muted, transport) {
     // simulation is built out of what the relay handed down rather than out of `config`
     // (#12, #34).
     room.on_start = function () {
+        // A host can start another match while this client is playing one: the outgoing
+        // pump loop would go on stepping the `player` array the new one replaces, and its
+        // music would go on playing.
+        if (game) game.pause();
         var rnd = make_rnd(room.seed);
         var settings = room.settings;
 

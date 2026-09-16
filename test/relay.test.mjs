@@ -92,6 +92,12 @@ assert.deepEqual(
     "the relay stamps the initial drivers rather than riding them on `start`",
 );
 
+// A client that follows the link after the host started is told so, rather than waiting on
+// a broadcast that already happened (#40).
+const late = await connect({ type: "join", id: created.joined.id });
+assert.equal(late.joined.started, true, "a room with a match running says so on join");
+late.socket.close();
+
 // Fan-out: every other client in the room, and never the sender -- a client schedules its
 // own frames when it sends them, which is what makes the delay one-way (#12).
 const sender = await connect({ type: "create", id: "ECHZX" });

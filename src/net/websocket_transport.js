@@ -6,8 +6,10 @@
 // before a match exists, and a ping is measurement, not a message that moves anything.
 export function WebSocket_Transport(url, entry, on_joined, on_error) {
     "use strict";
+    var self = this;
     var socket = new WebSocket(url);
     var listener = null;
+    var joined = false;
 
     socket.onopen = function () {
         // `create` with no id asks the relay to generate one; with an id it is the host's
@@ -24,10 +26,14 @@ export function WebSocket_Transport(url, entry, on_joined, on_error) {
                 socket.send(JSON.stringify({ type: "pong", at: msg.at }));
                 break;
             case "joined":
+                joined = true;
                 if (on_joined) on_joined(msg);
                 break;
             case "error":
                 if (on_error) on_error(msg.code);
+                // A refused handshake is the end of this socket: nothing else will ever
+                // come down it, and the relay would go on pinging it once a second.
+                if (!joined) self.close();
                 break;
             default:
                 if (listener) listener(msg);

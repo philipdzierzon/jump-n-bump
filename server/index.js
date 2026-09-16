@@ -9,6 +9,8 @@
 //
 // Rooms live in this process's memory. Ceiling: one process, and a restart drops every
 // room -- the same blast radius a reconnect has to handle anyway (#42).
+import { fileURLToPath } from "node:url";
+
 import express from "express";
 import { WebSocketServer } from "ws";
 
@@ -35,7 +37,14 @@ function create(client, msg) {
     // A host-chosen id is answered honestly when it is taken: this is the creator's own
     // id, not somebody else's room being probed (#8).
     if (rooms[id]) return send(client, { type: "error", code: "ID_TAKEN" });
-    rooms[id] = { id, password: msg.password || null, clients: new Set(), tick: 0, d: 2 };
+    rooms[id] = {
+        id,
+        password: msg.password || null,
+        clients: new Set(),
+        tick: 0,
+        d: 2,
+        started: false,
+    };
     console.log("room %s created", id);
     admit(client, rooms[id]);
 }
@@ -52,12 +61,17 @@ function join(client, msg) {
 
 function admit(client, room) {
     // ponytail: the first client in is the host and holds every seat, which is what one
-    // seat over a socket means. upgrade path: seats, a client token and host migration
-    // (#36), and a lobby to hold them (#37).
+    // seat over a socket means -- `held` is broadcast unfiltered, so a second client in
+    // the room drives all four seats too and the two desync on the first tick. upgrade
+    // path: seats, a client token and host migration (#36), and a lobby to hold them
+    // (#37).
     client.host = room.clients.size === 0;
     client.room = room;
     room.clients.add(client);
-    send(client, { type: "joined", id: room.id, host: client.host });
+    // `started` because `start` is a broadcast, not a replay: a client that follows the
+    // link after the host began is waiting for the next match, and would otherwise wait
+    // on a page that never says so. Joining the match in progress needs a snapshot (#40).
+    send(client, { type: "joined", id: room.id, host: client.host, started: room.started });
 }
 
 function leave(client) {
@@ -95,6 +109,7 @@ function relay(client, msg) {
             if (!client.host) return;
             room.tick = 0;
             room.d = input_delay(room);
+            room.started = true;
             broadcast(room, {
                 type: "start",
                 t: 0,
@@ -118,7 +133,11 @@ function relay(client, msg) {
                 });
             break;
         case "input":
-            room.tick = msg.t + 1;
+            // Monotonic, and a whole delay ahead of any client's real tick, since `t` is
+            // already stamped d into the future: stamping too late loses nothing, and
+            // letting a slower client drag it backwards would stamp a change for a tick a
+            // faster one has stepped past.
+            room.tick = Math.max(room.tick, msg.t + 1);
             // Every other client, never the sender: it scheduled its own frame when it
             // sent it, which is what makes the delay one-way (#12).
             broadcast(room, msg, client);
@@ -136,7 +155,14 @@ function relay(client, msg) {
 
 export function start_server(port = PORT) {
     const app = express();
-    app.use(express.static(process.env.CLIENT_DIR || "../game"));
+    // Resolved from this file rather than from the working directory: the image runs it
+    // from /app and a developer runs it from the repo root, and neither should have to
+    // know that.
+    app.use(
+        express.static(
+            process.env.CLIENT_DIR || fileURLToPath(new URL("../game", import.meta.url)),
+        ),
+    );
     app.get("/healthz", (_req, res) => res.type("text/plain").send("ok"));
 
     const server = app.listen(port, "0.0.0.0");
