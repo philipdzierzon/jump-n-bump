@@ -1,0 +1,5 @@
+#!/bin/sh
+# Whole repo, not just the staged files: it runs in under a second, and staged-only
+# checking needs a NUL-safe file list that xargs can't do portably. Installed by the
+# `prepare` script in package.json via core.hooksPath.
+exec npx prettier --check .

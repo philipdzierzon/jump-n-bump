@@ -16,6 +16,7 @@ jobs:
       # The simulation replays deterministically with no DOM, so it is checked
       # here rather than in a browser.
       - run: npm ci
+      - run: npm run format:check
       - run: npm test
       # Builds the client and runs it exactly as production does, so one
       # assertion run covers webpack, static serving and the WebSocket.

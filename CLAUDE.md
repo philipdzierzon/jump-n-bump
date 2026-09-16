@@ -47,3 +47,28 @@ the compromise, e.g.:
 
 `/ponytail-debt` harvests those into a ledger so a deferral can't quietly become permanent.
 The `code-review` skill reads this section as the repo's documented coding standards.
+
+### Formatting
+
+Prettier, pinned exact (patch releases change output, and a reformat-everything diff is
+not a CI failure anyone wants to read). `npm run format` writes, `npm run format:check`
+is the CI gate. There is no linter and no style debate: if Prettier accepts it, it ships.
+
+`.prettierrc` deviates from the defaults in two places only:
+
+- `tabWidth: 4` — the existing hand-port indentation, kept so the JS stays visually
+  line-for-line with `main.c` in the `jumpnbump/` tree.
+- `printWidth: 100` — the defaults' 80 rewraps ~200 lines of that port for no gain.
+
+JSON and YAML override back to 2 spaces: npm copies `package.json`'s indent into
+`package-lock.json`, so 4 there churns the entire lockfile on every install.
+
+`.githooks/pre-commit` blocks an unformatted commit. It is a two-line shell script, not
+husky — `npm install` runs a `prepare` script that points `core.hooksPath` at `.githooks`,
+which is all husky does. It checks the whole repo rather than the staged files: that takes
+under a second, so a WIP file you did not stage can block the commit. `git commit -n` skips
+it; CI does not.
+
+`.prettierignore` covers `game/` and `prototype/` (checked-in assets and build output)
+and `src/jnb.html` — Knockout markup with whitespace-sensitive bindings and no automated
+rendering check to catch a bad reflow. Format that one by hand.
