@@ -1,6 +1,4 @@
-import { number_gobs } from "../asset_data/number_gobs.js";
-
-export function Player_Pair(first, second, sfx, renderer, objects, img, settings) {
+export function Player_Pair(first, second, sfx, objects, settings) {
     "use strict";
 
     this.highest = function () {
@@ -71,11 +69,6 @@ export function Player_Pair(first, second, sfx, renderer, objects, img, settings
             sfx.death();
             killer.bumps++;
             killer.bumped[victim.player_index]++;
-            var s1 = killer.bumps % 100;
-            if (s1 % 10 == 0) {
-                renderer.add_leftovers(360, 34 + killer.player_index * 64, img.numbers, number_gobs[Math.floor(s1 / 10) % 10]);
-            }
-            renderer.add_leftovers(376, 34 + killer.player_index * 64, img.numbers, number_gobs[s1 % 10]);
         }
     }
 }

@@ -9,17 +9,18 @@ function Enum(obj) {
 }
 
 // Read once for the page, not once per match: settings belong to the room, and every
-// client in it must hold the same object (#5). Room config replaces these query
-// params when #3 lands; until then the URL is where a single-client room is configured.
-function read_room_settings() {
-    var q = new URLSearchParams(window.location.search);
+// client in it must hold the same object (#5).
+// ponytail: the URL is the only way to configure the one client there is. Upgrade path:
+// host-staged room config over the wire (#3), which retires these query params entirely.
+function read_url(q) {
     return {
         pogostick: q.get('pogostick') === '1',
         jetpack: q.get('jetpack') === '1',
         bunnies_in_space: q.get('space') === '1',
         flies_enabled: q.get('lordoftheflies') === '1',
         blood_is_thicker_than_water: q.get('bloodisthickerthanwater') === '1',
-        no_gore: q.get('nogore') === '1'
+        no_gore: q.get('nogore') === '1',
+        muted: q.get('nosound') === '1'
     };
 }
 
@@ -27,12 +28,18 @@ function ViewModel() {
     "use strict";
     var self = this;
     var loader = new Dat_Level_Loader();
-    var settings = read_room_settings();
-    var muted = new URLSearchParams(window.location.search).get('nosound') === '1';
+    var url = read_url(new URLSearchParams(window.location.search));
+    var muted = url.muted;
+    delete url.muted;
 
-    // A fresh seed per match; settings and mute are the page's, shared across matches.
+    // A fresh seed per match; the settings are the page's, shared across matches.
+    // ponytail: a local seed is the whole room while the room is one client. Upgrade
+    // path: the server hands the seed down in `start` (#12), and this line goes away.
     function new_session(level) {
-        return new Game_Session(level, { seed: Date.now() | 0, settings: settings, muted: muted });
+        // Stop the outgoing session first: its pump loop would go on stepping the
+        // `player` array the new one just replaced, and its music would go on playing.
+        if (self.current_game) self.current_game().pause();
+        return new Game_Session(level, { seed: Date.now() | 0, settings: url }, muted);
     }
 
     this.Page = Enum({ Instructions: 0, Game: 1, Scores: 2 });

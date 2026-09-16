@@ -1,9 +1,11 @@
 import { player } from "../game/game.js";
 import { env } from "../game/env.js";
 import { rabbit_gobs } from "../asset_data/rabbit_gobs.js";
+import { number_gobs } from "../asset_data/number_gobs.js";
 
 export function Renderer(canvas, img, level) {
     "use strict";
+    var self = this;
     var main = { num_pobs: 0, pobs: [] };
     var leftovers = { num_pobs: 0, pobs: [] };
     var canvas_scale = 1;
@@ -22,6 +24,13 @@ export function Renderer(canvas, img, level) {
     this.add_leftovers = function(x, y, image, gob) {
         leftovers.pobs[leftovers_written++ % MAX.LEFTOVERS] = { x: x, y: y, gob: gob, image: image };
         leftovers.num_pobs = Math.min(leftovers_written, MAX.LEFTOVERS);
+    }
+
+    // Pobs live for one tick. draw() used to clear them because it ran every tick;
+    // now that it runs once per catch-up batch, the tick has to clear its own or a
+    // deep batch stacks every intermediate frame's sprites and overruns MAX.POBS.
+    this.clear_pobs = function() {
+        main.num_pobs = 0;
     }
 
     this.add_pob = function(x, y, image, gob) {
@@ -51,12 +60,26 @@ export function Renderer(canvas, img, level) {
     }
 
     function draw_leftovers() {
+        // Oldest first: array order is not insertion order once the ring has wrapped,
+        // and a newer splat has to paint over an older one, not under it.
+        var oldest = leftovers_written - leftovers.num_pobs;
         for (var c1 = 0; c1 != leftovers.num_pobs; ++c1) {
-            var pob = leftovers.pobs[c1];
+            var pob = leftovers.pobs[(oldest + c1) % MAX.LEFTOVERS];
             put_pob(pob.x, pob.y, pob.gob, pob.image);
         }
     }
 
+
+    // Drawn from player state every frame rather than painted into `leftovers` on each
+    // kill (#13): the buffer is now a bounded ring, and a counter that is really a splat
+    // gets evicted by gore. Display caps at 99; the matrix holds the true number.
+    function draw_score(i) {
+        var score = Math.min(player[i].bumps, 99);
+        if (score >= 10) {
+            self.add_pob(360, 34 + i * 64, img.numbers, number_gobs[Math.floor(score / 10)]);
+        }
+        self.add_pob(376, 34 + i * 64, img.numbers, number_gobs[score % 10]);
+    }
 
     function resize_canvas() {
         var x_scale = window.innerWidth / level.image.width;
@@ -81,12 +104,12 @@ export function Renderer(canvas, img, level) {
         for (var i = 0; i < env.JNB_MAX_PLAYERS; i++) {
             if (player[i].enabled) {
                 this.add_pob(player[i].x.pos >> 16, player[i].y.pos >> 16, img.rabbits, rabbit_gobs[player[i].get_image() + i * 18]);
+                draw_score(i);
             }
         }
         draw_leftovers();
         draw_pobs();
 
         ctx.drawImage(level.mask, 0, 0);
-        main.num_pobs = 0;
     }
 };

@@ -8,6 +8,9 @@ export function make_rnd(seed) {
         s ^= s >>> 17;
         s ^= s << 5;
         s |= 0;
+        // ponytail: `%` biases the top of the range by at most 1 part in 2^32 per draw.
+        // Upgrade path: rejection-sample the remainder if a draw ever needs to be fair
+        // rather than merely identical on every client, which is all lockstep asks.
         return (s >>> 0) % max_value;
     };
 }

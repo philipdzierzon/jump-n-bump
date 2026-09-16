@@ -57,7 +57,7 @@ function input_log(seed) {
 	return log;
 }
 
-const no_renderer = { add_pob() { }, add_leftovers() { }, draw() { } };
+const no_renderer = { add_pob() { }, add_leftovers() { }, clear_pobs() { }, draw() { } };
 const no_sfx = { jump() { }, death() { }, spring() { }, splash() { }, fly() { }, music() { } };
 
 function replay(seed, log, settings = { no_gore: false }) {
@@ -65,7 +65,7 @@ function replay(seed, log, settings = { no_gore: false }) {
 	const objects = new Objects(rnd);
 	const keyboard = new Keyboard([]);
 	const game = new Game(
-		new Movement(no_renderer, {}, no_sfx, objects, settings, rnd),
+		new Movement(no_sfx, objects, settings, rnd),
 		new AI(keyboard),
 		new Animation(no_renderer, {}, objects, rnd),
 		no_renderer, objects, keyboard.key_pressed,
@@ -99,7 +99,9 @@ const renderer = new Renderer(
 for (let i = 0; i < 60; i++) renderer.add_leftovers(0, 0, i, {});
 renderer.draw();
 const splats = drawn.filter((image) => typeof image === "number");
-assert.deepEqual(splats.sort((a, b) => a - b), [...Array(50).keys()].map((i) => i + 10),
-	"the leftovers ring holds the newest 50 splats and no more");
+// Unsorted: the order is the assertion. The newest splat has to paint last, which the
+// ring only does if it is walked from its oldest entry rather than from index 0.
+assert.deepEqual(splats, [...Array(50).keys()].map((i) => i + 10),
+	"the leftovers ring holds the newest 50 splats, oldest painted first");
 
 console.log("OK replay is deterministic, headless, and the leftovers ring is bounded");

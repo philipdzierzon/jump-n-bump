@@ -64,6 +64,7 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
 
 
     function game_iteration() {
+        renderer.clear_pobs();
         steer_players();
         movement.collision_check();
         animation.update_object();

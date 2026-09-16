@@ -18,14 +18,14 @@ var Game_State = Enum({ Not_Started: 0, Playing: 1, Paused: 2 });
 
 // `config` is the match's shared state: the PRNG seed and the settings every client
 // must agree on. Settings are never read from this client's environment -- a differing
-// no_gore desyncs the RNG stream on the first kill (#5).
-export function Game_Session(level, config) {
+// no_gore desyncs the RNG stream on the first kill (#5). `muted` is not in it: it is
+// this client's preference and nobody else's business.
+export function Game_Session(level, config, muted) {
     "use strict";
     var self = this;
 
     var rnd = make_rnd(config.seed);
     var settings = config.settings;
-    var muted = config.muted;
 
     var canvas = document.getElementById('screen');
     var img = {
@@ -43,7 +43,7 @@ export function Game_Session(level, config) {
     var animation = new Animation(renderer, img, objects, rnd);
     this.sound_player = new Sound_Player(muted);
     var sfx = new Sfx(this.sound_player);
-    var movement = new Movement(renderer, img, sfx, objects, settings, rnd);
+    var movement = new Movement(sfx, objects, settings, rnd);
     var game = new Game(movement, ai, animation, renderer, objects, keyboard.key_pressed, level, true, rnd);
 
     this.scores = ko.observable([[]]);
