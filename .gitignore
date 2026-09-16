@@ -11,3 +11,5 @@ game/jnb.html
 /game/index.html
 /game/jump-n-bump.js
 .DS_Store
+server/node_modules
+.env

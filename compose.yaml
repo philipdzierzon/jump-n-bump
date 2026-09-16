@@ -1,0 +1,11 @@
+services:
+  game:
+    build: .
+    restart: unless-stopped
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # Cloudflare Zero Trust -> Networks -> Tunnels -> your tunnel -> token.
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
