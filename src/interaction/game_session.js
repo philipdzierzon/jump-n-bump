@@ -27,14 +27,13 @@ export function Game_Session(level, config, muted) {
     var rnd = make_rnd(config.seed);
     var settings = config.settings;
 
-    var canvas = document.getElementById('screen');
+    var canvas = document.getElementById("screen");
     var img = {
-        rabbits: document.getElementById('rabbits'),
-        objects: document.getElementById('objects'),
-        numbers: document.getElementById('numbers')    
+        rabbits: document.getElementById("rabbits"),
+        objects: document.getElementById("objects"),
+        numbers: document.getElementById("numbers"),
     };
-    
-    
+
     var renderer = new Renderer(canvas, img, level);
     var objects = new Objects(rnd);
     var key_action_mappings = [];
@@ -49,7 +48,9 @@ export function Game_Session(level, config, muted) {
     // ponytail: one local client that holds every seat, which is what hot-seat play is.
     // upgrade path: the room hands down the seats this client was actually given (#3).
     var held_seats = [0, 1, 2, 3];
-    var read_input = function (seat) { return keyboard.input_frame(held_seats.indexOf(seat)); };
+    var read_input = function (seat) {
+        return keyboard.input_frame(held_seats.indexOf(seat));
+    };
 
     var game = new Game(movement, ai, animation, renderer, objects, read_input, level, true, rnd);
 
@@ -60,26 +61,30 @@ export function Game_Session(level, config, muted) {
         self.game_state(Game_State.Paused);
         self.sound_player.set_muted(true);
         game.pause();
-        self.scores(player.map(function (p) { return p.bumped; }));
-    }
+        self.scores(
+            player.map(function (p) {
+                return p.bumped;
+            }),
+        );
+    };
     this.unpause = function () {
         self.game_state(Game_State.Playing);
         self.sound_player.set_muted(muted);
         game.start();
-    }
+    };
     this.start = function () {
         sfx.music();
         self.unpause();
-    }
+    };
 
     key_action_mappings["M"] = function () {
         if (self.game_state() === Game_State.Playing) {
             muted = !muted;
             self.sound_player.toggle_sound();
         }
-    }
+    };
     key_action_mappings["P"] = function () {
-        switch(self.game_state()) {
+        switch (self.game_state()) {
             case Game_State.Not_Started:
                 self.start();
                 break;
@@ -94,5 +99,4 @@ export function Game_Session(level, config, muted) {
 
     document.onkeydown = keyboard.onKeyDown;
     document.onkeyup = keyboard.onKeyUp;
-
 }

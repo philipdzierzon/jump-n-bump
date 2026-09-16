@@ -8,9 +8,9 @@ export function Sound_Player(muted) {
     var self = this;
     var sounds = {};
 
-    var sfx_extension = document.createElement('audio').canPlayType('audio/mpeg') ? 'mp3' : 'ogg';
+    var sfx_extension = document.createElement("audio").canPlayType("audio/mpeg") ? "mp3" : "ogg";
     for (var i = 0; i < SFX_NAMES.length; i++) {
-        var audio = document.createElement('audio');
+        var audio = document.createElement("audio");
         audio.src = "sound/" + SFX_NAMES[i] + "." + sfx_extension;
         audio.load();
         sounds[SFX_NAMES[i]] = audio;
@@ -20,7 +20,7 @@ export function Sound_Player(muted) {
         // A blocked autoplay rejects; it is not an error worth surfacing, but an
         // unhandled rejection per sound event is noise.
         var started = audio.play();
-        if (started) started.catch(function () { });
+        if (started) started.catch(function () {});
     }
 
     this.set_muted = function (val) {
@@ -30,7 +30,7 @@ export function Sound_Player(muted) {
             if (val) audio.pause();
             else if (audio.loop) play(audio);
         }
-    }
+    };
 
     this.toggle_sound = function () {
         self.set_muted(!muted);
@@ -42,4 +42,4 @@ export function Sound_Player(muted) {
         audio.currentTime = 0;
         if (!muted) play(audio);
     };
-};
+}

@@ -3,19 +3,19 @@ export function Player_Pair(first, second, sfx, objects, settings) {
 
     this.highest = function () {
         return first.y.pos < second.y.pos ? first : second;
-    }
+    };
 
     this.lowest = function () {
         return first === this.highest() ? second : first;
-    }
+    };
 
     this.leftmost = function () {
         return first.x.pos < second.x.pos ? first : second;
-    }
+    };
 
     this.rightmost = function () {
         return first == this.leftmost() ? second : first;
-    }
+    };
 
     this.collision_check = function () {
         if (first.enabled && second.enabled) {
@@ -27,21 +27,22 @@ export function Player_Pair(first, second, sfx, objects, settings) {
                 }
             }
         }
-    }
+    };
 
     function touching() {
-        return Math.abs(first.x.pos - second.x.pos) < 0xC0000 && Math.abs(first.y.pos - second.y.pos) < 0xC0000;
+        return (
+            Math.abs(first.x.pos - second.x.pos) < 0xc0000 &&
+            Math.abs(first.y.pos - second.y.pos) < 0xc0000
+        );
     }
 
     function not_same_height() {
-        return (Math.abs(first.y.pos - second.y.pos) >> 16) > 5;
+        return Math.abs(first.y.pos - second.y.pos) >> 16 > 5;
     }
 
     function repel_each_other(left_player, right_player) {
-        if (right_player.x.velocity > 0)
-            left_player.x.pos = right_player.x.pos - 0xC0000;
-        else if (left_player.x.velocity < 0)
-            right_player.x.pos = left_player.x.pos + 0xC0000;
+        if (right_player.x.velocity > 0) left_player.x.pos = right_player.x.pos - 0xc0000;
+        else if (left_player.x.velocity < 0) right_player.x.pos = left_player.x.pos + 0xc0000;
         else {
             left_player.x.pos -= left_player.x.velocity;
             right_player.x.pos -= right_player.x.velocity;
@@ -49,16 +50,13 @@ export function Player_Pair(first, second, sfx, objects, settings) {
         var l1 = left_player.x.velocity;
         left_player.x.velocity = right_player.x.velocity;
         right_player.x.velocity = l1;
-        if (right_player.x.velocity < 0)
-            right_player.x.velocity = -right_player.x.velocity;
-        if (left_player.x.velocity > 0)
-            left_player.x.velocity = -left_player.x.velocity;
+        if (right_player.x.velocity < 0) right_player.x.velocity = -right_player.x.velocity;
+        if (left_player.x.velocity > 0) left_player.x.velocity = -left_player.x.velocity;
     }
 
     function player_kill(killer, victim) {
         killer.y.velocity = -killer.y.velocity;
-        if (killer.y.velocity > -262144)
-            killer.y.velocity = -262144;
+        if (killer.y.velocity > -262144) killer.y.velocity = -262144;
         killer.jump_abort = true;
         victim.dead_flag = true;
         if (victim.anim != 6) {

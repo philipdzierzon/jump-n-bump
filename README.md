@@ -8,12 +8,9 @@ Play the game here: https://grahamthecoder.github.io/jump-n-bump/
 
 ## About
 
-
-
 ## Development
 
 1. First run: `npm install`
 1. To rebuild `npm run build`
 1. To rebuild whenever files change `npm run watch`
 1. Open `game/index.html` in a browser to play
-

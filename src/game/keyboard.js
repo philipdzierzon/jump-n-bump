@@ -3,10 +3,10 @@
 // the seats it holds, in join order -- so a client holding global seats 2 and 3 drives
 // them with schemes 0 and 1. Keycodes never reach a Player.
 export const CONTROL_SCHEMES = [
-    [37, 39, 38],    // left, right, up
-    [65, 68, 87],    // A, D, W
+    [37, 39, 38], // left, right, up
+    [65, 68, 87], // A, D, W
     [100, 102, 104], // numpad 4, 6, 8
-    [74, 76, 73]     // J, L, I
+    [74, 76, 73], // J, L, I
 ];
 
 export function Keyboard(key_function_mappings) {
@@ -22,17 +22,17 @@ export function Keyboard(key_function_mappings) {
         return {
             left: !!keys_pressed[keys[0]],
             right: !!keys_pressed[keys[1]],
-            up: !!keys_pressed[keys[2]]
+            up: !!keys_pressed[keys[2]],
         };
-    }
+    };
 
     this.onKeyDown = function (evt) {
         keys_pressed[evt.keyCode] = true;
-    }
+    };
 
     this.onKeyUp = function (evt) {
         keys_pressed[evt.keyCode] = false;
         var action = key_function_mappings[String.fromCharCode(evt.keyCode)];
         if (action != null) action();
-    }
+    };
 }

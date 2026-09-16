@@ -14,13 +14,13 @@ function Enum(obj) {
 // host-staged room config over the wire (#3), which retires these query params entirely.
 function read_url(q) {
     return {
-        pogostick: q.get('pogostick') === '1',
-        jetpack: q.get('jetpack') === '1',
-        bunnies_in_space: q.get('space') === '1',
-        flies_enabled: q.get('lordoftheflies') === '1',
-        blood_is_thicker_than_water: q.get('bloodisthickerthanwater') === '1',
-        no_gore: q.get('nogore') === '1',
-        muted: q.get('nosound') === '1'
+        pogostick: q.get("pogostick") === "1",
+        jetpack: q.get("jetpack") === "1",
+        bunnies_in_space: q.get("space") === "1",
+        flies_enabled: q.get("lordoftheflies") === "1",
+        blood_is_thicker_than_water: q.get("bloodisthickerthanwater") === "1",
+        no_gore: q.get("nogore") === "1",
+        muted: q.get("nosound") === "1",
     };
 }
 
@@ -57,7 +57,7 @@ function ViewModel() {
     this.restart = function () {
         self.current_game(new_session(self.current_level));
         self.current_game().start();
-    }
+    };
 
     this.load_level = function (self) {
         this.loading_level(true);
@@ -73,7 +73,7 @@ function ViewModel() {
 
             loader.load(file);
         }
-    }
-};
+    };
+}
 
 ko.applyBindings(new ViewModel());

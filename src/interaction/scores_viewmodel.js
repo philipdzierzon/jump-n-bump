@@ -9,7 +9,9 @@
 
     function row_sum(values) {
         if (values == undefined || values.length == 0) return 0;
-        return values.reduce(function (prev, cur) { return prev + cur; })
+        return values.reduce(function (prev, cur) {
+            return prev + cur;
+        });
     }
     function with_totals_row(score_grid) {
         if (score_grid == undefined || score_grid.length == 0) return 0;
@@ -20,7 +22,9 @@
         return score_grid.concat([totals_row]);
     }
     function column_sum(grid, col_index) {
-        return grid.reduce(function (prev, cur) { return prev + cur[col_index]; }, 0);
+        return grid.reduce(function (prev, cur) {
+            return prev + cur[col_index];
+        }, 0);
     }
     function with_row_sum(raw_score_row) {
         var row_total = row_sum(raw_score_row);

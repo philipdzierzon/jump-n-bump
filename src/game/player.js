@@ -37,15 +37,16 @@ export function Player(playerIndex, is_server, rnd) {
             if (this.frame >= env.animation_data.players[this.anim].num_frames) {
                 if (this.anim != 6)
                     this.frame = env.animation_data.players[this.anim].restart_frame;
-                else
-                    this.position_player(playerIndex);
+                else this.position_player(playerIndex);
             }
             this.frame_tick = 0;
         }
-    }
-    this.get_image = function () { return env.animation_data.players[this.anim].frame[this.frame].image + this.direction * 9; };
+    };
+    this.get_image = function () {
+        return env.animation_data.players[this.anim].frame[this.frame].image + this.direction * 9;
+    };
 
-    this.position_player = function(player_num) {
+    this.position_player = function (player_num) {
         var c1;
         var s1, s2;
 
@@ -53,12 +54,18 @@ export function Player(playerIndex, is_server, rnd) {
             while (1) {
                 s1 = rnd(LEVEL_WIDTH);
                 s2 = rnd(LEVEL_HEIGHT);
-                if (GET_BAN_MAP(s1, s2) == BAN_VOID && (GET_BAN_MAP(s1, s2 + 1) == BAN_SOLID || GET_BAN_MAP(s1, s2 + 1) == BAN_ICE))
+                if (
+                    GET_BAN_MAP(s1, s2) == BAN_VOID &&
+                    (GET_BAN_MAP(s1, s2 + 1) == BAN_SOLID || GET_BAN_MAP(s1, s2 + 1) == BAN_ICE)
+                )
                     break;
             }
             for (c1 = 0; c1 < env.JNB_MAX_PLAYERS; c1++) {
                 if (c1 != player_num && player[c1].enabled) {
-                    if (Math.abs((s1 << LEVEL_SCALE_FACTOR) - (player[c1].x.pos >> 16)) < 32 && Math.abs((s2 << LEVEL_SCALE_FACTOR) - (player[c1].y.pos >> 16)) < 32)
+                    if (
+                        Math.abs((s1 << LEVEL_SCALE_FACTOR) - (player[c1].x.pos >> 16)) < 32 &&
+                        Math.abs((s2 << LEVEL_SCALE_FACTOR) - (player[c1].y.pos >> 16)) < 32
+                    )
                         break;
                 }
             }
@@ -78,6 +85,5 @@ export function Player(playerIndex, is_server, rnd) {
                 break;
             }
         }
-
     };
-};
+}
