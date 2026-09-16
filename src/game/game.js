@@ -4,7 +4,17 @@ import { SET_BAN_MAP } from "../game/level.js";
 
 export let player = [];
 
-export function Game(movement, ai, animation, renderer, objects, read_input, level, is_server, rnd) {
+export function Game(
+    movement,
+    ai,
+    animation,
+    renderer,
+    objects,
+    read_input,
+    level,
+    is_server,
+    rnd,
+) {
     "use strict";
     var next_time = 0;
     var playing = false;
@@ -13,10 +23,10 @@ export function Game(movement, ai, animation, renderer, objects, read_input, lev
 
     function reset_players() {
         player = [
-        new Player(0, is_server, rnd),
-        new Player(1, is_server, rnd),
-        new Player(2, is_server, rnd),
-        new Player(3, is_server, rnd)
+            new Player(0, is_server, rnd),
+            new Player(1, is_server, rnd),
+            new Player(2, is_server, rnd),
+            new Player(3, is_server, rnd),
         ];
     }
 
@@ -69,7 +79,6 @@ export function Game(movement, ai, animation, renderer, objects, read_input, lev
         }
     }
 
-
     function game_iteration() {
         renderer.clear_pobs();
         steer_players();
@@ -86,7 +95,7 @@ export function Game(movement, ai, animation, renderer, objects, read_input, lev
             game_iteration();
             var now = timeGetTime();
             var time_diff = next_time - now;
-            next_time += (1000 / 60);
+            next_time += 1000 / 60;
 
             if (time_diff > 0) {
                 // We have time left, so the backlog is cleared: draw once for the whole
@@ -103,9 +112,9 @@ export function Game(movement, ai, animation, renderer, objects, read_input, lev
         next_time = timeGetTime() + 1000;
         playing = true;
         pump();
-    }
+    };
 
     this.pause = function () {
         playing = false;
-    }
+    };
 }

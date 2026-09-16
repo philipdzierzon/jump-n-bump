@@ -5,5 +5,5 @@ import { Animation_Data } from "../asset_data/animation_data.js";
 export const env = {
     JNB_MAX_PLAYERS: 4,
     MAX_OBJECTS: 200,
-    animation_data: new Animation_Data()
+    animation_data: new Animation_Data(),
 };

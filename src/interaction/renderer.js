@@ -9,7 +9,7 @@ export function Renderer(canvas, img, level) {
     var main = { num_pobs: 0, pobs: [] };
     var leftovers = { num_pobs: 0, pobs: [] };
     var canvas_scale = 1;
-    var ctx = canvas.getContext('2d');
+    var ctx = canvas.getContext("2d");
 
     var MAX = {
         POBS: 200,
@@ -21,25 +21,30 @@ export function Renderer(canvas, img, level) {
     // for the length of a match. Overwriting oldest-first keeps the newest ones (#30).
     var leftovers_written = 0;
 
-    this.add_leftovers = function(x, y, image, gob) {
-        leftovers.pobs[leftovers_written++ % MAX.LEFTOVERS] = { x: x, y: y, gob: gob, image: image };
+    this.add_leftovers = function (x, y, image, gob) {
+        leftovers.pobs[leftovers_written++ % MAX.LEFTOVERS] = {
+            x: x,
+            y: y,
+            gob: gob,
+            image: image,
+        };
         leftovers.num_pobs = Math.min(leftovers_written, MAX.LEFTOVERS);
-    }
+    };
 
     // Pobs live for one tick. draw() used to clear them because it ran every tick;
     // now that it runs once per catch-up batch, the tick has to clear its own or a
     // deep batch stacks every intermediate frame's sprites and overruns MAX.POBS.
-    this.clear_pobs = function() {
+    this.clear_pobs = function () {
         main.num_pobs = 0;
-    }
+    };
 
-    this.add_pob = function(x, y, image, gob) {
+    this.add_pob = function (x, y, image, gob) {
         if (main.num_pobs >= MAX.POBS) {
             return;
         }
         main.pobs[main.num_pobs] = { x: x, y: y, gob: gob, image: image };
         main.num_pobs++;
-    }
+    };
 
     function put_pob(x, y, gob, img) {
         var sx, sy, sw, sh, hs_x, hs_y;
@@ -68,7 +73,6 @@ export function Renderer(canvas, img, level) {
             put_pob(pob.x, pob.y, pob.gob, pob.image);
         }
     }
-
 
     // Drawn from player state every frame rather than painted into `leftovers` on each
     // kill (#13): the buffer is now a bounded ring, and a counter that is really a splat
@@ -103,7 +107,12 @@ export function Renderer(canvas, img, level) {
 
         for (var i = 0; i < env.JNB_MAX_PLAYERS; i++) {
             if (player[i].enabled) {
-                this.add_pob(player[i].x.pos >> 16, player[i].y.pos >> 16, img.rabbits, rabbit_gobs[player[i].get_image() + i * 18]);
+                this.add_pob(
+                    player[i].x.pos >> 16,
+                    player[i].y.pos >> 16,
+                    img.rabbits,
+                    rabbit_gobs[player[i].get_image() + i * 18],
+                );
                 draw_score(i);
             }
         }
@@ -111,5 +120,5 @@ export function Renderer(canvas, img, level) {
         draw_pobs();
 
         ctx.drawImage(level.mask, 0, 0);
-    }
-};
+    };
+}

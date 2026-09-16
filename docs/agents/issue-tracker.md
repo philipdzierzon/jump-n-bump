@@ -5,7 +5,7 @@ Issues and specs for this repo live as GitHub issues in
 Use the `gh` CLI for all operations.
 
 **Scope note.** This clone is one of two in the `sbx/jumpnbump` workspace. The sibling
-`jumpnbump/` clone (the original C/SDL game) is *reference only* — it lives in its own
+`jumpnbump/` clone (the original C/SDL game) is _reference only_ — it lives in its own
 repo and is not tracked here. Issues about the C original belong there, not in this
 tracker.
 

@@ -21,12 +21,16 @@ export function default_ban_map() {
         "2222222214000001333111" +
         "1111111111111111111111";
     const ban_map = [];
-    for (let i=0; i != LEVEL_WIDTH * LEVEL_HEIGHT; ++i) {
+    for (let i = 0; i != LEVEL_WIDTH * LEVEL_HEIGHT; ++i) {
         ban_map[i] = levelmap[i] * 1; //Convert to integer
     }
     return ban_map;
 }
 
 export function create_default_level() {
-    return { ban_map: default_ban_map(), image: document.getElementById('level'), mask: document.getElementById('mask') };
+    return {
+        ban_map: default_ban_map(),
+        image: document.getElementById("level"),
+        mask: document.getElementById("mask"),
+    };
 }

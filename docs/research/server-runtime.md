@@ -34,13 +34,13 @@ both things a Durable Object structurally cannot do, and a Node process does for
 
 The three findings that decide it, in order of weight:
 
-1. **You cannot watch a live room on Workers.** `console.log` inside a WebSocket handler is *withheld until
-   the client disconnects*. Debugging a desync means debugging a room that has already ended.
+1. **You cannot watch a live room on Workers.** `console.log` inside a WebSocket handler is _withheld until
+   the client disconnects_. Debugging a desync means debugging a room that has already ended.
 2. **You cannot change a deployment env var without killing every live room.** Setting a var is a new
    deployment; a new deployment restarts every Durable Object; restarting a DO terminates its WebSockets.
    Every room in flight dies so you can widen a grace period by 200 ms.
 3. **Hibernation does not apply during a match**, so the duration bill is a flat floor you cannot optimise
-   away. It's a *small* floor (~$0.006/room-hour), but it means the DO's headline cost advantage —
+   away. It's a _small_ floor (~$0.006/room-hour), but it means the DO's headline cost advantage —
    "you only pay when something happens" — is exactly the advantage this workload cannot claim.
 
 Against that, DOs win one real thing: **per-room placement**. A DO lands near its players; a Docker box is
@@ -85,7 +85,7 @@ in the `Active, in-memory` state for the entire duration of the match, and is bi
 it.**
 
 This is not a mitigable fact. It does not depend on message size, on how efficient the handler is, or on
-whether you batch. Even at *one message per second* the DO never hibernates. The only thing that stops the
+whether you batch. Even at _one message per second_ the DO never hibernates. The only thing that stops the
 clock is the room going genuinely quiet for 10 s.
 
 The billing rule confirming it:
@@ -102,7 +102,7 @@ The billing rule confirming it:
 > — `src/content/partials/durable-objects/durable-objects-pricing.mdx`, footnotes 4 and 5
 
 **So: can a 60 Hz relay use DOs at all without ruinous duration billing?** Yes — but read the sentence
-carefully. Hibernation buys you *nothing during a match*. It buys you the **lobby**: a room sitting in lobby
+carefully. Hibernation buys you _nothing during a match_. It buys you the **lobby**: a room sitting in lobby
 with nobody typing goes quiet, hibernates after 10 s, and costs zero while its four WebSockets stay connected.
 That is a real saving if lobby time is a meaningful fraction of room lifetime, and it is the reason to use
 `ctx.acceptWebSocket()` rather than `ws.accept()` even though the match phase ignores it.
@@ -116,17 +116,19 @@ Ruinous only relative to a box you already own, and only once room-hours accumul
 Two free wins even though the match phase never hibernates:
 
 - `setWebSocketAutoResponse()` answers a fixed ping with a fixed pong **without waking the object**:
-  > "If a request is received matching the provided request then the auto-response will be returned without
-  > waking WebSockets in hibernation and incurring billable duration charges."
-  > — `src/content/docs/durable-objects/api/state.mdx`
 
-  Request and response are capped at 2,048 characters each. This handles lobby keepalive for free. It is
-  **not** usable for RTT probing that the relay needs to see, since the DO never learns about it beyond
-  `getWebSocketAutoResponseTimestamp()`.
+    > "If a request is received matching the provided request then the auto-response will be returned without
+    > waking WebSockets in hibernation and incurring billable duration charges."
+    > — `src/content/docs/durable-objects/api/state.mdx`
+
+    Request and response are capped at 2,048 characters each. This handles lobby keepalive for free. It is
+    **not** usable for RTT probing that the relay needs to see, since the DO never learns about it beyond
+    `getWebSocketAutoResponseTimestamp()`.
+
 - WebSocket protocol pings are handled by the runtime and never wake the object:
-  > "Incoming ping frames receive automatic pong responses. Ping/pong handling does not interrupt hibernation.
-  > The `webSocketMessage` handler is not called for control frames."
-  > — `src/content/docs/durable-objects/best-practices/websockets.mdx`
+    > "Incoming ping frames receive automatic pong responses. Ping/pong handling does not interrupt hibernation.
+    > The `webSocketMessage` handler is not called for control frames."
+    > — `src/content/docs/durable-objects/best-practices/websockets.mdx`
 
 ### Connection limit per DO
 
@@ -216,12 +218,12 @@ Numbers from `src/content/partials/durable-objects/durable-objects-pricing.mdx` 
 `src/content/docs/workers/platform/pricing.mdx`, rendered as
 `developers.cloudflare.com/durable-objects/platform/pricing/` and `…/workers/platform/pricing/`.
 
-| Dimension | Included / month | Overage |
-| --- | --- | --- |
-| DO requests | 1,000,000 | $0.15 / million |
-| DO duration | 400,000 GB-s | $12.50 / million GB-s |
-| Worker requests | 10,000,000 | $0.30 / million |
-| Account minimum | — | $5.00 / month |
+| Dimension       | Included / month | Overage               |
+| --------------- | ---------------- | --------------------- |
+| DO requests     | 1,000,000        | $0.15 / million       |
+| DO duration     | 400,000 GB-s     | $12.50 / million GB-s |
+| Worker requests | 10,000,000       | $0.30 / million       |
+| Account minimum | —                | $5.00 / month         |
 
 Three billing rules that do all the work:
 
@@ -241,12 +243,13 @@ Worst case, from #6: 4 clients × 60 Hz, every seat sending every tick.
 
 - Incoming messages into the DO: **240 /s/room**
 - Outgoing: 4 frames/tick = 240 /s — **free**
-- Snapshot: ~10 KB every 2 s from one client = 0.5 /s — noise in the request count, and message *size* is not
+- Snapshot: ~10 KB every 2 s from one client = 0.5 /s — noise in the request count, and message _size_ is not
   a DO billing dimension
 
 ### One room, 4 clients, 15 minutes (900 s)
 
 **Requests**
+
 ```
 incoming WS messages   240 /s × 900 s                = 216,000
 billable (20:1)        216,000 / 20                  =  10,800
@@ -255,6 +258,7 @@ cost                   10,804 × $0.15 / 1,000,000    =  $0.00162
 ```
 
 **Duration**
+
 ```
 object-seconds         900 s   (no hibernation — never 10 s idle)
 GB-s                   900 × 128 MB / 1000 MB        =     115.2 GB-s
@@ -276,6 +280,7 @@ Per room-hour: **$0.0122** ($0.00648 requests + $0.00576 duration).
 Two monthly framings, because "50 concurrent" is a peak, not a duty cycle:
 
 **(a) 50 rooms busy 4 h/day, every day** — 6,000 room-hours/month
+
 ```
 Duration   6,000 × 460.8 GB-s        = 2,764,800 GB-s
            − 400,000 included        = 2,364,800 → round up 3,000,000 × $12.50/M = $ 37.50
@@ -288,6 +293,7 @@ Minimum                                                                         
 ```
 
 **(b) 50 rooms pinned 24/7** (the pessimistic bound) — 36,000 room-hours/month
+
 ```
 Duration   16,588,800 GB-s − 400,000 → 17,000,000 × $12.50/M = $212.50
 Requests   31,104,000,000 / 20 = 1,555,200,000 − 1,000,000 → 1,555,000,000 × $0.15/M = $233.25
@@ -306,9 +312,11 @@ Requests scale with how chatty you are. **Duration does not.** It is $0.00576 pe
 because the DO cannot hibernate mid-match. Even if you delta-encode inputs down to near zero:
 
 **Delta-encoded variant** — send only on key change (~5/s/seat) plus a 1 Hz heartbeat, ≈24 msg/s/room:
+
 ```
 6,000 room-hours: duration $37.50 (unchanged) + requests $3.75 + $5 = $46.25 / month
 ```
+
 Request cost falls 10×. Duration doesn't move. **Below ~$46/month you cannot go on Workers at that volume**,
 and the floor rises linearly with room-hours forever.
 
@@ -339,13 +347,13 @@ Two and a half hours of play a day and the game breaks. **Workers Paid ($5/mo mi
 
 **Compute cost: the box, which already exists.** Marginal cost of adding this service ≈ $0.
 
-If a box *did* have to be bought, this workload is at the bottom of every price list. DigitalOcean's cheapest
+If a box _did_ have to be bought, this workload is at the bottom of every price list. DigitalOcean's cheapest
 Basic Droplets, from [digitalocean.com/pricing/droplets](https://www.digitalocean.com/pricing/droplets):
 
-| Price/mo | vCPU | Memory | SSD | Transfer |
-| --- | --- | --- | --- | --- |
-| $4.00 | 1 | 512 MiB | 10 GiB | 500 GiB |
-| $6.00 | 1 | 1 GiB | 25 GiB | 1,000 GiB |
+| Price/mo | vCPU | Memory  | SSD    | Transfer  |
+| -------- | ---- | ------- | ------ | --------- |
+| $4.00    | 1    | 512 MiB | 10 GiB | 500 GiB   |
+| $6.00    | 1    | 1 GiB   | 25 GiB | 1,000 GiB |
 
 **Transfer is the binding constraint, not CPU or RAM.** At 50 concurrent rooms the relay emits ~0.72 MB/s
 (see load figures below), which is ~311 GB/month at 4 h/day — comfortably inside the $6 tier — but ~1,866
@@ -369,12 +377,12 @@ calls `send()` three times.
 
 ### Cost verdict
 
-| | 1 room × 15 min | 50 rooms × 4 h/day × 30 d | 50 rooms 24/7 |
-| --- | --- | --- | --- |
-| Workers + DO (60 Hz) | $0.0031 | **$81.35/mo** | $450.75/mo |
-| Workers + DO (delta-encoded) | ~$0.0011 | **$46.25/mo** | ~$225/mo |
-| Node + Tunnel (existing box) | $0 | **$0** | $0 |
-| Node + Tunnel (if a box had to be bought) | — | **$6/mo** (DO Basic Droplet) | $6–20/mo (transfer-bound) |
+|                                           | 1 room × 15 min | 50 rooms × 4 h/day × 30 d    | 50 rooms 24/7             |
+| ----------------------------------------- | --------------- | ---------------------------- | ------------------------- |
+| Workers + DO (60 Hz)                      | $0.0031         | **$81.35/mo**                | $450.75/mo                |
+| Workers + DO (delta-encoded)              | ~$0.0011        | **$46.25/mo**                | ~$225/mo                  |
+| Node + Tunnel (existing box)              | $0              | **$0**                       | $0                        |
+| Node + Tunnel (if a box had to be bought) | —               | **$6/mo** (DO Basic Droplet) | $6–20/mo (transfer-bound) |
 
 At one room, DOs are free-in-practice and the $5 minimum dominates. At 50 concurrent rooms the DO bill is
 **real money for a hobby project**, and — the part that matters — it is **unbounded and grows linearly**,
@@ -417,11 +425,11 @@ AKL AMS ARN ATL BNE CDG DEN DFW EWR FRA HKG IAD ICN KIX LAX LHR LIS MAD
 MEL MIA MRS MXP NRT ORD OTP PRG SEA SIN SJC SYD VIE WAW
 ```
 
-So "a data center close to where the initial `get()` request is made" means *the nearest of 32*, not the
+So "a data center close to where the initial `get()` request is made" means _the nearest of 32_, not the
 client's local edge. The site's own live example, rendered on page load: a request from **Dortmund** hit a
 worker in **Frankfurt (FRA)** which created the object in **Amsterdam (AMS)** — a different country.
 
-Note what is *absent*: **no South American colo, no African colo, no Indian colo, no Middle Eastern colo.**
+Note what is _absent_: **no South American colo, no African colo, no Indian colo, no Middle Eastern colo.**
 São Paulo (GRU) clients get objects in **Miami** (63%) or **Newark** (37%). Dakar (DKR) gets Lisbon or
 Marseille. Hyderabad (HYD) gets Sydney, Seoul or Melbourne. This matches the docs' footnote that `sam`, `afr`
 and `me` "currently do not spawn" — but seeing it in the data makes the size of the gap concrete.
@@ -435,7 +443,7 @@ This is a genuinely new argument against Option A that neither the ticket nor th
 players creating the same room twice can get materially different placement, and therefore a different derived
 input delay, with no change on their side and nothing to look at afterwards.** #6 derives input delay from the
 room's worst RTT, so this surfaces directly as "why is it laggy this time?" — a question with no answer you can
-reach, because you cannot query where a room landed. A fixed origin is mediocre in a *predictable, debuggable*
+reach, because you cannot query where a room landed. A fixed origin is mediocre in a _predictable, debuggable_
 way.
 
 **3. But the intra-regional penalty is small — and the dataset's latency column does not mean what it looks
@@ -444,13 +452,13 @@ zero**: `EWR → EWR` reads 60 ms, `SIN → SIN` 38 ms, `ORD → ORD` 80 ms. A c
 figure evidently includes **object creation / cold-start**, which is what the site is actually measuring. Taking
 that 35–60 ms as a baseline and differencing:
 
-| Client colo | Lands in | Measured | Same-colo baseline | Implied network delta |
-| --- | --- | --- | --- | --- |
-| FRA | AMS (71%) | 55 ms | FRA→FRA 52 ms | **~3 ms** |
-| HAM | AMS (69%) | 56 ms | FRA→FRA 35 ms | ~20 ms |
-| DUS | AMS (62%) | 52 ms | FRA 47 ms | ~5 ms |
-| LAX | SJC (72%) | 63 ms | LAX→LAX 117 ms | negative — noise-dominated |
-| GRU | MIA (63%) | 101 ms | EWR→EWR 60 ms | ~40 ms |
+| Client colo | Lands in  | Measured | Same-colo baseline | Implied network delta      |
+| ----------- | --------- | -------- | ------------------ | -------------------------- |
+| FRA         | AMS (71%) | 55 ms    | FRA→FRA 52 ms      | **~3 ms**                  |
+| HAM         | AMS (69%) | 56 ms    | FRA→FRA 35 ms      | ~20 ms                     |
+| DUS         | AMS (62%) | 52 ms    | FRA 47 ms          | ~5 ms                      |
+| LAX         | SJC (72%) | 63 ms    | LAX→LAX 117 ms     | negative — noise-dominated |
+| GRU         | MIA (63%) | 101 ms   | EWR→EWR 60 ms      | ~40 ms                     |
 
 The European deltas are **single-digit to low-tens of milliseconds**. The 32 colos, while sparse globally, are
 well distributed across exactly the regions with players — Europe has AMS/FRA/CDG/LHR/MAD/MXP/MRS/ARN/VIE/WAW/
@@ -476,21 +484,21 @@ differentiate these two options**. Both get it.
 
 What differentiates them is one thing: **where the terminating process sits.**
 
-| | DO | Docker + Tunnel |
-| --- | --- | --- |
-| Regional room (all-EU) | nearest of 13 EU colos — for a EU box, roughly a wash | wherever the box is |
-| Regional room (all-US) | nearest of 9 US colos | +Atlantic every frame, if the box is EU |
-| Split room (EU + AU) | wherever the *first* client was | fixed, predictable |
-| Room from São Paulo / Lagos / Mumbai | **another continent** — no `sam`/`afr`/`me` colos exist | fixed, predictable |
-| Reproducible placement | **No — 67% of colos split across ≥2 hosts** | Yes, trivially |
-| Can be steered | `locationHint`, once, at creation, best-effort | no — one box, forever |
-| Can follow the room as players join | no, "do not currently change locations" | n/a |
+|                                      | DO                                                      | Docker + Tunnel                         |
+| ------------------------------------ | ------------------------------------------------------- | --------------------------------------- |
+| Regional room (all-EU)               | nearest of 13 EU colos — for a EU box, roughly a wash   | wherever the box is                     |
+| Regional room (all-US)               | nearest of 9 US colos                                   | +Atlantic every frame, if the box is EU |
+| Split room (EU + AU)                 | wherever the _first_ client was                         | fixed, predictable                      |
+| Room from São Paulo / Lagos / Mumbai | **another continent** — no `sam`/`afr`/`me` colos exist | fixed, predictable                      |
+| Reproducible placement               | **No — 67% of colos split across ≥2 hosts**             | Yes, trivially                          |
+| Can be steered                       | `locationHint`, once, at creation, best-effort          | no — one box, forever                   |
+| Can follow the room as players join  | no, "do not currently change locations"                 | n/a                                     |
 
 **Does nearest-to-first-client hurt a geographically split room, versus a single fixed origin?** Answering the
 question as asked, now with the placement data in hand:
 
-- **For a split room specifically: no worse, and often better.** A fixed origin is *always* far from somebody.
-  A DO is far from somebody too, but at least it's near *someone*. The DO's worst case — the first client is
+- **For a split room specifically: no worse, and often better.** A fixed origin is _always_ far from somebody.
+  A DO is far from somebody too, but at least it's near _someone_. The DO's worst case — the first client is
   the geographic outlier, one Australian joins first and three Europeans follow, object lands in Sydney — is
   genuinely bad and genuinely worse than a well-placed fixed box. But it is a coin flip on join order, not a
   standing condition, and `locationHint` is the fix.
@@ -522,7 +530,7 @@ the playerbase does go multi-continental, a second Node instance joined to the s
 region pinning buys the same locality, deterministically, and the relay is small enough to port to DOs in a day
 if that's ever the better trade.
 
-**Mitigation if Option A is chosen anyway:** pass an explicit `locationHint` from the *host's* region at room
+**Mitigation if Option A is chosen anyway:** pass an explicit `locationHint` from the _host's_ region at room
 creation rather than letting the first `get()` decide. It does not make placement deterministic — hints remain
 best-effort, and there is no hint that can conjure a colo in South America, Africa, India or the Middle East,
 because none exists.
@@ -531,7 +539,7 @@ because none exists.
 region joined to the same tunnel, with room-id → region pinning; or switch to Option A at that point, since
 the relay is small enough to port in a day.
 
-**Mitigation if Option A is chosen:** pass an explicit `locationHint` derived from the *host's* region at room
+**Mitigation if Option A is chosen:** pass an explicit `locationHint` derived from the _host's_ region at room
 creation rather than letting the first `get()` decide, and accept the caution that hints are best-effort.
 
 ### Idle-timeout and keepalive (applies to both)
@@ -593,9 +601,10 @@ The native mechanism is `[vars]` in `wrangler.jsonc`, or the dashboard:
 ```jsonc
 { "vars": { "READY_GATE_GRACE_MS": "3000" } }
 ```
+
 read as `env.READY_GATE_GRACE_MS` (`src/content/docs/workers/configuration/environment-variables.mdx`).
 Per-environment overrides exist via `env.staging.vars` / `env.production.vars`; note `vars` is a
-*non-inheritable* key and must be repeated per environment.
+_non-inheritable_ key and must be repeated per environment.
 
 **Changing it requires a deployment, and a deployment kills every live room.** Chain of three citations:
 
@@ -609,8 +618,8 @@ Per-environment overrides exist via `env.staging.vars` / `env.production.vars`; 
    (`src/content/docs/durable-objects/best-practices/websockets.mdx`)
 
 `wrangler versions secret put` + `wrangler versions deploy` lets you stage the version and control the rollout
-via gradual deployments, but the rollout itself still restarts objects — gradual deployment changes *when*
-rooms drop, not *whether*.
+via gradual deployments, but the rollout itself still restarts objects — gradual deployment changes _when_
+rooms drop, not _whether_.
 
 **The real answer on Workers: don't put it in a var.** Put the grace period in Workers KV or a small config
 Durable Object, and have each room DO read it once at room creation. Then changing it is a KV write — no
@@ -630,7 +639,9 @@ The difference is the escape hatch. A long-lived process can be told things:
 ```js
 // ponytail: process-local config, no persistence — fine while rooms die with the process anyway
 let graceMs = Number(process.env.READY_GATE_GRACE_MS ?? 3000);
-process.on("SIGHUP", () => { graceMs = Number(readFileSync("/etc/relay/grace", "utf8")); });
+process.on("SIGHUP", () => {
+    graceMs = Number(readFileSync("/etc/relay/grace", "utf8"));
+});
 ```
 
 Or a three-line authenticated `POST /admin/config`. Either changes the value live, with zero dropped
@@ -640,8 +651,8 @@ binding is not an optimisation — it's the only door.
 ### Verdict on bullet 5
 
 Honest score: **both need a non-env-var path for live changes; Option B's is free and Option A's is a
-component.** And Option A carries a second, sharper cost that Option B does not: on Workers, *any* change of
-*any* kind — a var, a secret, a one-character code fix — drops every room in progress. That is a standing tax
+component.** And Option A carries a second, sharper cost that Option B does not: on Workers, _any_ change of
+_any_ kind — a var, a secret, a one-character code fix — drops every room in progress. That is a standing tax
 on iteration, not a one-off setup cost.
 
 ---
@@ -665,7 +676,7 @@ will receive heavy volumes of traffic."
 
 **You cannot watch a live game room.** The entire relay lives inside `webSocketMessage`. Every log line from
 it is withheld until the player disconnects — at which point the room is over and you get the whole thing in
-one dump. For debugging a desync *while it is happening*, this is disqualifying.
+one dump. For debugging a desync _while it is happening_, this is disqualifying.
 
 Worse, from the same known-issues page: "Enabling `wrangler tail` or Cloudflare dashboard logs **requires a
 software update**" — listed among the things that can replace a Durable Object. Turning on logging can itself
@@ -701,7 +712,7 @@ An opaque id and a stored-data flag. **No connection count, no phase, no partici
 these rooms deliberately never persist anything (#6, "Rooms are never persisted"), so `hasStoredData` is
 `false` for every one of them — the listing is uninformative even about existence.
 
-Dashboard **Metrics** are namespace-level, or filterable to a single object only if you *already know* its ID
+Dashboard **Metrics** are namespace-level, or filterable to a single object only if you _already know_ its ID
 or name (`…/observability/metrics-and-analytics.mdx`). GraphQL exposes
 `durableObjectsInvocationsAdaptiveGroups`, `durableObjectsPeriodicGroups`, `durableObjectsStorageGroups`,
 `durableObjectsSubrequestsAdaptiveGroups` — aggregates, not an inventory. And the WebSocket metrics have their
@@ -715,10 +726,12 @@ out — because a room DO that dies leaves no trace and nothing tells the regist
 real failure mode.
 
 **Option B:** the rooms are a `Map` in the process.
+
 ```js
 app.get("/admin/rooms", (_, res) => res.json([...rooms.values()].map(summary)));
 ```
-Done. Already accurate, because it *is* the state, not a projection of it.
+
+Done. Already accurate, because it _is_ the state, not a projection of it.
 
 Note that #3's map already lists the public room list and site-wide statistics as features. On Option B the
 admin view is the same `Map` those read from. On Option A the registry DO has to exist anyway for the public
@@ -734,7 +747,7 @@ a snapshot mismatch at a known tick.
 authenticated admin path into the DO's `fetch()` that dumps `this.latestSnapshot` and the per-seat input ring.
 Then: hit the room's URL, get the blob, diff offline. Workable, but every diagnostic is a feature you build and
 deploy first — and deploying it drops the room you were trying to observe. In practice you are always
-debugging the *next* occurrence, never this one.
+debugging the _next_ occurrence, never this one.
 
 **Option B.** `curl localhost:PORT/admin/rooms/:id/snapshot`, or attach a debugger and inspect. Write the
 mismatching snapshots to disk on detection and diff them at leisure. Add a diagnostic without restarting
@@ -763,30 +776,30 @@ except on Workers it happens every time you change a variable.
 
 ## Summary table
 
-| | Workers + Durable Objects | Node in Docker + Tunnel |
-| --- | --- | --- |
-| Hibernation during a match | **Never** (needs 10 s idle; gaps are 16.7 ms) | n/a |
-| Hibernation in lobby | Yes — free while idle | n/a |
-| Duration billing | 128 MB flat × wall-clock, irreducible | n/a |
-| 1 room × 15 min | $0.0031 | $0 |
-| 50 rooms × 4 h/day × 30 d | $81.35/mo (60 Hz) / $46.25 (delta) | $0 (box exists) |
-| Free plan viable? | No — 2.3 room-hours/day, then hard errors | n/a |
-| Connections per instance | 32,768 | OS limits, far beyond 4 |
-| 10 KB snapshot | In-memory instance var, free | Same |
-| Seat map | `serializeAttachment`, ≤16 KB | Plain object |
-| Placement | Nearest of **32** colos (10.99% of PoPs); `locationHint` once, best-effort; never relocates | One fixed city, forever |
-| Regional rooms | Wins across continents; ~single-digit ms within one | Loses if players aren't near the box |
-| Split rooms | Coin-flip on join order | Predictably mediocre |
-| Reproducible placement | **No** — 67% of colos split across ≥2 hosts | Yes |
-| South America / Africa / India / Middle East | **No colo exists** — lands on another continent | Predictable |
-| Broadcast | `getWebSockets()` loop | `clients.forEach` loop |
-| Live logs | **Withheld until client disconnects** | `docker logs -f` |
-| Persisted logs | Workers Logs, 7-day retention | Whatever you want |
-| Live room list | Build a registry DO | 1 line over the existing `Map` |
-| Change a knob live | Needs a KV/config-DO binding | SIGHUP or admin endpoint |
-| Any deploy | **Drops every room in progress** | Drops every room in progress |
-| Ops burden | None | Box, patching, cloudflared, uptime |
-| Single point of failure | No | Yes |
+|                                              | Workers + Durable Objects                                                                   | Node in Docker + Tunnel              |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Hibernation during a match                   | **Never** (needs 10 s idle; gaps are 16.7 ms)                                               | n/a                                  |
+| Hibernation in lobby                         | Yes — free while idle                                                                       | n/a                                  |
+| Duration billing                             | 128 MB flat × wall-clock, irreducible                                                       | n/a                                  |
+| 1 room × 15 min                              | $0.0031                                                                                     | $0                                   |
+| 50 rooms × 4 h/day × 30 d                    | $81.35/mo (60 Hz) / $46.25 (delta)                                                          | $0 (box exists)                      |
+| Free plan viable?                            | No — 2.3 room-hours/day, then hard errors                                                   | n/a                                  |
+| Connections per instance                     | 32,768                                                                                      | OS limits, far beyond 4              |
+| 10 KB snapshot                               | In-memory instance var, free                                                                | Same                                 |
+| Seat map                                     | `serializeAttachment`, ≤16 KB                                                               | Plain object                         |
+| Placement                                    | Nearest of **32** colos (10.99% of PoPs); `locationHint` once, best-effort; never relocates | One fixed city, forever              |
+| Regional rooms                               | Wins across continents; ~single-digit ms within one                                         | Loses if players aren't near the box |
+| Split rooms                                  | Coin-flip on join order                                                                     | Predictably mediocre                 |
+| Reproducible placement                       | **No** — 67% of colos split across ≥2 hosts                                                 | Yes                                  |
+| South America / Africa / India / Middle East | **No colo exists** — lands on another continent                                             | Predictable                          |
+| Broadcast                                    | `getWebSockets()` loop                                                                      | `clients.forEach` loop               |
+| Live logs                                    | **Withheld until client disconnects**                                                       | `docker logs -f`                     |
+| Persisted logs                               | Workers Logs, 7-day retention                                                               | Whatever you want                    |
+| Live room list                               | Build a registry DO                                                                         | 1 line over the existing `Map`       |
+| Change a knob live                           | Needs a KV/config-DO binding                                                                | SIGHUP or admin endpoint             |
+| Any deploy                                   | **Drops every room in progress**                                                            | Drops every room in progress         |
+| Ops burden                                   | None                                                                                        | Box, patching, cloudflared, uptime   |
+| Single point of failure                      | No                                                                                          | Yes                                  |
 
 ---
 
@@ -794,9 +807,9 @@ except on Workers it happens every time you change a variable.
 
 Stated explicitly, per the ticket's instruction not to guess. **Every Cloudflare pricing figure and every
 load-bearing quotation in this document was verified against the live docs site** — what follows is what was
-*not*.
+_not_.
 
-1. **No steady-state RTT measurement.** Placement *is* now measured — `where.durableobjects.live` was
+1. **No steady-state RTT measurement.** Placement _is_ now measured — `where.durableobjects.live` was
    reachable after the policy was relaxed, and its data is used in [§3](#3-latency). But its `latency` column
    **cannot be read as network RTT**: same-colo pairs report 38–80 ms (`EWR → EWR` 60 ms, `SIN → SIN` 38 ms),
    which is only explicable as object-creation/cold-start time being included. The implied network deltas in
@@ -813,18 +826,18 @@ load-bearing quotation in this document was verified against the live docs site*
    on the latency column and are robust.
 2. **Cloudflare's WebSocket idle timeout for non-Enterprise plans has no published number** — the docs say
    only "a period of time", with custom values Enterprise-only. The 400 s client keep-alive and 900 s proxy
-   idle limits *are* published. Both options need a heartbeat; the exact interval should be set empirically.
+   idle limits _are_ published. Both options need a heartbeat; the exact interval should be set empirically.
 3. **The DO REST object-list semantics** were read from the `cloudflare-go` SDK struct
    (`durable_objects/namespaceobject.go` @ `main`) rather than the API reference page. The struct's two fields
    are unambiguous, so the "no connection count, no phase, no liveness" conclusion is solid. Whether a
-   never-persisted object appears in the listing *at all* is **inferred** from `hasStoredData` being the only
+   never-persisted object appears in the listing _at all_ is **inferred** from `hasStoredData` being the only
    liveness-adjacent field, not confirmed.
 4. **Whether the 50–100 ms batching guidance actually bites at 4 clients.** Cloudflare states that many small
    messages "can overwhelm a single Durable Object" but gives no threshold. 240 inbound msg/s is well inside
    the 32,768-connection design envelope and almost certainly fine; this was not load-tested.
 5. **Hetzner pricing was not obtained** — every plan on the cost-optimized page showed "This product is
    currently unavailable" with prices blank. The 20 TB included-traffic figure was readable; the price was
-   not. DigitalOcean's figures ($4/$6 tiers) *are* cited and are sufficient to bound the cost.
+   not. DigitalOcean's figures ($4/$6 tiers) _are_ cited and are sufficient to bound the cost.
 6. **The 20-byte-per-frame wire estimate is mine, not measured.** It drives the bandwidth figures and hence
    the VPS transfer tier. #12 owns the actual wire format; re-derive once it exists.
 
@@ -836,30 +849,30 @@ All Cloudflare citations read 2026-09-14 from
 [`github.com/cloudflare/cloudflare-docs`](https://github.com/cloudflare/cloudflare-docs) @ `production`, and
 cross-checked verbatim against the live pages at `developers.cloudflare.com`.
 
-| Claim | File under `src/content/` |
-| --- | --- |
-| Hibernation conditions, 10 s threshold, 70–140 s eviction, deploy shutdown | `docs/durable-objects/concepts/durable-object-lifecycle.mdx` |
-| Hibernation API, batching guidance, `serializeAttachment` 16 KB, ping/pong, deploys disconnect WebSockets | `docs/durable-objects/best-practices/websockets.mdx` |
-| `acceptWebSocket`, 32,768 connections, `getWebSockets`, `setWebSocketAutoResponse`, tags | `docs/durable-objects/api/state.mdx` |
-| Rates, 20:1 ratio, free egress, 128 MB flat, rounding, Free-plan limits | `partials/durable-objects/durable-objects-pricing.mdx` |
-| Worked billing examples, Free-plan hard failure | `docs/durable-objects/platform/pricing.mdx` |
-| "When does a DO incur duration charges" | `partials/durable-objects/do-faq-pricing.mdx` |
-| 32 MiB message size, 30 s CPU/request | `docs/durable-objects/platform/limits.mdx` |
-| Placement, `locationHint`, no relocation, supported regions | `docs/durable-objects/reference/data-location.mdx` |
-| In-memory state across requests, 128 MB isolate | `docs/durable-objects/reference/in-memory-state.mdx` |
-| `wrangler tail` WS delay, code-update version skew, tail requires software update | `docs/durable-objects/platform/known-issues.mdx` |
-| Workers Logs setup, GraphQL datasets, WS metrics lag, memory chart | `docs/durable-objects/observability/metrics-and-analytics.mdx` |
-| `console.log` withheld until WS close, 10-viewer cap, sampling | `docs/workers/observability/logs/real-time-logs.mdx` |
-| 7-day retention, 5 B/day, 256 KB/log | `docs/workers/observability/logs/workers-logs.mdx` |
-| `[vars]`, dashboard Deploy step, per-environment vars | `docs/workers/configuration/environment-variables.mdx` |
-| `wrangler secret put` deploys immediately, `versions secret put` | `docs/workers/configuration/secrets.mdx` |
-| Secrets and env vars are the same thing at runtime | `partials/workers/env_and_secrets.mdx` |
-| Worker request pricing, WS Upgrade = 1 request, WS messages free | `docs/workers/platform/pricing.mdx` |
-| Broadcast written as a `for` loop | `docs/durable-objects/best-practices/rules-of-durable-objects.mdx` |
-| Proxied WebSockets on all plans, idle timeout, CF restarts terminate WS, keepalive advice | `docs/network/websockets.mdx` |
-| 400 s keep-alive, 900 s proxy idle | `docs/fundamentals/reference/connection-limits.mdx` |
-| Tunnel WebSocket support, large-file terms | `docs/cloudflare-one/faq/cloudflare-tunnels-faq.mdx` |
-| `cloudflared` outbound-only, nearest data center | `docs/cloudflare-one/networks/connectors/cloudflare-tunnel/index.mdx` |
+| Claim                                                                                                     | File under `src/content/`                                             |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Hibernation conditions, 10 s threshold, 70–140 s eviction, deploy shutdown                                | `docs/durable-objects/concepts/durable-object-lifecycle.mdx`          |
+| Hibernation API, batching guidance, `serializeAttachment` 16 KB, ping/pong, deploys disconnect WebSockets | `docs/durable-objects/best-practices/websockets.mdx`                  |
+| `acceptWebSocket`, 32,768 connections, `getWebSockets`, `setWebSocketAutoResponse`, tags                  | `docs/durable-objects/api/state.mdx`                                  |
+| Rates, 20:1 ratio, free egress, 128 MB flat, rounding, Free-plan limits                                   | `partials/durable-objects/durable-objects-pricing.mdx`                |
+| Worked billing examples, Free-plan hard failure                                                           | `docs/durable-objects/platform/pricing.mdx`                           |
+| "When does a DO incur duration charges"                                                                   | `partials/durable-objects/do-faq-pricing.mdx`                         |
+| 32 MiB message size, 30 s CPU/request                                                                     | `docs/durable-objects/platform/limits.mdx`                            |
+| Placement, `locationHint`, no relocation, supported regions                                               | `docs/durable-objects/reference/data-location.mdx`                    |
+| In-memory state across requests, 128 MB isolate                                                           | `docs/durable-objects/reference/in-memory-state.mdx`                  |
+| `wrangler tail` WS delay, code-update version skew, tail requires software update                         | `docs/durable-objects/platform/known-issues.mdx`                      |
+| Workers Logs setup, GraphQL datasets, WS metrics lag, memory chart                                        | `docs/durable-objects/observability/metrics-and-analytics.mdx`        |
+| `console.log` withheld until WS close, 10-viewer cap, sampling                                            | `docs/workers/observability/logs/real-time-logs.mdx`                  |
+| 7-day retention, 5 B/day, 256 KB/log                                                                      | `docs/workers/observability/logs/workers-logs.mdx`                    |
+| `[vars]`, dashboard Deploy step, per-environment vars                                                     | `docs/workers/configuration/environment-variables.mdx`                |
+| `wrangler secret put` deploys immediately, `versions secret put`                                          | `docs/workers/configuration/secrets.mdx`                              |
+| Secrets and env vars are the same thing at runtime                                                        | `partials/workers/env_and_secrets.mdx`                                |
+| Worker request pricing, WS Upgrade = 1 request, WS messages free                                          | `docs/workers/platform/pricing.mdx`                                   |
+| Broadcast written as a `for` loop                                                                         | `docs/durable-objects/best-practices/rules-of-durable-objects.mdx`    |
+| Proxied WebSockets on all plans, idle timeout, CF restarts terminate WS, keepalive advice                 | `docs/network/websockets.mdx`                                         |
+| 400 s keep-alive, 900 s proxy idle                                                                        | `docs/fundamentals/reference/connection-limits.mdx`                   |
+| Tunnel WebSocket support, large-file terms                                                                | `docs/cloudflare-one/faq/cloudflare-tunnels-faq.mdx`                  |
+| `cloudflared` outbound-only, nearest data center                                                          | `docs/cloudflare-one/networks/connectors/cloudflare-tunnel/index.mdx` |
 
 Non-Cloudflare-docs sources:
 

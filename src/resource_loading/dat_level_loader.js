@@ -9,7 +9,9 @@ export function Dat_Level_Loader() {
     this.flip = false;
     var dat_index;
     var datafile_buffer;
-    var PIXEL_WIDTH = 400, PIXEL_HEIGHT = 256, PALETTE_256_SIZE = 768;
+    var PIXEL_WIDTH = 400,
+        PIXEL_HEIGHT = 256,
+        PALETTE_256_SIZE = 768;
 
     this.load = function (dat_filename) {
         var reader = new FileReader();
@@ -19,33 +21,32 @@ export function Dat_Level_Loader() {
             this.file_name = dat_filename;
             dat_index = read_dat_index();
             document.dispatchEvent(new Event(self.on_loaded_event_text));
-        }
+        };
         reader.readAsArrayBuffer(dat_filename);
-    }
+    };
 
-    this.read_level = function() {
+    this.read_level = function () {
         var level = read_level_image();
         return {
             ban_map: read_levelmap(),
             image: level,
-            mask: read_mask_image(level)
-        }
-    }
+            mask: read_mask_image(level),
+        };
+    };
 
-    function read_levelmap(){
+    function read_levelmap() {
         var chr;
         var ban_map = new Array(LEVEL_WIDTH * LEVEL_HEIGHT);
 
         var level_map_offset = dat_open("levelmap.txt");
-        
+
         for (var y = 0; y < LEVEL_HEIGHT; y++) {
             for (var x = 0; x < LEVEL_WIDTH; x++) {
                 while (true) {
-                    var chr = datafile_buffer[level_map_offset++] - ("0".charCodeAt(0));
+                    var chr = datafile_buffer[level_map_offset++] - "0".charCodeAt(0);
                     if (level_map_offset > datafile_buffer.length) {
                         throw "End of file reached at co-ords: " + x + ", " + y;
-                    }
-                    else if (chr >= 0 && chr <= 4) {
+                    } else if (chr >= 0 && chr <= 4) {
                         break;
                     }
                 }
@@ -67,7 +68,7 @@ export function Dat_Level_Loader() {
     }
 
     function read_mask_image(image) {
-        var mask = bitmap_from_pcx_file("mask", 255*3);
+        var mask = bitmap_from_pcx_file("mask", 255 * 3);
         var offscreen = new Offscreen_Canvas(image.width, image.height);
         offscreen.draw_masked(image, mask);
         return offscreen.to_image();
@@ -84,7 +85,7 @@ export function Dat_Level_Loader() {
             var b = pcx.palette[colorIndex + 2];
             var a = r + g + b === transparency_sum ? 0 : 255;
             image_data[i * 4 + 0] = r;
-            image_data[i * 4 + 1] = g
+            image_data[i * 4 + 1] = g;
             image_data[i * 4 + 2] = b;
             image_data[i * 4 + 3] = a;
         }
@@ -92,15 +93,13 @@ export function Dat_Level_Loader() {
         return image_data_array_to_image(image_data, PIXEL_WIDTH, PIXEL_HEIGHT);
     }
 
-
     function image_data_array_to_image(image_data_array, width, height) {
         var offscreen = new Offscreen_Canvas(width, height);
         offscreen.draw_image_data_array(image_data_array);
         return offscreen.to_image();
     }
 
-    function read_pcx(filename)
-    {
+    function read_pcx(filename) {
         var handle = dat_open(filename + ".pcx");
         handle += 128; //Assume header says PCX_256_COLORS (8 bits per pixel, 1 plane)
         var buf_len = PIXEL_WIDTH * PIXEL_HEIGHT;
@@ -112,16 +111,15 @@ export function Dat_Level_Loader() {
             if ((a & 0xc0) == 0xc0) {
                 var b = datafile_buffer[handle++];
                 a &= 0x3f;
-                for (var c1 = 0; c1 < a && ofs < buf_len; c1++)
-                    colormap[ofs++] = b;
+                for (var c1 = 0; c1 < a && ofs < buf_len; c1++) colormap[ofs++] = b;
             } else {
                 colormap[ofs++] = a;
             }
         }
-		handle++;
-		for (var c1 = 0; c1 < PALETTE_256_SIZE; c1++) {
-			palette[c1] = datafile_buffer[handle++];
-		}
+        handle++;
+        for (var c1 = 0; c1 < PALETTE_256_SIZE; c1++) {
+            palette[c1] = datafile_buffer[handle++];
+        }
 
         return { palette: palette, colormap: colormap };
     }
@@ -142,8 +140,9 @@ export function Dat_Level_Loader() {
         ptr += 4;
 
         for (var file_number = 0; file_number < num_files_contained; file_number++) {
-
-            var file_name = String.fromCharCode.apply(null, datafile_buffer.subarray(ptr, ptr + 12)).replace(/[^\x20-\xFF]/g, '');
+            var file_name = String.fromCharCode
+                .apply(null, datafile_buffer.subarray(ptr, ptr + 12))
+                .replace(/[^\x20-\xFF]/g, "");
             ptr += 12;
             var file_offset = read_four_byte_int(ptr);
             ptr += 8;
@@ -154,9 +153,11 @@ export function Dat_Level_Loader() {
     }
 
     function read_four_byte_int(ptr) {
-        return ((datafile_buffer[ptr + 0] << 0) +
-                    (datafile_buffer[ptr + 1] << 8) +
-                    (datafile_buffer[ptr + 2] << 16) +
-                    (datafile_buffer[ptr + 3] << 24));
+        return (
+            (datafile_buffer[ptr + 0] << 0) +
+            (datafile_buffer[ptr + 1] << 8) +
+            (datafile_buffer[ptr + 2] << 16) +
+            (datafile_buffer[ptr + 3] << 24)
+        );
     }
 }

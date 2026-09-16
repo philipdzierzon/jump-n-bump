@@ -41,32 +41,80 @@ export function Objects(rnd) {
                 break;
             }
         }
-    }
+    };
 
     this.add_gore = function (x, y, c2) {
         var c4;
         for (c4 = 0; c4 < 6; c4++)
-            this.add(this.FUR, (x >> 16) + 6 + rnd(5), (y >> 16) + 6 + rnd(5), (rnd(65535) - 32768) * 3, (rnd(65535) - 32768) * 3, 0, 44 + c2 * 8);
+            this.add(
+                this.FUR,
+                (x >> 16) + 6 + rnd(5),
+                (y >> 16) + 6 + rnd(5),
+                (rnd(65535) - 32768) * 3,
+                (rnd(65535) - 32768) * 3,
+                0,
+                44 + c2 * 8,
+            );
         for (c4 = 0; c4 < 6; c4++)
-            this.add(this.FLESH, (x >> 16) + 6 + rnd(5), (y >> 16) + 6 + rnd(5), (rnd(65535) - 32768) * 3, (rnd(65535) - 32768) * 3, 0, 76);
+            this.add(
+                this.FLESH,
+                (x >> 16) + 6 + rnd(5),
+                (y >> 16) + 6 + rnd(5),
+                (rnd(65535) - 32768) * 3,
+                (rnd(65535) - 32768) * 3,
+                0,
+                76,
+            );
         for (c4 = 0; c4 < 6; c4++)
-            this.add(this.FLESH, (x >> 16) + 6 + rnd(5), (y >> 16) + 6 + rnd(5), (rnd(65535) - 32768) * 3, (rnd(65535) - 32768) * 3, 0, 77);
+            this.add(
+                this.FLESH,
+                (x >> 16) + 6 + rnd(5),
+                (y >> 16) + 6 + rnd(5),
+                (rnd(65535) - 32768) * 3,
+                (rnd(65535) - 32768) * 3,
+                0,
+                77,
+            );
         for (c4 = 0; c4 < 8; c4++)
-            this.add(this.FLESH, (x >> 16) + 6 + rnd(5), (y >> 16) + 6 + rnd(5), (rnd(65535) - 32768) * 3, (rnd(65535) - 32768) * 3, 0, 78);
+            this.add(
+                this.FLESH,
+                (x >> 16) + 6 + rnd(5),
+                (y >> 16) + 6 + rnd(5),
+                (rnd(65535) - 32768) * 3,
+                (rnd(65535) - 32768) * 3,
+                0,
+                78,
+            );
         for (c4 = 0; c4 < 10; c4++)
-            this.add(this.FLESH, (x >> 16) + 6 + rnd(5), (y >> 16) + 6 + rnd(5), (rnd(65535) - 32768) * 3, (rnd(65535) - 32768) * 3, 0, 79);
-    }
+            this.add(
+                this.FLESH,
+                (x >> 16) + 6 + rnd(5),
+                (y >> 16) + 6 + rnd(5),
+                (rnd(65535) - 32768) * 3,
+                (rnd(65535) - 32768) * 3,
+                0,
+                79,
+            );
+    };
 
     var create_butterfly = function (obj) {
         while (1) {
             var s1 = rnd(LEVEL_WIDTH);
             var s2 = rnd(LEVEL_HEIGHT);
             if (GET_BAN_MAP(s2, s1) == BAN_VOID) {
-                self.add(obj, (s1 << LEVEL_SCALE_FACTOR) + 8, (s2 << LEVEL_SCALE_FACTOR) + 8, (rnd(65535) - 32768) * 2, (rnd(65535) - 32768) * 2, 0, 0);
+                self.add(
+                    obj,
+                    (s1 << LEVEL_SCALE_FACTOR) + 8,
+                    (s2 << LEVEL_SCALE_FACTOR) + 8,
+                    (rnd(65535) - 32768) * 2,
+                    (rnd(65535) - 32768) * 2,
+                    0,
+                    0,
+                );
                 break;
             }
         }
-    }
+    };
 
     this.reset_objects = function () {
         var c1, c2;
@@ -79,7 +127,15 @@ export function Objects(rnd) {
         for (c1 = 0; c1 < LEVEL_HEIGHT; c1++) {
             for (c2 = 0; c2 < LEVEL_WIDTH; c2++) {
                 if (GET_BAN_MAP(c2, c1) == BAN_SPRING) {
-                    this.add(this.SPRING, c2 << LEVEL_SCALE_FACTOR, c1 << LEVEL_SCALE_FACTOR, 0, 0, this.ANIM_SPRING, 5);
+                    this.add(
+                        this.SPRING,
+                        c2 << LEVEL_SCALE_FACTOR,
+                        c1 << LEVEL_SCALE_FACTOR,
+                        0,
+                        0,
+                        this.ANIM_SPRING,
+                        5,
+                    );
                 }
             }
         }
@@ -87,6 +143,5 @@ export function Objects(rnd) {
         create_butterfly(this.YEL_BUTFLY);
         create_butterfly(this.PINK_BUTFLY);
         create_butterfly(this.PINK_BUTFLY);
-    }
+    };
 }
-    
