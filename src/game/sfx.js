@@ -5,7 +5,6 @@ export function Sfx(sound_player) {
     };
 
     this.jump = playOnce("jump");
-    this.land = playOnce("land");
     this.death = playOnce("death");
     this.spring = playOnce("spring");
     this.splash = playOnce("splash");

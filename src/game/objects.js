@@ -1,6 +1,6 @@
-import { env } from "../interaction/game_session";
-import { BAN_VOID, BAN_SPRING, GET_BAN_MAP } from "../game/level";
-import { LEVEL_HEIGHT, LEVEL_WIDTH, LEVEL_SCALE_FACTOR } from "../asset_data/default_levelmap";
+import { env } from "./env.js";
+import { BAN_VOID, BAN_SPRING, GET_BAN_MAP } from "../game/level.js";
+import { LEVEL_HEIGHT, LEVEL_WIDTH, LEVEL_SCALE_FACTOR } from "../asset_data/default_levelmap.js";
 
 export function Objects(rnd) {
     "use strict";
@@ -87,7 +87,6 @@ export function Objects(rnd) {
         create_butterfly(this.YEL_BUTFLY);
         create_butterfly(this.PINK_BUTFLY);
         create_butterfly(this.PINK_BUTFLY);
-        return objects;
     }
 }
     

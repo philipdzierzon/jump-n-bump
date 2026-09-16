@@ -2,7 +2,7 @@ export const LEVEL_SCALE_FACTOR = 4;
 export const LEVEL_WIDTH = 22;
 export const LEVEL_HEIGHT = 16;
 
-export function create_default_level() {
+export function default_ban_map() {
     const levelmap =
         "1110000000000000000000" +
         "1000000000001000011000" +
@@ -24,5 +24,9 @@ export function create_default_level() {
     for (let i=0; i != LEVEL_WIDTH * LEVEL_HEIGHT; ++i) {
         ban_map[i] = levelmap[i] * 1; //Convert to integer
     }
-    return { ban_map: ban_map, image: document.getElementById('level'), mask: document.getElementById('mask') };
+    return ban_map;
+}
+
+export function create_default_level() {
+    return { ban_map: default_ban_map(), image: document.getElementById('level'), mask: document.getElementById('mask') };
 }

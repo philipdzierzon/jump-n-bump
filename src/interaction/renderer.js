@@ -1,6 +1,6 @@
-import { player } from "../game/game";
-import { env } from "../interaction/game_session";
-import { rabbit_gobs } from "../asset_data/rabbit_gobs";
+import { player } from "../game/game.js";
+import { env } from "../game/env.js";
+import { rabbit_gobs } from "../asset_data/rabbit_gobs.js";
 
 export function Renderer(canvas, img, level) {
     "use strict";
@@ -15,9 +15,13 @@ export function Renderer(canvas, img, level) {
         LEFTOVERS: 50,
     };
 
+    // Ring buffer: MAX.LEFTOVERS was declared and never applied, so splats accumulated
+    // for the length of a match. Overwriting oldest-first keeps the newest ones (#30).
+    var leftovers_written = 0;
+
     this.add_leftovers = function(x, y, image, gob) {
-        leftovers.pobs[leftovers.num_pobs] = { x: x, y: y, gob: gob, image: image };
-        leftovers.num_pobs++;
+        leftovers.pobs[leftovers_written++ % MAX.LEFTOVERS] = { x: x, y: y, gob: gob, image: image };
+        leftovers.num_pobs = Math.min(leftovers_written, MAX.LEFTOVERS);
     }
 
     this.add_pob = function(x, y, image, gob) {

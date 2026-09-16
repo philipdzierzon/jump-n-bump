@@ -1,4 +1,4 @@
-import { LEVEL_SCALE_FACTOR, LEVEL_WIDTH } from "../asset_data/default_levelmap";
+import { LEVEL_SCALE_FACTOR, LEVEL_WIDTH } from "../asset_data/default_levelmap.js";
 export var SQUARE_SIZE = 1 << LEVEL_SCALE_FACTOR;
 export var BAN_VOID	= 0;
 export var BAN_SOLID	= 1;

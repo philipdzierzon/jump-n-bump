@@ -1,46 +1,31 @@
-import { Animation_Data } from "../asset_data/animation_data";
-import { Renderer } from "../interaction/renderer";
-import { Objects } from "../game/objects";
-import { Keyboard } from "../game/keyboard";
-import { AI } from "../game/ai";
-import { Animation } from "../game/animation";
-import { Sound_Player } from "../resource_loading/sound_player";
-import { Sfx } from "../game/sfx";
-import { Movement } from "../game/movement";
-import { Game, player } from "../game/game";
-import { Scores_ViewModel } from "../interaction/scores_viewmodel";
+import { Renderer } from "../interaction/renderer.js";
+import { Objects } from "../game/objects.js";
+import { Keyboard } from "../game/keyboard.js";
+import { AI } from "../game/ai.js";
+import { Animation } from "../game/animation.js";
+import { Sound_Player } from "../resource_loading/sound_player.js";
+import { Sfx } from "../game/sfx.js";
+import { Movement } from "../game/movement.js";
+import { Game, player } from "../game/game.js";
+import { make_rnd } from "../game/rnd.js";
+import { Scores_ViewModel } from "../interaction/scores_viewmodel.js";
 import ko from "knockout";
-
-export const env = {
-    JNB_MAX_PLAYERS: 4,
-    MAX_OBJECTS: 200,
-    animation_data: new Animation_Data(),
-    level: {}
-};
 
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
 }
 var Game_State = Enum({ Not_Started: 0, Playing: 1, Paused: 2 });
 
-export function Game_Session(level) {
+// `config` is the match's shared state: the PRNG seed and the settings every client
+// must agree on. Settings are never read from this client's environment -- a differing
+// no_gore desyncs the RNG stream on the first kill (#5).
+export function Game_Session(level, config) {
     "use strict";
     var self = this;
 
-    function rnd(max_value) {
-        return Math.floor(Math.random() * max_value);
-    }
-
-    function gup(name) {
-        name = name.replace(/[\[]/, "\\\[").replace(/[\]]/, "\\\]");
-        var regexS = "[\\?&]" + name + "=([^&#]*)";
-        var regex = new RegExp(regexS);
-        var results = regex.exec(window.location.href);
-        if (results == null)
-            return "";
-        else
-            return results[1];
-    }
+    var rnd = make_rnd(config.seed);
+    var settings = config.settings;
+    var muted = config.muted;
 
     var canvas = document.getElementById('screen');
     var img = {
@@ -50,17 +35,6 @@ export function Game_Session(level) {
     };
     
     
-    var settings = {
-        pogostick: gup('pogostick') == '1',
-        jetpack: gup('jetpack') == '1',
-        bunnies_in_space: gup('space') == '1',
-        flies_enabled: gup('lordoftheflies') == '1',
-        blood_is_thicker_than_water: gup('bloodisthickerthanwater') == '1',
-        no_gore: gup('nogore') == '1'
-    };
-    var muted = gup('nosound') == '1';
-    
-
     var renderer = new Renderer(canvas, img, level);
     var objects = new Objects(rnd);
     var key_action_mappings = [];

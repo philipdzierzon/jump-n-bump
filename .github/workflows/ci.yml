@@ -13,6 +13,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # The simulation replays deterministically with no DOM, so it is checked
+      # here rather than in a browser.
+      - run: npm ci
+      - run: npm test
       # Builds the client and runs it exactly as production does, so one
       # assertion run covers webpack, static serving and the WebSocket.
       - run: docker build -t jnb .

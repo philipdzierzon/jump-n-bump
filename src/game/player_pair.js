@@ -1,4 +1,4 @@
-import { number_gobs } from "../asset_data/number_gobs";
+import { number_gobs } from "../asset_data/number_gobs.js";
 
 export function Player_Pair(first, second, sfx, renderer, objects, img, settings) {
     "use strict";
