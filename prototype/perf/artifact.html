@@ -20,12 +20,14 @@
     </style>
 
     <div class="knobs">
-        <strong>#30 frame budget</strong> &mdash; tap a run, then <em>Start new game</em>. All four seats are AI-driven.
-        <a href="?perf=1">baseline</a>
-        <a href="?perf=1&amp;maxleftovers=50">leftovers 50</a>
-        <a href="?perf=1&amp;drawlast=1">draw last</a>
-        <a href="?perf=1&amp;noresize=1">lazy resize</a>
-        <a href="?perf=1&amp;maxleftovers=50&amp;drawlast=1&amp;noresize=1">all three</a>
+        <strong>#30 frame budget</strong> &mdash; tap a run, then <em>Start new game</em>. Overlay is bottom left.
+        Watch <em>audio el</em>: if it climbs, that is the leak.
+        <a href="?perf=1">1. baseline</a>
+        <a href="?perf=1&amp;silent=1">2. no audio</a>
+        <a href="?perf=1&amp;maxcatchup=4">3. catch-up capped</a>
+        <a href="?perf=1&amp;silent=1&amp;maxcatchup=4">4. both</a>
+        <a href="?perf=1&amp;silent=1&amp;maxcatchup=4&amp;leftovers=1000">5. both + 1000 splats</a>
+        <a href="?perf=1&amp;silent=1&amp;maxcatchup=4&amp;leftovers=1000&amp;maxleftovers=50">6. + splats capped</a>
     </div>
 
     <img class="resource" id='level' src='levels/default/level.png' alt=""/>

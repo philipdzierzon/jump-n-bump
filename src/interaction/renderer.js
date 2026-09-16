@@ -2,6 +2,7 @@ import { player } from "../game/game";
 import { env } from "../interaction/game_session";
 import { rabbit_gobs } from "../asset_data/rabbit_gobs";
 import { perf } from "../interaction/perf_overlay"; // PROTOTYPE (#30)
+import { object_gobs } from "../asset_data/object_gobs"; // PROTOTYPE (#30)
 
 export function Renderer(canvas, img, level) {
     "use strict";
@@ -29,6 +30,11 @@ export function Renderer(canvas, img, level) {
             leftovers.num_pobs++;
         }
         perf.leftovers = leftovers.num_pobs;
+    }
+
+    for (var s = 0; s < perf.preseed; s++) {            // PROTOTYPE (#30): the load dial
+        this.add_leftovers(Math.floor(Math.random() * 400), Math.floor(Math.random() * 256),
+            img.objects, object_gobs[Math.floor(Math.random() * 8)]);
     }
 
     this.add_pob = function(x, y, image, gob) {

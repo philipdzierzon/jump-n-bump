@@ -4,6 +4,9 @@
 //   ?drawlast=1      draw once per catch-up batch instead of once per tick
 //   ?maxleftovers=N  bound the leftovers buffer to N (ring); 0 = today's unbounded
 //   ?noresize=1      resize the canvas on the resize event only, not every frame
+//   ?leftovers=N     pre-seed N splats so the load is a dial, not four deadlocking AIs
+//   ?silent=1        play_sound() returns immediately, creating no <audio> element
+//   ?maxcatchup=N    cap ticks per batch and drop the backlog instead of spiralling
 function q(name) {
     return new URLSearchParams(location.search).get(name);
 }
@@ -24,6 +27,10 @@ export const perf = {
     draw_last: q("drawlast") === "1",
     max_leftovers: parseInt(q("maxleftovers") || "0", 10),
     lazy_resize: q("noresize") === "1",
+    preseed: parseInt(q("leftovers") || "0", 10),
+    silent: q("silent") === "1",
+    max_catchup: parseInt(q("maxcatchup") || "0", 10),
+    audio_els: 0,
     sim: ring(600),
     draw: ring(600),
     ticks: 0,
@@ -50,9 +57,13 @@ if (perf.on) {
             "draw ms  p50 " + perf.draw.p(0.5).toFixed(2) + "  p95 " + perf.draw.p(0.95).toFixed(2),
             "catchup  " + perf.batch + " ticks/batch worst",
             "leftover " + perf.leftovers,
+            "audio el " + perf.audio_els + "   <- should not climb",
             "knobs    drawlast=" + (perf.draw_last ? 1 : 0) +
                 " maxleftovers=" + perf.max_leftovers +
-                " noresize=" + (perf.lazy_resize ? 1 : 0)
+                " noresize=" + (perf.lazy_resize ? 1 : 0) +
+                " silent=" + (perf.silent ? 1 : 0) +
+                " maxcatchup=" + perf.max_catchup,
+            "         leftovers=" + perf.preseed
         ].join("\n");
         perf.batch = 0;
     }, 500);

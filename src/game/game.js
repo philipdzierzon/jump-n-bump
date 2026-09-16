@@ -88,7 +88,10 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
             var time_diff = next_time - now;
             next_time += (1000 / 60);
 
-            if (time_diff > 0) {
+            // PROTOTYPE (#30): uncapped catch-up is the spiral; this is the candidate cap
+            var give_up = perf.max_catchup > 0 && iterations >= perf.max_catchup;
+            if (time_diff > 0 || give_up) {
+                if (give_up) next_time = now + (1000 / 60); // drop the backlog
                 // we have time left
                 if (perf.draw_last) {                   // PROTOTYPE (#30): one draw per batch
                     var t = perf.now();
@@ -96,7 +99,7 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
                     perf.draw.push(perf.now() - t);
                 }
                 if (iterations > perf.batch) perf.batch = iterations;
-                setTimeout(pump, time_diff);
+                setTimeout(pump, time_diff > 0 ? time_diff : 0);
                 break;
             }
         }

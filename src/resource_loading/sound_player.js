@@ -1,3 +1,5 @@
+import { perf } from "../interaction/perf_overlay"; // PROTOTYPE (#30)
+
 export function Sound_Player(muted) {
     var self = this;
     var sounds = [];
@@ -20,6 +22,7 @@ export function Sound_Player(muted) {
     };
     
     this.play_sound = function(sfx_name, loop) {
+        if (perf.silent) return;                        // PROTOTYPE (#30)
         var i, replace = -1;
         var audio;
         for (i in sounds) {
@@ -55,5 +58,6 @@ export function Sound_Player(muted) {
             }
         }
         sounds.push({ audio: audio, sfx_name: sfx_name });
+        perf.audio_els = sounds.length;                 // PROTOTYPE (#30): the leak, in one number
     };
 };
