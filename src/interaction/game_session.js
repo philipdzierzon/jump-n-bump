@@ -39,12 +39,19 @@ export function Game_Session(level, config, muted) {
     var objects = new Objects(rnd);
     var key_action_mappings = [];
     var keyboard = new Keyboard(key_action_mappings);
-    var ai = new AI(keyboard);
+    var ai = new AI();
     var animation = new Animation(renderer, img, objects, rnd);
     this.sound_player = new Sound_Player(muted);
     var sfx = new Sfx(this.sound_player);
     var movement = new Movement(sfx, objects, settings, rnd);
-    var game = new Game(movement, ai, animation, renderer, objects, keyboard.key_pressed, level, true, rnd);
+    // Schemes bind to the seats this client holds in join order and stay bound until the
+    // seat is released (#32): held_seats[n] is driven by control scheme n.
+    // ponytail: one local client that holds every seat, which is what hot-seat play is.
+    // upgrade path: the room hands down the seats this client was actually given (#3).
+    var held_seats = [0, 1, 2, 3];
+    var read_input = function (seat) { return keyboard.input_frame(held_seats.indexOf(seat)); };
+
+    var game = new Game(movement, ai, animation, renderer, objects, read_input, level, true, rnd);
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);

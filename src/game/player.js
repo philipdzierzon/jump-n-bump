@@ -3,7 +3,7 @@ import { BAN_SOLID, BAN_VOID, BAN_ICE, GET_BAN_MAP } from "../game/level.js";
 import { LEVEL_HEIGHT, LEVEL_WIDTH, LEVEL_SCALE_FACTOR } from "../asset_data/default_levelmap.js";
 import { player } from "../game/game.js";
 
-export function Player(playerIndex, keys, is_server, rnd) {
+export function Player(playerIndex, is_server, rnd) {
     "use strict";
     this.player_index = playerIndex;
     this.action_left = false;
@@ -44,7 +44,6 @@ export function Player(playerIndex, keys, is_server, rnd) {
         }
     }
     this.get_image = function () { return env.animation_data.players[this.anim].frame[this.frame].image + this.direction * 9; };
-    this.keys = keys
 
     this.position_player = function(player_num) {
         var c1;

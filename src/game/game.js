@@ -4,7 +4,7 @@ import { SET_BAN_MAP } from "../game/level.js";
 
 export let player = [];
 
-export function Game(movement, ai, animation, renderer, objects, key_pressed, level, is_server, rnd) {
+export function Game(movement, ai, animation, renderer, objects, read_input, level, is_server, rnd) {
     "use strict";
     var next_time = 0;
     var playing = false;
@@ -13,12 +13,11 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
 
     function reset_players() {
         player = [
-        new Player(0, [37, 39, 38], is_server, rnd),
-        new Player(1, [65, 68, 87], is_server, rnd),
-        new Player(2, [100, 102, 104], is_server, rnd),
-        new Player(3, [74, 76, 73], is_server, rnd)
+        new Player(0, is_server, rnd),
+        new Player(1, is_server, rnd),
+        new Player(2, is_server, rnd),
+        new Player(3, is_server, rnd)
         ];
-        player[3].ai = true;
     }
 
     function reset_level() {
@@ -40,17 +39,25 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
         return new Date().getTime();
     }
 
+    // Who drives a seat: this client if `read_input` hands back a frame for it, the AI if
+    // nobody holds it (#32, #7). That one rule replaces the `alt+1-4` toggles -- four humans
+    // on one keyboard is a client holding four seats, and a seat it lets go is AI-filled.
+    // ponytail: AI-fill is unconditional here. upgrade path: room config can turn it off,
+    // and a seat nobody holds then goes `enabled = false` and the match runs short (#7).
     function update_player_actions() {
         for (var i = 0; i != player.length; ++i) {
-            player[i].action_left = key_pressed(player[i].keys[0]);
-            player[i].action_right = key_pressed(player[i].keys[1]);
-            player[i].action_up = key_pressed(player[i].keys[2]);
+            var frame = read_input(i);
+            player[i].ai = !frame;
+            if (!frame) continue;
+            player[i].action_left = frame.left;
+            player[i].action_right = frame.right;
+            player[i].action_up = frame.up;
         }
     }
 
     function steer_players() {
-        ai.cpu_move();
         update_player_actions();
+        ai.cpu_move(); // writes the same frame for every seat left to it
         for (var playerIndex = 0; playerIndex != player.length; ++playerIndex) {
             var p = player[playerIndex];
             if (p.enabled) {
