@@ -21,6 +21,7 @@ export function Room(transport, read_input) {
     this.d = 0;
     this.seed = 0;
     this.settings = {};
+    this.on_start = null;
     this.on_match_end = null;
 
     transport.receive(function (msg) {
@@ -34,6 +35,9 @@ export function Room(transport, read_input) {
                 self.seed = msg.seed;
                 self.settings = msg.settings;
                 held = msg.held;
+                // A socket answers later than a loopback does, so the match's shared
+                // state is not readable on the line after `start` (#34).
+                if (self.on_start) self.on_start(msg);
                 break;
             case "input":
                 schedule_input(msg.t, msg.seats);

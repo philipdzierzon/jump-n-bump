@@ -20,6 +20,7 @@
         .scores th,td { padding: 8px; text-align: center; }
         .centre-column { margin: 0 auto; max-width: 600px; }
         .canvas-container { text-align: center; }
+        #room_input { text-transform: uppercase; width: 6em; }
     </style>
 </head>
 <body>
@@ -78,6 +79,11 @@
     </div>
     <div data-bind="visible: current_page() != Page.Game" class="centre-column">
         <button data-bind="click: restart, disabled: loading_level">Start new game</button>
+        <h3>Play online:</h3>
+        <p>Leave the room blank to be given one, or pick your own. Share the link in the address bar.</p>
+        <input id="room_input" maxlength="5" placeholder="ROOM" data-bind="value: room_id, valueUpdate: 'input'" />
+        <button data-bind="click: host_online, disabled: loading_level">Host online</button>
+        <span data-bind="text: room_error"></span>
         <h3>Load level:</h3>
         <p>Load any of the levels found on <a href="http://www.brainchilddesign.com/games/jumpnbump/levels/levels1.html" target="_blank">Brainchild Design's website</a></p>
         <input id="level_input" type="file" accept=".dat" data-bind="event: { change: load_level }" />
