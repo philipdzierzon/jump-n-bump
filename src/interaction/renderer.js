@@ -1,6 +1,7 @@
 import { player } from "../game/game";
 import { env } from "../interaction/game_session";
 import { rabbit_gobs } from "../asset_data/rabbit_gobs";
+import { perf } from "../interaction/perf_overlay"; // PROTOTYPE (#30)
 
 export function Renderer(canvas, img, level) {
     "use strict";
@@ -15,9 +16,19 @@ export function Renderer(canvas, img, level) {
         LEFTOVERS: 50,
     };
 
+    var leftovers_written = 0;                          // PROTOTYPE (#30)
+
     this.add_leftovers = function(x, y, image, gob) {
-        leftovers.pobs[leftovers.num_pobs] = { x: x, y: y, gob: gob, image: image };
-        leftovers.num_pobs++;
+        var pob = { x: x, y: y, gob: gob, image: image };
+        var cap = perf.max_leftovers;                   // PROTOTYPE (#30): ring when capped
+        if (cap > 0) {
+            leftovers.pobs[leftovers_written++ % cap] = pob;
+            leftovers.num_pobs = Math.min(leftovers_written, cap);
+        } else {
+            leftovers.pobs[leftovers.num_pobs] = pob;
+            leftovers.num_pobs++;
+        }
+        perf.leftovers = leftovers.num_pobs;
     }
 
     this.add_pob = function(x, y, image, gob) {
@@ -69,8 +80,16 @@ export function Renderer(canvas, img, level) {
         }
     }
 
+    var resize_dirty = true;                            // PROTOTYPE (#30)
+    if (perf.lazy_resize) {
+        window.addEventListener("resize", function () { resize_dirty = true; });
+    }
+
     this.draw = function () {
-        resize_canvas();
+        if (!perf.lazy_resize || resize_dirty) {
+            resize_canvas();
+            resize_dirty = false;
+        }
 
         ctx.drawImage(level.image, 0, 0);
 

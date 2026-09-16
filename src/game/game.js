@@ -1,6 +1,7 @@
 import { env } from "../interaction/game_session";
 import { Player } from "../game/player";
 import { SET_BAN_MAP } from "../game/level";
+import { perf } from "../interaction/perf_overlay"; // PROTOTYPE (#30)
 
 export let player = [];
 
@@ -19,6 +20,9 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
         new Player(3, [74, 76, 73], is_server, rnd)
         ];
         player[3].ai = true;
+        if (perf.on) {                                  // PROTOTYPE (#30): hands-free 4-seat load
+            for (var i = 0; i < player.length; i++) player[i].ai = true;
+        }
     }
 
     function reset_level() {
@@ -64,21 +68,34 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
 
 
     function game_iteration() {
+        var t0 = perf.now();                            // PROTOTYPE (#30)
         steer_players();
         movement.collision_check();
         animation.update_object();
-        renderer.draw();
+        var t1 = perf.now();
+        if (!perf.draw_last) renderer.draw();
+        perf.sim.push(t1 - t0);
+        if (!perf.draw_last) perf.draw.push(perf.now() - t1);
+        perf.ticks++;
     }
 
     function pump() {
+        var iterations = 0;                             // PROTOTYPE (#30)
         while (playing) {
             game_iteration();
+            iterations++;
             var now = timeGetTime();
             var time_diff = next_time - now;
             next_time += (1000 / 60);
 
             if (time_diff > 0) {
                 // we have time left
+                if (perf.draw_last) {                   // PROTOTYPE (#30): one draw per batch
+                    var t = perf.now();
+                    renderer.draw();
+                    perf.draw.push(perf.now() - t);
+                }
+                if (iterations > perf.batch) perf.batch = iterations;
                 setTimeout(pump, time_diff);
                 break;
             }
