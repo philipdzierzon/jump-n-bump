@@ -2,7 +2,7 @@ import { BAN_VOID, BAN_WATER, GET_BAN_MAP } from "./level.js";
 import { env } from "./env.js";
 import { player } from "../game/game.js";
 
-export function AI(keyboard_state) {
+export function AI() {
     "use strict";
 
     function map_tile(x, y) {
@@ -59,7 +59,7 @@ export function AI(keyboard_state) {
         var lm = should_move_direction(tar_above_nearby, !same_vertical_line, !tar_is_right);
         var jm = should_jump(current_player, cur_posx, cur_posy, tar_dist_above, tar_above_nearby, lm, rm);
 
-        press_keys(current_player, lm, rm, jm);
+        write_input_frame(current_player, lm, rm, jm);
     }
 
     function should_move_direction(running_away, allowed_to_chase, dir_of_target) {
@@ -69,7 +69,7 @@ export function AI(keyboard_state) {
 
     function should_jump(current_player, cur_posx, cur_posy, tar_dist_above, tar_directly_above, lm, rm) {
 
-        var already_jumping = keyboard_state.key_pressed(current_player.keys[2]);
+        var already_jumping = current_player.action_up; // last tick's frame, not yet overwritten
         var tile_below = map_tile(cur_posx, cur_posy + 16);
         var tile_above = map_tile(cur_posx, cur_posy - 8);
         var tile_heading_for = map_tile(cur_posx - (lm * 8) + (rm * 16), cur_posy + (already_jumping * 8));
@@ -98,24 +98,12 @@ export function AI(keyboard_state) {
         return tile_type != BAN_WATER && tile_type != BAN_VOID;
     }
 
-    function press_keys(p, lm, rm, jm) {
-        if (lm) {
-            keyboard_state.addkey(p, 0);
-        } else {
-            keyboard_state.delkey(p, 0);
-        }
-
-        if (rm) {
-            keyboard_state.addkey(p, 1);
-        } else {
-            keyboard_state.delkey(p, 1);
-        }
-
-        if (jm) {
-            keyboard_state.addkey(p, 2);
-        } else {
-            keyboard_state.delkey(p, 2);
-        }
+    // The AI writes the same {left, right, up} frame a human client sends (#32); it no
+    // longer fakes keypresses for a seat that no longer owns any keys.
+    function write_input_frame(p, lm, rm, jm) {
+        p.action_left = !!lm;
+        p.action_right = !!rm;
+        p.action_up = !!jm;
     }
     
 };
