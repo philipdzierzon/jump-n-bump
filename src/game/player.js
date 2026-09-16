@@ -1,7 +1,7 @@
-import { env } from "../interaction/game_session";
-import { BAN_SOLID, BAN_VOID, BAN_ICE, GET_BAN_MAP } from "../game/level";
-import { LEVEL_HEIGHT, LEVEL_WIDTH, LEVEL_SCALE_FACTOR } from "../asset_data/default_levelmap";
-import { player } from "../game/game";
+import { env } from "./env.js";
+import { BAN_SOLID, BAN_VOID, BAN_ICE, GET_BAN_MAP } from "../game/level.js";
+import { LEVEL_HEIGHT, LEVEL_WIDTH, LEVEL_SCALE_FACTOR } from "../asset_data/default_levelmap.js";
+import { player } from "../game/game.js";
 
 export function Player(playerIndex, keys, is_server, rnd) {
     "use strict";

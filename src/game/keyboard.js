@@ -1,4 +1,4 @@
-import { player } from "../game/game";
+import { player } from "../game/game.js";
 
 export function Keyboard(key_function_mappings) {
     "use strict";

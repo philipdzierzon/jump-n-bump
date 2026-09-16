@@ -1,6 +1,6 @@
-import { env } from "../interaction/game_session";
-import { Player } from "../game/player";
-import { SET_BAN_MAP } from "../game/level";
+import { env } from "./env.js";
+import { Player } from "../game/player.js";
+import { SET_BAN_MAP } from "../game/level.js";
 
 export let player = [];
 
@@ -64,11 +64,15 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
 
 
     function game_iteration() {
+        renderer.clear_pobs();
         steer_players();
         movement.collision_check();
         animation.update_object();
-        renderer.draw();
     }
+
+    // One simulation tick, no clock and no drawing: the headless entry point a
+    // replay or a server sim steps by hand (#5).
+    this.step = game_iteration;
 
     function pump() {
         while (playing) {
@@ -78,7 +82,10 @@ export function Game(movement, ai, animation, renderer, objects, key_pressed, le
             next_time += (1000 / 60);
 
             if (time_diff > 0) {
-                // we have time left
+                // We have time left, so the backlog is cleared: draw once for the whole
+                // catch-up batch. Catch-up itself stays uncapped and no tick is ever
+                // skipped -- a slow client loses frames, never simulation state (#30).
+                renderer.draw();
                 setTimeout(pump, time_diff);
                 break;
             }

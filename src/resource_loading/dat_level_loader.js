@@ -1,6 +1,6 @@
-﻿import { LEVEL_HEIGHT, LEVEL_WIDTH } from  "../asset_data/default_levelmap";
-import { BAN_SOLID } from "../game/level";
-import { Offscreen_Canvas } from "../resource_loading/offscreen_canvas";
+﻿import { LEVEL_HEIGHT, LEVEL_WIDTH } from "../asset_data/default_levelmap.js";
+import { BAN_SOLID } from "../game/level.js";
+import { Offscreen_Canvas } from "../resource_loading/offscreen_canvas.js";
 
 export function Dat_Level_Loader() {
     "use strict";

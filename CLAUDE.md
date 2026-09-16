@@ -1,8 +1,13 @@
 # CLAUDE.md
 
 HTML5/canvas port of Jump 'n Bump. Build with `npm run build` (webpack, `src/` → `game/`),
-then open `game/index.html` directly — there is no dev server, no test suite and no linter,
-so verification is manual: build, open, play.
+then open `game/index.html` directly — there is no dev server and no linter, so rendering,
+sound and input are verified manually: build, open, play.
+
+`npm test` runs `test/replay.test.mjs`: the simulation replayed twice from one seed and one
+input log, with no DOM, hashed to an FNV-1a checksum. Anything that makes the simulation
+depend on wall-clock time, the environment or unseeded randomness fails it. Node runs
+`src/` directly, which is why every relative import carries its `.js` extension.
 
 Architecture notes for this port, and for the sibling C original it was translated from,
 live in the workspace-level `CLAUDE.md` one directory up (`sbx/jumpnbump/CLAUDE.md`).

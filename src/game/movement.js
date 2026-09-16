@@ -1,10 +1,10 @@
-import { env } from "../interaction/game_session";
-import { LEVEL_SCALE_FACTOR } from "../asset_data/default_levelmap";
-import { BAN_SOLID, BAN_SPRING, BAN_ICE, BAN_WATER, GET_BAN_MAP_XY, GET_BAN_MAP_IN_WATER } from "../game/level";
-import { Player_Pair } from "../game/player_pair";
-import { player } from "../game/game";
+import { env } from "./env.js";
+import { LEVEL_SCALE_FACTOR } from "../asset_data/default_levelmap.js";
+import { BAN_SOLID, BAN_SPRING, BAN_ICE, BAN_WATER, GET_BAN_MAP_XY, GET_BAN_MAP_IN_WATER } from "../game/level.js";
+import { Player_Pair } from "../game/player_pair.js";
+import { player } from "../game/game.js";
 
-export function Movement(renderer, img, sfx, objects, settings, rnd) {
+export function Movement(sfx, objects, settings, rnd) {
     "use strict";
 
     this.steer_player = function (p) {
@@ -226,7 +226,7 @@ export function Movement(renderer, img, sfx, objects, settings, rnd) {
         /* collision check */
         for (var c1 = 0; c1 < 3; c1++) {
             for (var c2 = c1 + 1; c2 < 4; c2++) {
-                var pair = new Player_Pair(player[c1], player[c2], sfx, renderer, objects, img, settings);
+                var pair = new Player_Pair(player[c1], player[c2], sfx, objects, settings);
                 pair.collision_check();
             }
         }
