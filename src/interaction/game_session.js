@@ -8,7 +8,8 @@ import { Sfx } from "../game/sfx.js";
 import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
 import { make_rnd } from "../game/rnd.js";
-import { Scores_ViewModel } from "../interaction/scores_viewmodel.js";
+import { Room } from "../net/room.js";
+import { Loopback_Transport } from "../net/loopback_transport.js";
 import ko from "knockout";
 
 function Enum(obj) {
@@ -24,8 +25,25 @@ export function Game_Session(level, config, muted) {
     "use strict";
     var self = this;
 
-    var rnd = make_rnd(config.seed);
-    var settings = config.settings;
+    // Offline play is a local room: one client, always the host, over a transport that
+    // never opens a socket (#16). Nothing below this line knows which transport it got.
+    var key_action_mappings = [];
+    var keyboard = new Keyboard(key_action_mappings);
+    var transport = new Loopback_Transport();
+    var room = new Room(transport, function (scheme) {
+        return keyboard.input_frame(scheme);
+    });
+    // ponytail: one client holding every seat, which is what hot-seat play is. upgrade
+    // path: the room hands down the seats this client was actually given (#36).
+    room.start({ seed: config.seed, settings: config.settings, held: [0, 1, 2, 3] });
+
+    // Read back off `start` rather than out of `config`: the match's shared state is what
+    // the relay handed down (#12).
+    // ponytail: read on the line after `start`, which only a transport that answers
+    // in-call can satisfy. upgrade path: a socket answers later, so #34 moves everything
+    // below into an `on_start` callback.
+    var rnd = make_rnd(room.seed);
+    var settings = room.settings;
 
     var canvas = document.getElementById("screen");
     var img = {
@@ -36,23 +54,12 @@ export function Game_Session(level, config, muted) {
 
     var renderer = new Renderer(canvas, img, level);
     var objects = new Objects(rnd);
-    var key_action_mappings = [];
-    var keyboard = new Keyboard(key_action_mappings);
     var ai = new AI();
     var animation = new Animation(renderer, img, objects, rnd);
     this.sound_player = new Sound_Player(muted);
     var sfx = new Sfx(this.sound_player);
     var movement = new Movement(sfx, objects, settings, rnd);
-    // Schemes bind to the seats this client holds in join order and stay bound until the
-    // seat is released (#32): held_seats[n] is driven by control scheme n.
-    // ponytail: one local client that holds every seat, which is what hot-seat play is.
-    // upgrade path: the room hands down the seats this client was actually given (#3).
-    var held_seats = [0, 1, 2, 3];
-    var read_input = function (seat) {
-        return keyboard.input_frame(held_seats.indexOf(seat));
-    };
-
-    var game = new Game(movement, ai, animation, renderer, objects, read_input, level, true, rnd);
+    var game = new Game(movement, ai, animation, renderer, objects, room, level, true, rnd);
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);

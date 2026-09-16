@@ -13,6 +13,8 @@ import { make_rnd } from "../src/game/rnd.js";
 import { env } from "../src/game/env.js";
 import { default_ban_map } from "../src/asset_data/default_levelmap.js";
 import { Renderer } from "../src/interaction/renderer.js";
+import { Room } from "../src/net/room.js";
+import { Loopback_Transport } from "../src/net/loopback_transport.js";
 
 const TICKS = 3600; // one minute at 60 Hz -- long enough that bunnies collide
 
@@ -75,23 +77,27 @@ function input_log(seed) {
 const no_renderer = { add_pob() {}, add_leftovers() {}, clear_pobs() {}, draw() {} };
 const no_sfx = { jump() {}, death() {}, spring() {}, splash() {}, fly() {}, music() {} };
 
-// `held` is the seats this client holds; control scheme n drives held[n] (#32).
+// `held` is the seats this client holds; control scheme n drives held[n] (#32). Input
+// reaches the simulation only through the room, over a loopback transport -- the same path
+// a networked room takes, with a different transport under it (#16, #33).
 function start(seed, settings, held) {
-    const rnd = make_rnd(seed);
-    const objects = new Objects(rnd);
     const keyboard = new Keyboard([]);
+    const room = new Room(new Loopback_Transport(), (scheme) => keyboard.input_frame(scheme));
+    room.start({ seed, settings, held });
+    const rnd = make_rnd(room.seed);
+    const objects = new Objects(rnd);
     const game = new Game(
-        new Movement(no_sfx, objects, settings, rnd),
+        new Movement(no_sfx, objects, room.settings, rnd),
         new AI(),
         new Animation(no_renderer, {}, objects, rnd),
         no_renderer,
         objects,
-        (seat) => keyboard.input_frame(held.indexOf(seat)),
+        room,
         { ban_map: default_ban_map() },
         true,
         rnd,
     );
-    return { game, keyboard, objects };
+    return { game, keyboard, objects, room };
 }
 
 // Three seats on the keyboard and a fourth left to the AI, so the replay covers both
@@ -154,6 +160,55 @@ assert.deepEqual(
     held_two.ai,
     [true, true, false, false],
     "a seat nobody holds is driven by the AI",
+);
+
+// The local room over its loopback (#33). The stub stands in for the whole relay, so the
+// seed and the settings arrive on `start`, seats are driven by stamped driver changes, and
+// the final board comes back off a `match_end` the host sent.
+const local = start(1234, { no_gore: true }, [0, 1, 2, 3]);
+assert.equal(local.room.d, 0, "no jitter in the same tab, so no input delay on a loopback");
+assert.equal(local.room.seed, 1234, "the seed rides on `start`");
+assert.deepEqual(local.room.settings, { no_gore: true }, "settings ride only on `start`");
+
+// Mid-match, not just at tick 0: a change stamped for a tick already stepped past would
+// never be applied, since that tick does not come round again.
+for (let tick = 0; tick < 5; tick++) local.game.step();
+local.room.set_driver(2, "ai");
+local.game.step();
+assert.deepEqual(
+    player.map((p) => p.ai),
+    [false, false, true, false],
+    "a driver change stamped at currentTick + 2d takes effect on the next tick, d being 0",
+);
+
+// Input delay: a client's own frames are stamped d ticks ahead, and the ticks before the
+// first one lands are all keys released, never the AI (#6). d = 0 on a loopback, so this
+// takes a transport that answers with one.
+const delayed_transport = {
+    receive(fn) {
+        this.to_client = fn;
+    },
+    send(msg) {
+        if (msg.type !== "start") return;
+        this.to_client({ type: "start", t: 0, d: 2, seed: 1, settings: {}, held: [0] });
+        this.to_client({ type: "driver", t: 0, seat: 0, driver: "local" });
+    },
+};
+const delayed_room = new Room(delayed_transport, () => ({ left: false, right: true, up: false }));
+delayed_room.start({ seed: 1, settings: {}, held: [0] });
+assert.deepEqual(
+    [0, 1, 2, 3].map(() => delayed_room.step()[0].right),
+    [false, false, true, true],
+    "a held seat is released for the first d ticks, then driven -- never handed to the AI",
+);
+
+let ended = null;
+local.room.on_match_end = (msg) => (ended = msg);
+local.room.end_match("host", [[7]]);
+assert.deepEqual(
+    ended,
+    { type: "match_end", t: 6, reason: "host", matrix: [[7]] },
+    "the host announces the end and the relay broadcasts it, final board included",
 );
 
 // The leftovers ring: bounded at 50, keeping the newest (#30). Renderer needs a 2d
