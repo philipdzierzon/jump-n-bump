@@ -1,5 +1,6 @@
 // Smoke test: proves static serving, /healthz and the WebSocket echo.
 // Usage: node smoke.mjs [base-url]   (default: boots a local server)
+// The bare form needs `npm run build` first — it serves the built client.
 import assert from "node:assert";
 import { spawn } from "node:child_process";
 
@@ -8,6 +9,7 @@ const base = given || "http://127.0.0.1:8099";
 const child = given
 	? null
 	: spawn("node", ["index.js"], {
+			cwd: import.meta.dirname,
 			env: { ...process.env, PORT: 8099 },
 			stdio: "inherit",
 		});
@@ -21,6 +23,12 @@ try {
 			if (i > 50) throw e;
 			await new Promise((r) => setTimeout(r, 100));
 		}
+	}
+
+	for (const [path, type] of [["/", "text/html"], ["/jump-n-bump.js", "javascript"]]) {
+		const res = await fetch(base + path);
+		assert.equal(res.status, 200, `${path} was ${res.status}`);
+		assert.match(res.headers.get("content-type"), new RegExp(type));
 	}
 
 	const ws = new WebSocket(base.replace(/^http/, "ws"));
