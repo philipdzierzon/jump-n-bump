@@ -1,0 +1,7 @@
+/game/
+/prototype/
+package-lock.json
+server/package-lock.json
+# Hand-written webpack template with whitespace-sensitive Knockout markup, and no
+# automated rendering check to catch a reflow that changes the layout.
+src/jnb.html
