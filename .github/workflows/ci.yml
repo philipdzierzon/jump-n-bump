@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Builds the client and runs it exactly as production does, so one
+      # assertion run covers webpack, static serving and the WebSocket.
+      - run: docker build -t jnb .
+      - run: docker run -d -p 8080:8080 jnb
+      - run: node server/smoke.mjs http://localhost:8080
