@@ -82,6 +82,9 @@ export function Game_Session(get_level, config, muted, transport) {
     // bytes and no canvas pixels (#39).
     this.clock = ko.observable(null);
     this.on_match_start = null;
+    // Whether a `start` has landed on this session: it is playing a match, or building
+    // one, rather than sitting in the lobby waiting for the next (#40).
+    this.in_match = false;
     this.on_match_end = null;
     // A limit the simulation reached. Every client reaches it on the same tick and stops
     // there; only the host announces it, which is what the others leave the match on (#22).
@@ -110,10 +113,20 @@ export function Game_Session(get_level, config, muted, transport) {
     // simulation is built out of what the relay handed down rather than out of `config`
     // (#12, #34).
     room.on_start = function () {
+        // Set before the level is fetched, not after the simulation is built: a client
+        // that has been handed this match is in it from the moment `start` lands, and
+        // asking to be let into a match it is already playing would replace the state it
+        // is playing with the host's, for nothing (#40).
+        self.in_match = true;
         // A host can start another match while this client is playing one: the outgoing
         // pump loop would go on stepping the `player` array the new one replaces, and its
         // music would go on playing.
         if (game) game.pause();
+        // Which it really did: `build` makes a Sound_Player per match, so the outgoing
+        // one's looping music has to be stopped here rather than on the way to the lobby.
+        // Leaving the match muted the old one by accident; a resync never passes through
+        // the lobby at all, and doubled the music instead (#28, #40).
+        if (sound_player) sound_player.set_muted(true);
         // With it goes its snapshot timer: the tick counter belongs to the match that is
         // starting and the simulation still in these variables belongs to the last one, so
         // a snapshot taken between here and `build` would be the old match's state under

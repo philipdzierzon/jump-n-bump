@@ -615,8 +615,14 @@ function ViewModel() {
         // Last in this function, because a session holds the seats and the control schemes
         // it was built with: one built before the grant above drives nothing at all.
         if (msg.started && msg.held.length && !resuming) {
-            resuming = true;
-            session().resume();
+            var current = session();
+            // Unless this client was handed the match by `start`, which is every client in
+            // the room when the host begins one: it is already playing it, and the relay
+            // would answer the ask with the host's first snapshot two seconds in.
+            if (!current.in_match) {
+                resuming = true;
+                current.resume();
+            }
         }
     }
 
