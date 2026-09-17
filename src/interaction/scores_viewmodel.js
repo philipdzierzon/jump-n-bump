@@ -1,8 +1,11 @@
-﻿export function Scores_ViewModel(raw_scores) {
+﻿// The bunnies, in seat order. A seat with a participant on it is shown under that
+// participant's name instead (#13).
+export var BUNNY_NAMES = ["Dott", "Jiffy", "Fizz", "Miji"];
+
+export function Scores_ViewModel(raw_scores, names) {
     "use strict";
-    var player_names = ["Dott", "Jiffy", "Fizz", "Miji"];
-    var row_headings = player_names.concat(["Total deaths"]);
-    this.player_row = ["    "].concat(player_names).concat(["Total kills"]);
+    var row_headings = names.concat(["Total deaths"]);
+    this.player_row = ["    "].concat(names).concat(["Total kills"]);
     var scores = raw_scores.map(with_row_sum);
     scores = with_totals_row(scores);
     this.score_rows = row_headings.map(get_row_contents);

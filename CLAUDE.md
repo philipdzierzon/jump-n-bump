@@ -9,12 +9,14 @@ Online play needs the relay in `server/`, which has dependencies of its own: `np
 WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
 `Dockerfile` is how it actually ships.
 
-`npm test` runs two files. `test/replay.test.mjs` replays the simulation twice from one seed
+`npm test` runs three files. `test/replay.test.mjs` replays the simulation twice from one seed
 and one input log, with no DOM, hashed to an FNV-1a checksum: anything that makes the
 simulation depend on wall-clock time, the environment or unseeded randomness fails it.
 `test/relay.test.mjs` boots the real relay on a real socket and drives the protocol through
-it. Node runs `src/` directly, which is why every relative import carries its `.js`
-extension.
+it. `test/router.test.mjs` covers the two pure pieces of the room flow -- which screen a
+hash names, and which control scheme a jump key belongs to; the rest of that flow is
+Knockout bindings, which are verified by opening the page. Node runs `src/` directly, which
+is why every relative import carries its `.js` extension.
 
 Architecture notes for this port, and for the sibling C original it was translated from,
 live in the workspace-level `CLAUDE.md` one directory up (`sbx/jumpnbump/CLAUDE.md`).
