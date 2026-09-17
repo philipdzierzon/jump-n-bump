@@ -27,6 +27,10 @@ const MAX_NAME = 16;
 // Leave frees the seat at once and never waits for this. Read per disconnect rather than
 // once, so a test can shorten it without a second knob.
 const reserve_ms = () => Number(process.env.RESERVE_MS || 60000);
+// How long the host's countdown runs when somebody is not ready (#21). The first
+// deployment-level knob: it is not room config and never on the wire, and it is read per
+// countdown rather than once, so it is tunable on a running relay (#11, #37).
+const countdown_ms = () => Number(process.env.COUNTDOWN_MS || 10000);
 
 const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
@@ -57,7 +61,16 @@ function create(client, msg) {
         seats: new Array(SEATS).fill(null),
         tick: 0,
         d: 2,
+        // The whole phase model: a room is in lobby or in-game, and there is no third
+        // (#21). The countdown is part of the lobby, not a phase of its own.
         started: false,
+        // ponytail: AI-fill is on unless the creator says otherwise, and nothing in the
+        // client says otherwise yet. upgrade path: host-staged room config, which is where
+        // this setting belongs (#38).
+        ai_fill: msg.ai_fill !== false,
+        deadline: null,
+        timer: null,
+        pending: null,
     };
     console.log("room %s created", id);
     admit(client, rooms[id], msg);
@@ -116,6 +129,47 @@ function online_seats(room) {
     return online;
 }
 
+// Ready is declared per client and covers every seat it holds at once, forced by the input
+// surface: a participant presses left, right and up and nothing else, so a second player on
+// one couch has no key of its own to ready with (#7, #37). An AI-filled seat is implicitly
+// ready, which is why this asks the clients and not the seats.
+function all_ready(room) {
+    for (const client of room.clients) if (client.seats.length && !client.ready) return false;
+    return true;
+}
+
+// Per seat, for display only: its holder's own flag, and ready for a seat the AI has.
+function ready_seats(room) {
+    const ready = room.seats.map(() => true);
+    for (const client of room.clients)
+        for (const seat of client.seats) ready[seat] = !!client.ready;
+    return ready;
+}
+
+function cancel_countdown(room) {
+    clearTimeout(room.timer);
+    room.timer = null;
+    room.deadline = null;
+    room.pending = null;
+}
+
+// Ready resets on lobby entry and on the host staging a config change, and never on seat
+// churn (#21). The countdown goes with it, which is how a staged change cancels one (#38).
+function reset_ready(room) {
+    cancel_countdown(room);
+    for (const client of room.clients) client.ready = false;
+}
+
+// Both routes into the lobby -- the host announcing the end, and the server observing one --
+// are this same broadcast and this same reset (#37, #22). The relay cannot read the
+// simulation, so a final board rides along only when the host sent one (#19).
+function to_lobby(room, msg) {
+    room.started = false;
+    reset_ready(room);
+    broadcast(room, msg);
+    broadcast_state(room);
+}
+
 // Every client sees every seat and the username of the participant on it. `held` and `host`
 // are the parts that differ per client, which is why this is a loop and not a broadcast.
 function room_view(room, client) {
@@ -124,6 +178,12 @@ function room_view(room, client) {
         held: client.seats,
         host: !!client.host,
         started: room.started,
+        ready: ready_seats(room),
+        you_ready: !!client.ready,
+        // Milliseconds left of the countdown, from the relay's own deadline rather than a
+        // count the client accumulates: a hidden tab stops its game loop but not its
+        // clock, and a countdown built on frames would freeze with it (#51).
+        countdown: room.deadline ? Math.max(0, room.deadline - Date.now()) : null,
     };
 }
 
@@ -176,6 +236,9 @@ function admit(client, room, msg) {
             seat && seat.token === client.token && !online.has(index) ? index : -1,
         )
         .filter((index) => index >= 0);
+    // Joining or reconnecting during a countdown is auto-ready: whoever arrives inside it
+    // has had no chance to press anything, and would otherwise be vacated at zero (#37).
+    client.ready = !!room.deadline;
     room.clients.add(client);
     // A reload is a disconnect, so the host migrated the moment it dropped -- and hands the
     // room back when its own token returns inside the reservation window. Amends #17's
@@ -227,12 +290,17 @@ function leave(client) {
             vacate(client);
             broadcast_state(room);
         }, reserve_ms()).unref();
+    // The countdown is the host's to run and the host's to cancel, so a host that leaves
+    // takes it with it rather than handing a successor a match it never proposed (#37).
+    if (client.host && room.timer) cancel_countdown(room);
     ensure_host(room);
     // The host is what announced the match, so a room left without one retires the
     // announcement: the client arriving next is joining a room, not waiting on a match
-    // nobody runs.
-    // ponytail: the real match-end triggers are #22's, and this is not one of them.
-    if (![...room.clients].some((other) => other.host)) room.started = false;
+    // nobody runs -- and the clients already in it hear it end on the same broadcast the
+    // host's own announcement makes, which is the server-observed route into the lobby
+    // (#22, #37). The relay ran no simulation, so there is no final board to send with it.
+    if (room.started && ![...room.clients].some((other) => other.host))
+        return to_lobby(room, { type: "match_end", reason: "host_left" });
     broadcast_state(room);
 }
 
@@ -252,40 +320,90 @@ function stamp_driver(room, seat, driver) {
     broadcast(room, { type: "driver", t: room.tick + 2 * room.d, seat, driver });
 }
 
+// The match itself begins here whichever way the host got to it -- every client ready, or
+// a countdown run out (#37).
+function begin(room, msg) {
+    cancel_countdown(room);
+    room.tick = 0;
+    room.d = input_delay(room);
+    room.started = true;
+    // The driver table rides on `start` rather than as four changes stamped for tick 0: a
+    // client steps tick 0 the instant `start` lands, and the browser delivers each frame
+    // as its own event, so stamped changes for that tick arrive after it has been stepped
+    // past and every seat stays with the AI.
+    //
+    // A seat is driven by a client when the client holding it is connected, and by the AI
+    // otherwise -- which is AI-fill for an empty seat and for a seat whose holder walked
+    // away between matches. With AI-fill off the seat is disabled instead and the match
+    // runs short-handed: one rule for a disconnect, a deliberate drop and an un-ready
+    // client vacated at countdown zero (#7, #37). `held` is this client's own seats, so it
+    // is sent per client rather than broadcast: the seats it drives are the only ones it
+    // reads a keyboard for (#7).
+    // ponytail: a holder who leaves mid-match keeps its bunny standing still until the
+    // next match. upgrade path: the released-frame and AI takeover (#42).
+    const online = online_seats(room);
+    const drivers = room.seats.map((seat, index) =>
+        seat && online.has(index) ? "local" : room.ai_fill ? "ai" : "off",
+    );
+    for (const other of room.clients)
+        send(other, {
+            type: "start",
+            t: 0,
+            d: room.d,
+            seed: msg.seed,
+            settings: msg.settings,
+            held: other.seats,
+            drivers,
+        });
+}
+
+// At zero, a client that never readied gives up every seat it holds and reserves nothing:
+// it could have readied and did not, which is not the disconnect the reservation window
+// exists for -- a hidden tab that sat out a countdown included (#17, #51). The host readied
+// by starting, so the vacate rule never collides with "the host cannot drop its last seat"
+// and needs no guard for it (#37).
+function countdown_zero(room) {
+    if (rooms[room.id] !== room) return;
+    const pending = room.pending;
+    for (const client of [...room.clients])
+        if (client.seats.length && !client.ready) vacate(client);
+    // The seats changed hands before the match began, so the room is described again
+    // first: a client vacated at zero has to hear that it holds nothing.
+    broadcast_state(room);
+    begin(room, pending);
+}
+
 function relay(client, msg) {
     const room = client.room;
     switch (msg.type) {
-        case "start":
+        case "start": {
             if (!client.host) return;
-            room.tick = 0;
-            room.d = input_delay(room);
-            room.started = true;
-            // The driver table rides on `start` rather than as four changes stamped for
-            // tick 0: a client steps tick 0 the instant `start` lands, and the browser
-            // delivers each frame as its own event, so stamped changes for that tick
-            // arrive after it has been stepped past and every seat stays with the AI.
-            //
-            // A seat is driven by a client when the client holding it is connected, and by
-            // the AI otherwise -- which is AI-fill for an empty seat and for a seat whose
-            // holder walked away between matches. `held` is this client's own seats, so it
-            // is sent per client rather than broadcast: the seats it drives are the only
-            // ones it reads a keyboard for (#7).
-            // ponytail: a holder who leaves mid-match keeps its bunny standing still until
-            // the next match. upgrade path: the released-frame and AI takeover (#42).
-            const online = online_seats(room);
-            const drivers = room.seats.map((seat, index) =>
-                seat && online.has(index) ? "local" : "ai",
-            );
-            for (const other of room.clients)
-                send(other, {
-                    type: "start",
-                    t: 0,
-                    d: room.d,
-                    seed: msg.seed,
-                    settings: msg.settings,
-                    held: other.seats,
-                    drivers,
-                });
+            // Starting counts as readying (#37).
+            client.ready = true;
+            if (all_ready(room)) return begin(room, msg);
+            // Nobody's start is instant while somebody is not ready: the countdown is the
+            // host's, cancellable by the host, and its length is the deployment's (#21).
+            cancel_countdown(room);
+            const ms = countdown_ms();
+            room.pending = msg;
+            room.deadline = Date.now() + ms;
+            room.timer = setTimeout(() => countdown_zero(room), ms);
+            room.timer.unref();
+            broadcast_state(room);
+            break;
+        }
+        case "ready":
+            // Ready is the client's, not the seat's, and it is never reset by seat churn
+            // (#21). Readying the last straggler collapses the countdown to an instant
+            // start; un-readying during one does not cancel it.
+            client.ready = !!msg.ready;
+            if (client.ready && room.timer && all_ready(room)) return begin(room, room.pending);
+            broadcast_state(room);
+            break;
+        case "cancel":
+            if (!client.host || !room.timer) return;
+            cancel_countdown(room);
+            broadcast_state(room);
             break;
         case "input":
             // Monotonic, and a whole delay ahead of any client's real tick, since `t` is
@@ -318,8 +436,7 @@ function relay(client, msg) {
             // cannot read the simulation, so it could not compute one (#19, #22). The
             // announcement is over with it, so an arrival is told about a room and not
             // about a match nobody is running.
-            room.started = false;
-            broadcast(room, msg);
+            to_lobby(room, msg);
             break;
     }
 }

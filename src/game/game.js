@@ -18,6 +18,9 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
             new Player(2, is_server, rnd),
             new Player(3, is_server, rnd),
         ];
+        // A seat the room disabled has no bunny: with AI-fill off, a seat nobody holds is
+        // left out of the match rather than handed to the CPU (#7, #37).
+        for (var i = 0; i < player.length; i++) player[i].enabled = room.enabled_seat(i);
     }
 
     function reset_level() {
@@ -100,6 +103,9 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
     }
 
     this.start = function () {
+        // Already pumping: a second loop would step the same simulation twice a frame,
+        // and every way into the match calls this.
+        if (playing) return;
         next_time = timeGetTime() + 1000;
         playing = true;
         pump();

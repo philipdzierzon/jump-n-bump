@@ -39,6 +39,9 @@ var SCHEME_NAMES = ["Arrows", "A D W", "NumPad 4 6 8", "J L I"];
 var CODE_HINT = "A code is 5 letters, no I and no O.";
 // One answer for a wrong password and for a room that is not there: telling them apart is
 // what would make an unlisted room's id worth guessing at (#8).
+// Nobody holds a seat, so nobody is keeping the room waiting: an AI-filled seat is ready
+// by definition (#37).
+var ALL_READY = [true, true, true, true];
 var UNAVAILABLE = "That room is not available. Check the code, and the password if it has one.";
 
 // The token is the relay's to mint; this only remembers it, keyed by room id, so a reload
@@ -100,17 +103,39 @@ function ViewModel() {
     // The room's own answer, refreshed on every update: a match that ended, or a host that
     // left and took its announcement with it, must not leave this standing (#36).
     this.match_running = ko.observable(false);
+    // Ready is per client and covers every seat it holds: `ready` is this client's own
+    // answer, `seat_ready` is the room's, seat by seat, and an AI-filled seat is ready by
+    // definition (#7, #37).
+    this.ready = ko.observable(false);
+    this.seat_ready = ko.observableArray(ALL_READY);
+    // Whole seconds left of the host's countdown, or null when none is running.
+    this.countdown = ko.observable(null);
     this.current_game = ko.observable(null);
     this.board = ko.observable(null);
     this.current_level = create_default_level();
     this.loading_level = ko.observable(false);
 
-    // Pause is not a screen of the flow, it is where the match goes when you pause it.
-    this.view = ko.computed(function () {
+    // The board is not a screen of the flow and not a phase of the room: it is this
+    // client's own, drawn over a simulation that keeps running in a networked room and
+    // really does stop in a local one (#21, #37).
+    this.board_up = ko.computed(function () {
         var game = self.current_game();
-        if (self.screen() !== "play") return self.screen();
-        return game && game.game_state() === Game_State.Paused ? "scores" : "play";
+        return !!game && game.game_state() === Game_State.Board;
     });
+
+    // Derived from the relay's deadline and this client's clock, never from a count of
+    // frames: a hidden tab stops its game loop but not its clock (#51). The ticker runs
+    // only while there is a countdown to tick.
+    var deadline = null;
+    var ticker = null;
+    function show_countdown() {
+        self.countdown(deadline ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : null);
+        if (deadline && !ticker) ticker = setInterval(show_countdown, 200);
+        if (!deadline && ticker) {
+            clearInterval(ticker);
+            ticker = null;
+        }
+    }
 
     this.code_chars = ko.computed(function () {
         return (self.pending_id() || "").split("");
@@ -142,6 +167,7 @@ function ViewModel() {
                 name: self.seat_names()[seat] || "AI",
                 bunny: bunny,
                 scheme: mine ? SCHEME_NAMES[mine.scheme] : "",
+                ready: self.seat_ready()[seat] !== false,
             };
         });
     });
@@ -195,6 +221,10 @@ function ViewModel() {
         // The board belongs to the room's last match, and the room died with the last
         // client in it: a room created on the same id later is a different room.
         self.board(null);
+        self.ready(false);
+        self.seat_ready(ALL_READY);
+        deadline = null;
+        show_countdown();
         granted([]);
         token = null;
         remember("room", { id: null });
@@ -208,7 +238,9 @@ function ViewModel() {
         // landing screen, a level loaded: the seats it drove go to the AI on an agreed tick,
         // so the room sees it leave instead of watching a bunny stand still (#7, #17).
         if (played) game.release_seats();
-        game.pause();
+        // Pause stopped simulating before it became an overlay; leaving the match is what
+        // stops it now (#37).
+        game.stop();
         // The board of the match you just left is what the lobby shows; it is not a screen
         // of its own (#13, #35).
         if (played) self.board(game.scores());
@@ -225,6 +257,9 @@ function ViewModel() {
                 settings: url,
                 host: host,
                 held: granted(),
+                // Real pause survives in a local room only: there is nothing to desync
+                // from, and nobody to keep waiting (#16, #37).
+                local: !self.room_id(),
                 schemes: participants.map(function (participant) {
                     return participant.scheme;
                 }),
@@ -244,6 +279,10 @@ function ViewModel() {
         // want of a current session, and rebuild a lobby session that replaces the
         // transport's listener -- orphaning the match it was already in.
         game.on_match_start = function () {
+            // A client with no seats has nothing to steer -- it was vacated at countdown
+            // zero, or its seats went while it was away -- so it holds no session for this
+            // match and waits in the lobby for the next one (#37; spectating is #40's).
+            if (!granted().length) return;
             self.current_game(game);
             go("play");
         };
@@ -261,7 +300,21 @@ function ViewModel() {
         host = msg.host;
         self.is_host(host);
         granted(msg.held);
-        if (!msg.held.length) return;
+        self.ready(!!msg.you_ready);
+        self.seat_ready(msg.ready || ALL_READY);
+        deadline = msg.countdown == null ? null : Date.now() + msg.countdown;
+        show_countdown();
+        if (!msg.held.length) {
+            // Every seat gone: un-ready at countdown zero, which reserves nothing. The
+            // client is still in the room, so the names screen is where it asks for seats
+            // again rather than the landing page (#37, #17).
+            if (
+                self.participants().length &&
+                (self.screen() === "room" || self.screen() === "play")
+            )
+                go("names", true);
+            return;
+        }
         if (self.participants().length) {
             // The name everyone sees is the relay's, not the one that was typed.
             msg.held.forEach(function (seat, nth) {
@@ -490,7 +543,7 @@ function ViewModel() {
     // The keyboard is the form: a couch player is added by pressing that control scheme's
     // jump key, never by a fourth text box (#7, #35).
     window.addEventListener("keydown", function (evt) {
-        if (self.view() !== "names" || is_typing(evt)) return;
+        if (self.screen() !== "names" || is_typing(evt)) return;
         var scheme = jump_scheme(evt.keyCode);
         if (scheme < 0) return;
         add_participant(scheme);
@@ -499,14 +552,22 @@ function ViewModel() {
 
     // The top bar is bound before a session exists, so pause goes through the view model
     // rather than through `current_game()` directly.
-    this.pause = function () {
-        if (self.current_game()) self.current_game().pause();
+    this.show_board = function () {
+        if (self.current_game()) self.current_game().show_board();
     };
-    this.unpause = function () {
-        if (self.current_game()) self.current_game().unpause();
+    this.hide_board = function () {
+        if (self.current_game()) self.current_game().hide_board();
     };
     this.start_match = function () {
         session().propose();
+    };
+    // Declared for the whole client at once, and the relay is what holds it: a second
+    // player on this couch has no key of its own to press (#7, #37).
+    this.toggle_ready = function () {
+        transport.send({ type: "ready", ready: !self.ready() });
+    };
+    this.cancel_countdown = function () {
+        transport.send({ type: "cancel" });
     };
     this.copy_link = function () {
         if (navigator.clipboard) navigator.clipboard.writeText(self.join_link());

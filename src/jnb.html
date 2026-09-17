@@ -44,7 +44,10 @@
         table.board th { color: var(--muted); font-weight: 500; }
         .top-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 8px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); }
         .top-bar ul { list-style: none; display: flex; gap: 12px; flex-wrap: wrap; margin: 0; padding: 0; }
-        .canvas-container { text-align: center; }
+        .canvas-container { position: relative; text-align: center; }
+        /* The board is drawn over the match, because in a lockstep room the match is still
+           running behind it (#37). */
+        .overlay { position: absolute; inset: 0; overflow: auto; background: rgba(16, 15, 13, 0.9); }
         canvas { max-width: 100%; height: auto; image-rendering: pixelated; }
     </style>
 </head>
@@ -79,27 +82,26 @@
         </div>
     </script>
 
-    <div data-bind="visible: view() === 'play' || view() === 'scores'" class="top-bar">
-        <button class="sm" data-bind="visible: view() === 'play', click: pause">Pause (P)</button>
-        <button class="sm" data-bind="visible: view() === 'scores', click: unpause">Unpause (P)</button>
+    <div data-bind="visible: screen() === 'play'" class="top-bar">
+        <button class="sm" data-bind="visible: !board_up(), click: show_board">Scores (P)</button>
+        <button class="sm" data-bind="visible: board_up, click: hide_board">Hide the scores (P)</button>
         <button class="sm" data-bind="click: go_lobby">Back to the lobby</button>
         <ul>
             <li>F11: full screen</li>
             <li>M: sound</li>
-            <li>P: pause</li>
+            <li>P: scores</li>
         </ul>
     </div>
 
-    <div data-bind="visible: view() === 'play'" class="canvas-container">
+    <div data-bind="visible: screen() === 'play'" class="canvas-container">
         <canvas id="screen" width="1200" height="768"></canvas>
+        <div data-bind="visible: board_up" class="overlay kiosk wide">
+            <div class="eyebrow">scores</div>
+            <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->
+        </div>
     </div>
 
-    <div data-bind="visible: view() === 'scores'" class="kiosk wide">
-        <div class="eyebrow">paused</div>
-        <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->
-    </div>
-
-    <div data-bind="visible: view() === 'landing'" class="kiosk centre">
+    <div data-bind="visible: screen() === 'landing'" class="kiosk centre">
         <h1>JUMP 'N BUMP</h1>
         <p class="muted">Four bunnies. One goal: lagomorphic cranial domination.</p>
         <button class="pri" data-bind="click: go_create">Create a room</button>
@@ -110,7 +112,7 @@
         </div>
     </div>
 
-    <div data-bind="visible: view() === 'create'" class="kiosk">
+    <div data-bind="visible: screen() === 'create'" class="kiosk">
         <div class="eyebrow">create a room</div>
         <p class="muted">Leave it blank to be given a code, or pick your own.</p>
         <input class="code" maxlength="5" placeholder="CODE" data-bind="value: code, valueUpdate: 'input'" />
@@ -119,7 +121,7 @@
         <button class="sm" data-bind="click: go_landing">Back</button>
     </div>
 
-    <div data-bind="visible: view() === 'join'" class="kiosk">
+    <div data-bind="visible: screen() === 'join'" class="kiosk">
         <div class="eyebrow">join a room</div>
         <p class="muted" data-bind="visible: pending_id">Connecting&hellip;</p>
         <input class="code" maxlength="5" placeholder="CODE" data-bind="value: code, valueUpdate: 'input'" />
@@ -128,7 +130,7 @@
         <button class="sm" data-bind="click: go_landing">Back</button>
     </div>
 
-    <div data-bind="visible: view() === 'password'" class="kiosk">
+    <div data-bind="visible: screen() === 'password'" class="kiosk">
         <div class="eyebrow">joining</div>
         <div class="codebox" data-bind="foreach: code_chars">
             <span data-bind="text: $data"></span>
@@ -140,7 +142,7 @@
         <button class="sm" data-bind="click: go_landing">Start over</button>
     </div>
 
-    <div data-bind="visible: view() === 'names'" class="kiosk">
+    <div data-bind="visible: screen() === 'names'" class="kiosk">
         <div class="eyebrow">who is playing on this keyboard?</div>
         <p class="muted">Press the jump key of every control scheme you want: <b>&uarr;</b>, <b>W</b>, <b>NumPad 8</b> or <b>I</b>. Up to four on one keyboard.</p>
         <ul class="seats" data-bind="foreach: participants">
@@ -158,7 +160,7 @@
         <button class="sm" data-bind="click: go_landing">Start over</button>
     </div>
 
-    <div data-bind="visible: view() === 'room'" class="kiosk wide">
+    <div data-bind="visible: screen() === 'room'" class="kiosk wide">
         <div class="eyebrow">lobby</div>
         <h2 data-bind="text: room_id() || 'offline'"></h2>
         <div data-bind="visible: room_id">
@@ -169,13 +171,17 @@
         <ul class="seats" data-bind="foreach: seat_rows">
             <li>
                 <span class="grow" data-bind="text: name"></span>
+                <small data-bind="text: ready ? 'ready' : 'not ready', visible: $parent.room_id"></small>
                 <small data-bind="text: bunny"></small>
                 <small data-bind="text: scheme, visible: scheme"></small>
             </li>
         </ul>
         <p class="muted">Every seat in the room. The ones nobody takes are played by the AI.</p>
         <p class="muted" data-bind="visible: match_running">A match is in progress; you are in for the next one.</p>
-        <button class="pri" data-bind="visible: is_host, click: start_match, enable: !loading_level()">Start the match</button>
+        <button class="sm" data-bind="visible: room_id() &amp;&amp; seated(), click: toggle_ready, text: ready() ? 'Not ready' : 'Ready'"></button>
+        <p class="muted" data-bind="visible: countdown">Starting in <span data-bind="text: countdown"></span>s. Anyone not ready by then gives up their seats.</p>
+        <button class="pri" data-bind="visible: is_host, click: start_match, enable: !loading_level() &amp;&amp; !countdown()">Start the match</button>
+        <button class="sm" data-bind="visible: is_host() &amp;&amp; countdown(), click: cancel_countdown">Cancel the countdown</button>
         <p class="muted" data-bind="visible: !is_host()">Waiting for the host to start.</p>
         <p class="err" data-bind="text: error"></p>
         <div data-bind="visible: board">
@@ -188,7 +194,7 @@
         <button class="sm" data-bind="click: go_landing">Leave</button>
     </div>
 
-    <div data-bind="visible: view() === 'browse'" class="kiosk">
+    <div data-bind="visible: screen() === 'browse'" class="kiosk">
         <div class="eyebrow">public rooms</div>
         <p class="muted">No room list yet &mdash; rooms are found by their code.</p>
         <button class="pri" data-bind="click: go_create">Create a room</button>

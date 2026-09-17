@@ -80,9 +80,9 @@ const no_sfx = { jump() {}, death() {}, spring() {}, splash() {}, fly() {}, musi
 // `held` is the seats this client holds; control scheme n drives held[n] (#32). Input
 // reaches the simulation only through the room, over a loopback transport -- the same path
 // a networked room takes, with a different transport under it (#16, #33).
-function start(seed, settings, held) {
+function start(seed, settings, held, transport = new Loopback_Transport()) {
     const keyboard = new Keyboard([]);
-    const room = new Room(new Loopback_Transport(), (scheme) => keyboard.input_frame(scheme));
+    const room = new Room(transport, (scheme) => keyboard.input_frame(scheme));
     room.start({ seed, settings, held });
     const rnd = make_rnd(room.seed);
     const objects = new Objects(rnd);
@@ -236,6 +236,37 @@ assert.deepEqual(
     splats,
     [...Array(50).keys()].map((i) => i + 10),
     "the leftovers ring holds the newest 50 splats, oldest painted first",
+);
+
+// AI-fill off: a seat nobody holds is disabled, not handed to the CPU, and the match runs
+// short-handed (#7, #37). Last, because building a Game replaces the `player` array.
+const short_handed = start(1, {}, [0], {
+    receive(fn) {
+        this.to_client = fn;
+    },
+    send(msg) {
+        if (msg.type !== "start") return;
+        this.to_client({
+            type: "start",
+            t: 0,
+            d: 0,
+            seed: 1,
+            settings: {},
+            held: [0],
+            drivers: ["local", "off", "off", "off"],
+        });
+    },
+});
+assert.deepEqual(
+    player.map((p) => p.enabled),
+    [true, false, false, false],
+    "a disabled seat has no bunny in the match at all",
+);
+const short_frames = short_handed.room.step();
+assert.deepEqual(
+    Object.keys(short_frames),
+    ["0"],
+    "and no frame of its own: a disabled seat is not a driver with the keys released",
 );
 
 console.log(

@@ -14,7 +14,10 @@ import ko from "knockout";
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
 }
-export var Game_State = Enum({ Not_Started: 0, Playing: 1, Paused: 2 });
+// `Board` is this client's scoreboard being up, which is all the P key does in a lockstep
+// room: the simulation keeps running under it and nobody else hears about it. Only a local
+// room really stops, because there is nothing there to desync from (#21, #37).
+export var Game_State = Enum({ Not_Started: 0, Playing: 1, Board: 2 });
 
 // `config` is this client's half of the match: the seed and the settings it proposes if it
 // is the host, and nothing at all if it is not. What the match actually runs on arrives on
@@ -41,6 +44,7 @@ export function Game_Session(level, config, muted, transport) {
     var sfx = null;
     var sound_player = null;
     var start_when_ready = false;
+    var board_timer = null;
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
@@ -108,22 +112,50 @@ export function Game_Session(level, config, muted, transport) {
         room.start({ seed: config.seed, settings: config.settings, held: config.held });
     };
 
-    this.pause = function () {
-        if (!game) return;
-        self.game_state(Game_State.Paused);
-        sound_player.set_muted(true);
-        game.pause();
+    function snapshot() {
         self.scores(
             player.map(function (p) {
                 return p.bumped;
             }),
         );
-    };
-    this.unpause = function () {
-        if (!game) return;
+    }
+
+    function forget_board() {
+        clearInterval(board_timer);
+        board_timer = null;
+    }
+
+    // Simulating, with no board up. `Game.start` is a no-op while it is already pumping,
+    // which is what lets every way back into the match share this.
+    function play() {
+        forget_board();
         self.game_state(Game_State.Playing);
         sound_player.set_muted(muted);
         game.start();
+    }
+
+    // The board, over a simulation that carries on scoring behind it. Its refresh is on a
+    // wall clock rather than on a tick, because nothing in the loop knows the board is up
+    // -- and a local room needs none, since the sim really does stop under it (#37).
+    this.show_board = function () {
+        if (!game) return;
+        self.game_state(Game_State.Board);
+        snapshot();
+        if (config.local) {
+            sound_player.set_muted(true);
+            game.pause();
+            return;
+        }
+        board_timer = setInterval(snapshot, 250);
+    };
+    this.hide_board = function () {
+        if (game) play();
+    };
+    // The way out of the match, whichever screen it is leaving for. The board is not that
+    // any more: in a networked room it never stopped the simulation (#37).
+    this.stop = function () {
+        forget_board();
+        if (game) game.pause();
     };
     // Pressed before `start` has come back, which is a round trip on a socket: remembered
     // rather than dropped, so the button works the moment the room does.
@@ -133,24 +165,27 @@ export function Game_Session(level, config, muted, transport) {
             return;
         }
         sfx.music();
-        self.unpause();
+        play();
     };
 
     key_action_mappings["M"] = function () {
-        if (self.game_state() === Game_State.Playing) {
-            muted = !muted;
-            sound_player.toggle_sound();
-        }
+        // The simulation is still running behind a networked room's board, so the sound is
+        // still playing and M still means something there (#37). A local room really is
+        // stopped, and is muted for as long as it is.
+        if (self.game_state() === Game_State.Not_Started) return;
+        if (config.local && self.game_state() === Game_State.Board) return;
+        muted = !muted;
+        sound_player.toggle_sound();
     };
-    // Pause only: starting a match is the lobby's Start button, and a P typed on a flow
-    // screen must not jump the queue (#35).
+    // The board only: starting a match is the lobby's Start button, and a P typed on a
+    // flow screen must not jump the queue (#35).
     key_action_mappings["P"] = function () {
         switch (self.game_state()) {
-            case Game_State.Paused:
-                self.unpause();
+            case Game_State.Board:
+                self.hide_board();
                 break;
             case Game_State.Playing:
-                self.pause();
+                self.show_board();
                 break;
         }
     };
