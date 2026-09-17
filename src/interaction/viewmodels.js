@@ -391,6 +391,22 @@ function ViewModel() {
         remember("room", { id: null });
     }
 
+    // The frozen last frame, held for a moment before the lobby replaces it: the match
+    // stopped on the tick the whole room agreed on, and how long this client looks at it
+    // afterwards is nobody else's business (#39).
+    var HOLD_MS = 2000;
+    var leaving = null;
+    function to_lobby_soon() {
+        // Only from the match itself. A client that watched it from the lobby is already
+        // there and wants the board now, not in two seconds.
+        if (self.screen() !== "play") return go("room");
+        clearTimeout(leaving);
+        leaving = setTimeout(function () {
+            leaving = null;
+            go("room");
+        }, HOLD_MS);
+    }
+
     // Why the match this client is leaving ended, and the board the host counted for it,
     // from the `match_end` it left on.
     var ended_because = null;
@@ -477,7 +493,7 @@ function ViewModel() {
                 self.board(announced_board);
                 self.board_reason(msg.reason);
             }
-            go("room");
+            to_lobby_soon();
         };
         // A limit the simulation reached. Every client stops on the same tick; the host is
         // what announces it, exactly as it announces a walk back to the lobby (#22, #39).
@@ -491,6 +507,10 @@ function ViewModel() {
         // want of a current session, and rebuild a lobby session that replaces the
         // transport's listener -- orphaning the match it was already in.
         game.on_match_start = function () {
+            // A match beginning outranks the last one's frozen frame: the hold must not
+            // walk this client out of the match it just started.
+            clearTimeout(leaving);
+            leaving = null;
             // Zeroed at the next start rather than on lobby entry, which is where the last
             // match's board is read (#13, #39). A networked client that is not playing this
             // match hears the same thing from the room instead.

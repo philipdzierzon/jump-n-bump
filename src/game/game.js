@@ -102,6 +102,10 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
         var reason = ended ? null : limit_reached();
         if (reason) {
             ended = true;
+            // The tick that ended it is the one worth seeing: the pump draws once per
+            // catch-up batch and breaks out of the loop here, so without this the killing
+            // blow is simulated and never painted (#39).
+            renderer.draw();
             self.pause();
             if (self.on_end) self.on_end(reason);
         }

@@ -295,6 +295,11 @@ assert.ok(
 // tick every client ends the match on -- and the host is what announces it (#22, #39).
 player[1].bumps = 3;
 player[1].bumped[0] = 3;
+await sleep(300);
+assert.ok(
+    shown(screen("play")),
+    "the last frame is held for a moment rather than cut away on the tick it was drawn (#39)",
+);
 await on("room");
 assert.equal(
     text(board_panel().querySelector("p.banner")),
