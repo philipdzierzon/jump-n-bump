@@ -36,17 +36,25 @@ try {
 
     // One origin: the same base URL that served the client terminates the socket (#34).
     const ws = new WebSocket(base.replace(/^http/, "ws") + "/ws");
-    const joined = await new Promise((resolve, reject) => {
+    // Create a room, then take a seat on it: hosting is a property of a client that holds
+    // one, so the handshake alone no longer proves the room works (#36).
+    const [joined, seated] = await new Promise((resolve, reject) => {
+        let handshake = null;
         ws.onmessage = (e) => {
             const msg = JSON.parse(e.data);
-            if (msg.type === "joined") resolve(msg);
+            if (msg.type === "joined") {
+                handshake = msg;
+                ws.send(JSON.stringify({ type: "seats", names: ["Smoke"] }));
+            }
+            if (msg.type === "room" && msg.held.length) resolve([handshake, msg]);
         };
         ws.onopen = () => ws.send(JSON.stringify({ type: "create" }));
         ws.onerror = reject;
         setTimeout(() => reject(new Error("no room within 5s")), 5000);
     });
     assert.match(joined.id, /^[A-HJ-NP-Z]{5}$/, `${joined.id} is not a room id`);
-    assert.equal(joined.host, true, "the client that creates a room hosts it");
+    assert.deepEqual(seated.seats, ["Smoke", null, null, null], "the seat carries its username");
+    assert.equal(seated.host, true, "the client holding the first seat hosts the room");
     ws.close();
     console.log(`OK ${base}`);
 } finally {

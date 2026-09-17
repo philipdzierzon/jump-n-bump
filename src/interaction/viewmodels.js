@@ -41,6 +41,30 @@ var CODE_HINT = "A code is 5 letters, no I and no O.";
 // what would make an unlisted room's id worth guessing at (#8).
 var UNAVAILABLE = "That room is not available. Check the code, and the password if it has one.";
 
+// The token is the relay's to mint; this only remembers it, keyed by room id, so a reload
+// reclaims every seat this client held (#7). `sessionStorage` survives a refresh and dies
+// with the tab, which is the disconnect worth serving. The schemes ride along because they
+// are client-local: which keyboard drives which of this client's seats is nobody else's
+// business, and the relay never hears about it.
+function remember(id, identity) {
+    try {
+        // Merged rather than overwritten: the token arrives on the handshake and the
+        // schemes when the seats are asked for, and neither knows about the other.
+        sessionStorage.setItem("jnb:" + id, JSON.stringify(Object.assign(recall(id), identity)));
+    } catch (e) {
+        // ponytail: a browser with storage refused cannot reclaim a seat, and is told
+        // nothing about it -- which is the pre-#36 behaviour. upgrade path: say so on the
+        // lobby screen if anybody ever reports it.
+    }
+}
+function recall(id) {
+    try {
+        return JSON.parse(sessionStorage.getItem("jnb:" + id)) || {};
+    } catch (e) {
+        return {};
+    }
+}
+
 function ViewModel() {
     "use strict";
     var self = this;
@@ -57,6 +81,10 @@ function ViewModel() {
     // The room id this client has already spent its no-password attempt on, so Back onto
     // the same link does not open a second socket to be refused by the same room.
     var attempted_id = null;
+    // Granted by the relay, never assumed: the seats this client holds, in the order it
+    // holds them, which is the order its control schemes bind in (#7).
+    var granted = ko.observableArray([]);
+    var token = null;
 
     this.screen = ko.observable("landing");
     this.code = ko.observable("");
@@ -66,6 +94,9 @@ function ViewModel() {
     this.pending_id = ko.observable(null);
     this.is_host = ko.observable(true);
     this.participants = ko.observableArray([]);
+    // Every seat in the room, by the username of the participant on it -- null for a seat
+    // nobody holds, which is the AI's (#36).
+    this.seat_names = ko.observableArray([null, null, null, null]);
     this.current_game = ko.observable(null);
     this.board = ko.observable(null);
     this.current_level = create_default_level();
@@ -85,15 +116,26 @@ function ViewModel() {
         return SCHEME_NAMES[scheme];
     };
 
-    // ponytail: the board names the seats this client holds and calls the rest by their
-    // bunny, because nothing tells it who is on the others yet. upgrade path: room-wide
-    // usernames, which arrive with the seats (#36).
+    // The room's own seat table, so the board names every participant and not only the ones
+    // on this keyboard; a seat nobody holds keeps its bunny's name (#13, #36).
     function display_names() {
         return BUNNY_NAMES.map(function (bunny, seat) {
-            var participant = self.participants()[seat];
-            return participant && participant.name() ? participant.name() : bunny;
+            return self.seat_names()[seat] || bunny;
         });
     }
+
+    // The lobby shows all four seats, whoever is on them: the username, the bunny, and the
+    // control scheme for the seats this keyboard drives (#13, #36).
+    this.seat_rows = ko.computed(function () {
+        return BUNNY_NAMES.map(function (bunny, seat) {
+            var mine = self.participants()[granted().indexOf(seat)];
+            return {
+                name: self.seat_names()[seat] || "AI",
+                bunny: bunny,
+                scheme: mine ? SCHEME_NAMES[mine.scheme] : "",
+            };
+        });
+    });
 
     // The live match's board while one is up, and the board of the last match once it is
     // over: the lobby's session has not been played, so its zeroes are not the answer.
@@ -130,6 +172,13 @@ function ViewModel() {
         self.pending_id(null);
         self.password("");
         attempted_id = null;
+        // A client's seat count is fixed for the room's lifetime, so the next room is named
+        // from scratch rather than inheriting this one's couch (#14).
+        self.participants([]);
+        self.seat_names([null, null, null, null]);
+        granted([]);
+        token = null;
+        remember("room", { id: null });
     }
 
     function end_match() {
@@ -152,9 +201,7 @@ function ViewModel() {
                 seed: Date.now() | 0,
                 settings: url,
                 host: host,
-                held: participants.map(function (_, seat) {
-                    return seat;
-                }),
+                held: granted(),
                 schemes: participants.map(function (participant) {
                     return participant.scheme;
                 }),
@@ -170,27 +217,69 @@ function ViewModel() {
         return game;
     }
 
+    // The relay's picture of the room: which seats exist, who is on them, which ones this
+    // client was granted, and whether it hosts. It arrives on the handshake and again on
+    // every change, so joining, being seated, someone else being seated and the host
+    // migrating are all one code path (#36).
+    function apply_room(msg) {
+        self.seat_names(msg.seats);
+        host = msg.host;
+        self.is_host(host);
+        granted(msg.held);
+        if (!msg.held.length) return;
+        if (self.participants().length) {
+            // The name everyone sees is the relay's, not the one that was typed.
+            msg.held.forEach(function (seat, nth) {
+                self.participants()[nth].name(msg.seats[seat]);
+            });
+        } else {
+            // A reload comes back with the seats but not with the keyboards: schemes are
+            // client-local and bind to held seats in join order (#7).
+            var schemes = recall(self.room_id()).schemes || [];
+            self.participants(
+                msg.held.map(function (seat, nth) {
+                    return {
+                        scheme: schemes[nth] == null ? nth : schemes[nth],
+                        name: ko.observable(msg.seats[seat]),
+                    };
+                }),
+            );
+        }
+        // The grant is what opens the lobby: the seats are the relay's to give, so the
+        // names screen waits for them rather than assuming them (#14).
+        if (self.screen() === "names") go("room");
+    }
+
     function connect(entry) {
         self.error("");
         var leaving = transport;
         var socket = new WebSocket_Transport(
             relay_url(),
             entry,
-            function (joined) {
-                // Only once the new room is in: a refused join leaves this client in the
-                // room it already had, rather than in neither.
-                if (leaving.close) leaving.close();
-                transport = socket;
-                host = joined.host;
-                self.is_host(host);
-                self.room_id(joined.id);
-                self.pending_id(joined.id);
-                // The host started before this client arrived, so there is nothing to join
-                // until the next match -- which this session picks up when it comes (#40).
-                self.error(
-                    joined.started ? "A match is in progress; you are in for the next one." : "",
-                );
-                go("names", true);
+            function (msg) {
+                if (msg.type === "joined") {
+                    // Only once the new room is in: a refused join leaves this client in the
+                    // room it already had, rather than in neither.
+                    if (leaving.close) leaving.close();
+                    transport = socket;
+                    token = msg.token;
+                    self.room_id(msg.id);
+                    self.pending_id(msg.id);
+                    remember(msg.id, { token: token });
+                    // The lobby's own URL is `#room`, which says nothing about which room:
+                    // this is what a reload reads to find its way back to one (#36).
+                    remember("room", { id: msg.id });
+                    // The host started before this client arrived, so there is nothing to
+                    // join until the next match -- which this session picks up when it
+                    // comes (#40).
+                    self.error(
+                        msg.started ? "A match is in progress; you are in for the next one." : "",
+                    );
+                } else if (transport !== socket) return;
+                apply_room(msg);
+                // A reload lands back in the lobby, because the token brought the seats
+                // back with it; a first arrival goes to the names screen to ask for some.
+                if (msg.type === "joined") go(msg.held.length ? "room" : "names", true);
             },
             function (code) {
                 if (code === "DISCONNECTED") {
@@ -199,8 +288,18 @@ function ViewModel() {
                     // without a reload. upgrade path: reconnect into the seat (#42).
                     if (transport === socket) leave_room();
                     self.error("The connection dropped.");
+                } else if (code === "NAME_TAKEN") {
+                    self.error("Somebody in this room already has that name.");
+                } else if (code === "BAD_NAME") {
+                    self.error("Every name needs 1 to 16 characters.");
+                } else if (code === "ROOM_FULL") {
+                    self.error("Not enough free seats in that room for everyone here.");
                 } else if (entry.type === "create") {
                     self.error(code === "ID_TAKEN" ? "That code is taken." : CODE_HINT);
+                } else if (self.screen() === "room" || self.screen() === "play") {
+                    // A reload into a room that has since gone: there is nothing to reclaim
+                    // and no password worth asking for.
+                    go("landing", true);
                 } else if (self.screen() === "password") {
                     self.error(UNAVAILABLE);
                 } else {
@@ -218,7 +317,7 @@ function ViewModel() {
         if (self.room_id() === id) return go("room", true);
         if (attempted_id === id) return go("password", true);
         attempted_id = id;
-        connect({ type: "join", id: id });
+        connect({ type: "join", id: id, token: recall(id).token });
     }
 
     // A reload, or a Forward into a screen the flow has not walked to, arrives with none
@@ -232,7 +331,15 @@ function ViewModel() {
         self.screen(route.screen);
         if (route.screen === "password" && !self.pending_id()) return go("landing", true);
         if (route.screen === "room" || route.screen === "play")
-            if (!self.participants().length) return go("names", true);
+            if (!self.participants().length) {
+                // A reload arrives with the hash and nothing else. The room id and the
+                // token outlived it in `sessionStorage`, so the seats can be reclaimed
+                // rather than asked for again (#7); with neither, the names screen is one
+                // step back rather than a screen with nothing behind it.
+                var last = recall("room").id;
+                if (last && !self.room_id()) return enter(last);
+                return go("names", true);
+            }
         // A session from the lobby on, so the host's `start` lands on a client that is
         // already listening for it.
         if (route.screen === "room") session();
@@ -286,10 +393,18 @@ function ViewModel() {
         go(id);
     };
     this.submit_password = function () {
-        connect({ type: "join", id: self.pending_id(), password: self.password() });
+        connect({
+            type: "join",
+            id: self.pending_id(),
+            password: self.password(),
+            token: recall(self.pending_id()).token,
+        });
     };
 
     function add_participant(scheme) {
+        // Fixed at the names screen and granted all-or-nothing, so Back onto it changes
+        // nothing: the seats are already held (#14).
+        if (granted().length) return;
         var taken = self.participants().map(function (participant) {
             return participant.name();
         });
@@ -303,10 +418,39 @@ function ViewModel() {
         self.participants.push({ scheme: scheme, name: ko.observable(free) });
     }
     this.drop_participant = function (participant) {
+        if (granted().length) return;
         self.participants.remove(participant);
     };
+    // Offline the seats are simply the ones on this keyboard; online they are the relay's
+    // to grant, all-or-nothing, against names it checks for collisions (#7, #14).
     this.take_seats = function () {
-        go("room");
+        // Back onto the names screen and forward again: the seats are already granted, and
+        // a client's count is fixed for the room's lifetime (#14).
+        if (granted().length) return go("room");
+        var participants = self.participants();
+        var names = participants.map(function (participant) {
+            return participant.name();
+        });
+        if (!self.room_id()) {
+            granted(
+                participants.map(function (_, seat) {
+                    return seat;
+                }),
+            );
+            self.seat_names(
+                BUNNY_NAMES.map(function (_, seat) {
+                    return names[seat] || null;
+                }),
+            );
+            return go("room");
+        }
+        self.error("");
+        remember(self.room_id(), {
+            schemes: participants.map(function (participant) {
+                return participant.scheme;
+            }),
+        });
+        transport.send({ type: "seats", names: names });
     };
 
     // The keyboard is the form: a couch player is added by pressing that control scheme's

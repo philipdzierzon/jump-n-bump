@@ -152,6 +152,7 @@
         </ul>
         <p class="muted" data-bind="visible: participants().length === 0">Nobody yet.</p>
         <button class="pri" data-bind="click: take_seats, enable: participants().length > 0">Take the seats</button>
+        <p class="err" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Start over</button>
     </div>
 
@@ -163,13 +164,14 @@
             <p class="link" data-bind="text: join_link"></p>
             <button class="sm" data-bind="click: copy_link">Copy join link</button>
         </div>
-        <ul class="seats" data-bind="foreach: participants">
+        <ul class="seats" data-bind="foreach: seat_rows">
             <li>
                 <span class="grow" data-bind="text: name"></span>
-                <small data-bind="text: $parent.scheme_name(scheme)"></small>
+                <small data-bind="text: bunny"></small>
+                <small data-bind="text: scheme, visible: scheme"></small>
             </li>
         </ul>
-        <p class="muted">Seats nobody takes are played by the AI.</p>
+        <p class="muted">Every seat in the room. The ones nobody takes are played by the AI.</p>
         <button class="pri" data-bind="visible: is_host, click: start_match, enable: !loading_level()">Start the match</button>
         <p class="muted" data-bind="visible: !is_host()">Waiting for the host to start.</p>
         <p class="err" data-bind="text: error"></p>

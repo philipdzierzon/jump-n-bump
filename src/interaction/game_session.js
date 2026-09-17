@@ -82,9 +82,8 @@ export function Game_Session(level, config, muted, transport) {
     // Only the host proposes a match, and it proposes from the lobby rather than from this
     // constructor: a session exists for as long as a client is in the room, and the match
     // begins when the host says so (#35, #37). A joining client plays what it is handed.
-    // ponytail: the seats this client asks for are the seats it takes, unfiltered, so two
-    // clients in a room both drive seat 0 and desync on the first tick. upgrade path: the
-    // room grants seats and the relay drops input for seats the sender does not hold (#36).
+    // The seats are the room's to grant, not this client's to claim: `held` here is what a
+    // local room runs on, and a networked one is handed its own back on `start` (#36).
     this.propose = function () {
         room.start({ seed: config.seed, settings: config.settings, held: config.held });
     };
