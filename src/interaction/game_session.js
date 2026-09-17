@@ -45,6 +45,26 @@ export function Game_Session(level, config, muted, transport) {
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
     this.on_match_start = null;
+    this.on_match_end = null;
+
+    // The relay cannot read the simulation, so the host announces the end and the final
+    // board travels with it (#22, #19). It comes back to the announcer too, which is what
+    // makes every client leave the match on the same message rather than on its own.
+    room.on_match_end = function (msg) {
+        if (self.on_match_end) self.on_match_end(msg);
+    };
+    // A client that stops simulating hands its seats over rather than leaving them frozen.
+    this.release_seats = function () {
+        room.release();
+    };
+    this.announce_end = function (reason) {
+        room.end_match(
+            reason,
+            player.map(function (p) {
+                return p.bumped;
+            }),
+        );
+    };
 
     // A socket answers `start` a round trip later than a loopback does, so the whole
     // simulation is built out of what the relay handed down rather than out of `config`
@@ -82,9 +102,8 @@ export function Game_Session(level, config, muted, transport) {
     // Only the host proposes a match, and it proposes from the lobby rather than from this
     // constructor: a session exists for as long as a client is in the room, and the match
     // begins when the host says so (#35, #37). A joining client plays what it is handed.
-    // ponytail: the seats this client asks for are the seats it takes, unfiltered, so two
-    // clients in a room both drive seat 0 and desync on the first tick. upgrade path: the
-    // room grants seats and the relay drops input for seats the sender does not hold (#36).
+    // The seats are the room's to grant, not this client's to claim: `held` here is what a
+    // local room runs on, and a networked one is handed its own back on `start` (#36).
     this.propose = function () {
         room.start({ seed: config.seed, settings: config.settings, held: config.held });
     };

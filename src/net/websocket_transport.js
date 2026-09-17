@@ -4,7 +4,7 @@
 //
 // The handshake and the latency probe never reach the room. `create` and `join` answer
 // before a match exists, and a ping is measurement, not a message that moves anything.
-export function WebSocket_Transport(url, entry, on_joined, on_error) {
+export function WebSocket_Transport(url, entry, on_room, on_error) {
     "use strict";
     var self = this;
     var socket = new WebSocket(url);
@@ -27,7 +27,11 @@ export function WebSocket_Transport(url, entry, on_joined, on_error) {
                 break;
             case "joined":
                 joined = true;
-                if (on_joined) on_joined(msg);
+            // falls through -- a room update is the handshake's own shape with the handshake fields left
+            // off: both say which seats this client holds, who is on the others and who
+            // hosts, so one callback reads both (#36).
+            case "room":
+                if (on_room) on_room(msg);
                 break;
             case "error":
                 if (on_error) on_error(msg.code);
