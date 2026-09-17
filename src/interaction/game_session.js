@@ -15,7 +15,7 @@ import {
     unpack_snapshot,
 } from "../game/snapshot.js";
 import { make_rnd } from "../game/rnd.js";
-import { Room } from "../net/room.js";
+import { MAX_CATCH_UP, Room } from "../net/room.js";
 import ko from "knockout";
 
 function noop() {}
@@ -114,6 +114,12 @@ export function Game_Session(get_level, config, muted, transport) {
         // pump loop would go on stepping the `player` array the new one replaces, and its
         // music would go on playing.
         if (game) game.pause();
+        // With it goes its snapshot timer: the tick counter belongs to the match that is
+        // starting and the simulation still in these variables belongs to the last one, so
+        // a snapshot taken between here and `build` would be the old match's state under
+        // the new match's tick. `play` arms it again (#40).
+        clearInterval(snapshot_timer);
+        snapshot_timer = null;
         var mine = ++starting;
         // The level is the room's, named in the settings the relay handed down, and a
         // `.dat` has to be fetched and decoded before anything can be built on it (#38).
@@ -125,6 +131,12 @@ export function Game_Session(get_level, config, muted, transport) {
     };
 
     function build(level) {
+        // Two ways a match already running cannot be joined: a body that does not decode,
+        // and a gap too big to replay. Either one means this client would be playing a
+        // state it knows is wrong, so it stays in the lobby and plays the next match
+        // instead of half-joining this one (#40).
+        var resumed = room.resume ? decode_snapshot(room.resume) : null;
+        if (room.resume && (!resumed || room.gap() > MAX_CATCH_UP)) return;
         rnd = make_rnd(room.seed);
         var settings = room.settings;
 
@@ -148,11 +160,8 @@ export function Game_Session(get_level, config, muted, transport) {
             if (self.on_limit) self.on_limit(reason);
         };
 
-        // A match already running: the host's state, and every input frame the relay rang
-        // since it, replace the tick-0 simulation just built and the gap between the two
-        // is replayed at once (#40). A body that does not decode is not unpacked into the
-        // simulation, which leaves this client on a match it will have to be resynced into.
-        var resumed = room.resume && decode_snapshot(room.resume);
+        // The host's state, and every input frame the relay rang since it, replace the
+        // tick-0 simulation just built, and the gap between the two is replayed at once.
         if (resumed) {
             unpack_snapshot(resumed, rnd, objects);
             // Hundreds of ticks of history must not replay as a burst of deaths and

@@ -664,8 +664,94 @@ assert.equal(
     7 - payload.d - 1,
     "replayed up to the tick the fastest client is about to step, not the one it stamps for",
 );
+// A change stamped inside the gap, rather than after the tick the replay ends on: the
+// replay starts at the snapshot, so it has to be handed down as a change too. Baking it
+// into the table would apply it from the snapshot's tick on, which is 30-odd ticks before
+// every other client applied it.
+for (let t = 10; t <= 40; t++) snap_host.socket.send({ type: "input", t, seats: { 0: pressed } });
+const third = connect({ type: "join", id: "SNAPX" });
+await lobby(third);
+const third_saw = [];
+third.socket.receive((msg) => third_saw.push(msg));
+third.socket.send({ type: "resync" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const later = third_saw.find((msg) => msg.type === "start");
+assert.ok(later.until > later.changes[0].t, "the stamped tick is inside the gap now");
+assert.deepEqual(
+    later.drivers,
+    ["local", "ai", "ai", "ai"],
+    "and the table is still the one the snapshot's tick had",
+);
+assert.deepEqual(
+    later.changes,
+    [{ t: 7 + 2 * later.d, seat: 1, driver: "local" }],
+    "with the change applied where it belongs, part-way through the replay",
+);
+third.socket.close();
 snap_host.socket.close();
 late_joiner.socket.close();
+
+// An ask the relay has nothing to answer with yet is remembered, not dropped: the first
+// two seconds of a match are exactly when a seat is taken, and nobody asks twice (#40).
+const early_host = connect({ type: "create", id: "SNPZX" });
+await lobby(early_host);
+await early_host.seats(["Chief"]);
+early_host.socket.send({ type: "start", seed: 7, settings: {}, held: [] });
+const early_guest = connect({ type: "join", id: "SNPZX" });
+await lobby(early_guest);
+const early_saw = [];
+early_guest.socket.receive((msg) => early_saw.push(msg));
+await early_guest.seats(["Early"]);
+early_guest.socket.send({ type: "resync" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    early_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a room whose host has not snapshotted yet has nothing to hand over",
+);
+const early_matrix = new Array(16).fill(0);
+early_matrix[1] = 2;
+early_host.socket.send({ type: "snapshot", t: 0, matrix: early_matrix, body: "FIRST-BODY" });
+// Answered by the snapshot rather than by a reply to anything, so this waits on the
+// message and gives up rather than hanging a suite that has no test runner under it.
+function awaited(seen, type) {
+    return new Promise((resolve, reject) => {
+        const since = Date.now();
+        const wait = setInterval(() => {
+            const msg = seen.find((one) => one.type === type);
+            if (msg) {
+                clearInterval(wait);
+                resolve(msg);
+            } else if (Date.now() - since > 2000) {
+                clearInterval(wait);
+                reject(new Error("no " + type + " ever arrived"));
+            }
+        }, 10);
+    });
+}
+const answered = await awaited(early_saw, "start");
+assert.equal(answered.snapshot, "FIRST-BODY", "so the host's first snapshot answers the ask");
+
+// The relay runs no simulation, so a host that leaves without announcing an end used to
+// take the board with it. The matrix rides plaintext on the snapshot, which is what lets
+// the relay hand one over anyway (#13, #19). The seat goes first, because a room with a
+// seat-holder left in it migrates the host instead of ending the match (#14).
+early_guest.socket.send({ type: "leave" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+early_host.socket.close();
+const orphaned = await awaited(early_saw, "match_end");
+assert.equal(orphaned.reason, "host_left");
+assert.deepEqual(
+    orphaned.matrix,
+    [
+        [0, 2, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+    ],
+    "the host's last board, four by four, from the 16 entries beside the body it never read",
+);
+early_guest.socket.close();
 
 // A level name is resolved by fetching `levels/<name>/<name>.dat` beside the page, so the
 // list is only an allowlist while every name in it is really there (#38).

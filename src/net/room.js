@@ -1,9 +1,11 @@
 var RELEASED = { left: false, right: false, up: false };
 
-// The most ticks one `start` may ask this client to replay. A minute of them costs a few
-// hundred milliseconds, and the relay is the only thing that sets the target: a number it
-// got wrong must not spin the tab forever (#40).
-var MAX_CATCH_UP = 3600;
+// The most ticks a `start` may ask this client to replay. A minute of them costs a few
+// hundred milliseconds; more than that is a host that stopped snapshotting rather than a
+// gap worth closing, and a client that replayed it would land minutes behind the room and
+// consume every frame late (#51). A gap this size is a match not joined, not one joined
+// short: the caller checks `gap()` and stays in the lobby (#40).
+export var MAX_CATCH_UP = 3600;
 
 // The client's half of a room (#33). It owns the tick counter, the input-delay buffer and
 // the driver table, and it never knows whether the transport under it is a WebSocket or
@@ -56,10 +58,7 @@ export function Room(transport, read_input) {
                 self.settings = msg.settings;
                 held = msg.held;
                 self.resume = msg.snapshot || null;
-                catch_up_to = Math.min(
-                    tick + MAX_CATCH_UP,
-                    msg.until == null ? tick : msg.until | 0,
-                );
+                catch_up_to = Math.max(tick, msg.until == null ? tick : msg.until | 0);
                 // The frames the relay rang since that snapshot: the gap between the
                 // state and now, scheduled exactly as live ones are (#40).
                 (msg.inputs || []).forEach(function (frame) {
@@ -100,6 +99,12 @@ export function Room(transport, read_input) {
             settings: config.settings,
             held: config.held,
         });
+    };
+
+    // How many ticks of history this `start` is asking to be replayed. Zero for one that
+    // begins a match at tick 0.
+    this.gap = function () {
+        return catch_up_to - tick;
     };
 
     // Replays the gap, one `step` per tick, up to the tick the relay said the room's

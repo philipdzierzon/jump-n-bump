@@ -364,8 +364,24 @@ function leave(client) {
     // host's own announcement makes, which is the server-observed route into the lobby
     // (#22, #37). The relay ran no simulation, so there is no final board to send with it.
     if (room.started && ![...room.clients].some((other) => other.host))
-        return to_lobby(room, { type: "match_end", reason: "host_left" });
+        return to_lobby(room, {
+            type: "match_end",
+            reason: "host_left",
+            // The relay ran no simulation, but the host's last snapshot carried the board
+            // in plaintext beside the body -- which is the closest thing to a final one
+            // when the host left without announcing an end (#13, #19). Null before the
+            // first snapshot, and a client with a board of its own uses that instead.
+            matrix: last_board(room),
+        });
     broadcast_state(room);
+}
+
+// The 16-entry header of the host's last snapshot, as the four-by-four board every client
+// reads (#13). The relay never decodes the body, which is why the board is beside it.
+function last_board(room) {
+    const matrix = room.snapshot && room.snapshot.matrix;
+    if (!matrix) return null;
+    return room.seats.map((_seat, index) => matrix.slice(index * SEATS, index * SEATS + SEATS));
 }
 
 // Derived once, from the worst one-way trip in the room, and fixed for the match: a delay
@@ -383,9 +399,6 @@ function input_delay(room) {
 function stamp_driver(room, seat, driver) {
     const t = room.tick + 2 * room.d;
     broadcast(room, { type: "driver", t, seat, driver });
-    // Anything stamped for a tick older than the earliest one a joiner can land on has
-    // been applied by every client there is, so it is nobody's news any more.
-    room.stamped = room.stamped.filter((change) => change.t > room.tick - 2 * room.d - 2);
     room.stamped.push({ t, seat, driver, was: room.drivers[seat] });
     // A client that walks back to the lobby keeps its seats and hands the AI its bunnies,
     // so the seat is held, its holder is connected, and the AI is driving it all the same.
@@ -412,9 +425,15 @@ function keep_snapshot(client, msg) {
     if (!Array.isArray(matrix) || matrix.length !== SEATS * SEATS) return;
     if (!matrix.every((bumps) => Number.isInteger(bumps) && bumps >= 0)) return;
     room.snapshot = { t: msg.t, matrix, body: msg.body };
-    // The frames that state already accounts for are the ones nobody will ever ask for
-    // again: what the ring is for is the gap between it and now.
+    // The frames and the driver changes that state already accounts for are the ones
+    // nobody will ever ask for again: what both lists are for is the gap between it and
+    // now, and the snapshot's tick is where that gap starts.
     room.inputs = room.inputs.filter((frame) => frame.t >= msg.t);
+    room.stamped = room.stamped.filter((change) => change.t > msg.t);
+    // A client that asked before there was anything to answer with: the first two seconds
+    // of a match are exactly when a seat is taken, and an ask the relay drops is one
+    // nobody repeats (#40).
+    for (const other of room.clients) if (other.waiting) resume(other);
 }
 
 // One payload, two triggers (#40): a client joining a match in progress asks for this, and
@@ -428,10 +447,13 @@ function keep_snapshot(client, msg) {
 function resume(client) {
     const room = client.room;
     if (!room.started || !room.snapshot) return;
+    client.waiting = false;
     const until = Math.max(room.snapshot.t, room.tick - room.d - 1);
-    // The driver table as it will be on the tick this client lands on: every change
-    // stamped for a later tick undone, newest first, and handed down as a change instead.
-    const ahead = room.stamped.filter((change) => change.t > until);
+    // The driver table as it was on the tick the snapshot was taken, which is the tick the
+    // replay starts from: every change stamped since -- pruned to exactly those when that
+    // snapshot landed -- undone, newest first, and handed down as a change instead, to be
+    // applied on the tick every other client applies it on.
+    const ahead = room.stamped;
     const drivers = room.drivers.slice();
     for (let i = ahead.length - 1; i >= 0; i--) drivers[ahead[i].seat] = ahead[i].was;
     send(client, {
@@ -447,7 +469,7 @@ function resume(client) {
         seed: room.seed,
         settings: room.config,
         held: client.seats,
-        // As of the tick this client lands on, not as the match began: a seat the AI took
+        // As of the tick the replay starts on, not as the match began: a seat the AI took
         // over is the AI's to this client too (#7).
         drivers,
         changes: ahead.map(({ t, seat, driver }) => ({ t, seat, driver })),
@@ -473,6 +495,9 @@ function begin(room, msg) {
     room.snapshot = null;
     room.inputs = [];
     room.stamped = [];
+    // Nobody is waiting to be let into a match that has not started yet: every client in
+    // the room is being handed this one.
+    for (const other of room.clients) other.waiting = false;
     // The driver table rides on `start` rather than as four changes stamped for tick 0: a
     // client steps tick 0 the instant `start` lands, and the browser delivers each frame
     // as its own event, so stamped changes for that tick arrive after it has been stepped
@@ -625,6 +650,9 @@ function relay(client, msg) {
             keep_snapshot(client, msg);
             break;
         case "resync":
+            // Remembered rather than dropped when the host has not snapshotted yet: the
+            // next snapshot answers it (#40).
+            client.waiting = true;
             resume(client);
             break;
         case "config":

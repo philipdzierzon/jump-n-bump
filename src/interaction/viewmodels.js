@@ -556,18 +556,7 @@ function ViewModel() {
             self.board_reason(null);
         }
         self.match_running(!!msg.started);
-        // A match already running, and seats on it: this client asks the relay for the
-        // host's snapshot and the frames since it, which is what joins a match in progress
-        // -- a link followed mid-match, a reload, or seats taken while one runs (#40).
-        // Once per match, because the payload replaces this client's state and a second
-        // one would replace the state the first just built. A client that was handed the
-        // match by `start` asks too, and the relay has nothing cached to answer with until
-        // the host's first snapshot two seconds later.
         if (!msg.started) resuming = false;
-        else if (msg.held.length && !resuming) {
-            resuming = true;
-            session().resume();
-        }
         host = msg.host;
         self.is_host(host);
         granted(msg.held);
@@ -616,6 +605,19 @@ function ViewModel() {
         // The grant is what opens the lobby: the seats are the relay's to give, so the
         // names screen waits for them rather than assuming them (#14).
         if (self.screen() === "names") go("room");
+        // A match already running, and seats on it: this client asks the relay for the
+        // host's snapshot and the frames since it, which is what joins a match in progress
+        // -- a link followed mid-match, a reload, or seats taken while one runs (#40).
+        // Once per match, because the payload replaces this client's state and a second
+        // one would replace the state the first just built; the relay remembers an ask it
+        // has no snapshot to answer yet and answers it with the host's next one.
+        //
+        // Last in this function, because a session holds the seats and the control schemes
+        // it was built with: one built before the grant above drives nothing at all.
+        if (msg.started && msg.held.length && !resuming) {
+            resuming = true;
+            session().resume();
+        }
     }
 
     function connect(entry) {
