@@ -78,6 +78,16 @@ export function Room(transport, read_input) {
         transport.send({ type: "match_end", t: tick, reason: reason, matrix: matrix });
     };
 
+    // Hands every seat this client drives to the AI, on a tick the whole room agrees on
+    // (#7). This is what a client leaving the match says instead of going silent: a seat
+    // with a driver and no frames is all keys released, which looks like a bunny stuck in
+    // the scenery rather than one nobody is holding.
+    this.release = function () {
+        held.forEach(function (seat) {
+            self.set_driver(seat, "ai");
+        });
+    };
+
     // One tick of the room: apply the driver changes stamped for it, send this client's
     // input frame for every seat it drives, and hand back the frames to simulate now. A
     // seat with no driver at all is one nobody is holding, which is the AI's (#7).

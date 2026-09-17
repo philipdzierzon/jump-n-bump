@@ -56,6 +56,8 @@ function connect(entry) {
     };
 }
 
+const lobby_token = async (client) => (await client.until((msg) => msg.type === "joined")).token;
+
 const lobby = (client) => client.until((msg) => msg.type === "joined" || msg.type === "error");
 
 const created = connect({ type: "create", id: "qmftx" });
@@ -257,6 +259,32 @@ assert.deepEqual(
     [2],
     "a seat still held by an absent token is not one a stranger is given",
 );
+
+// A reload is a disconnect, so the host migrates -- and gets the room back when its own
+// token returns inside the reservation window (amends #17).
+const owner = connect({ type: "create", id: "HJZWR" });
+const owner_token = (await lobby(owner)).token;
+assert.equal((await owner.seats(["Owner"])).host, true, "the first seat-holder hosts");
+const guest = connect({ type: "join", id: "HJZWR" });
+await lobby(guest);
+await guest.seats(["Guest"]);
+owner.socket.close();
+assert.equal(
+    (await guest.until((msg) => msg.type === "room" && msg.host)).host,
+    true,
+    "the guest hosts while the owner is away",
+);
+const returned = connect({ type: "join", id: "HJZWR", token: owner_token });
+const restored = await lobby(returned);
+assert.deepEqual(restored.held, [0], "the owner reclaims its seat");
+assert.equal(restored.host, true, "and the room with it");
+assert.equal(
+    (await guest.until((msg) => msg.type === "room" && !msg.host)).host,
+    false,
+    "so the guest hands it back",
+);
+returned.socket.close();
+guest.socket.close();
 
 // Host migration: the oldest remaining seat-holding client, so a stranger leaving does not
 // evaporate a live match (#14).

@@ -156,6 +156,8 @@ function vacate(client) {
     for (const seat of client.seats)
         if (room.seats[seat] && room.seats[seat].token === client.token) room.seats[seat] = null;
     client.seats = [];
+    // A client with no seats is not in the room, so it has nothing left to come back to.
+    if (room.away_host === client.token) room.away_host = null;
     ensure_host(room);
 }
 
@@ -175,6 +177,15 @@ function admit(client, room, msg) {
         )
         .filter((index) => index >= 0);
     room.clients.add(client);
+    // A reload is a disconnect, so the host migrated the moment it dropped -- and hands the
+    // room back when its own token returns inside the reservation window. Amends #17's
+    // "host gets no grace and no restore": migration still happens immediately, so a host
+    // that never comes back is never a single point of failure, but a refresh does not
+    // cost you your own room.
+    if (client.seats.length && room.away_host === client.token) {
+        for (const other of room.clients) other.host = other === client;
+        room.away_host = null;
+    }
     if (client.seats.length) ensure_host(room);
     // `started` because `start` is a broadcast, not a replay: a client that follows the
     // link after the host began is waiting for the next match, and would otherwise wait
@@ -206,6 +217,9 @@ function leave(client) {
     // ponytail: the reserved seat is played by the AI from the next match start and the
     // dropped client is told nothing. upgrade path: the released-frame, AI takeover
     // mid-match and the Reconnecting... overlay (#42).
+    // Remembered only while the seats are: the window that reserves them is the window the
+    // host role waits out too.
+    if (client.host && client.seats.length) room.away_host = client.token;
     if (client.seats.length)
         setTimeout(() => {
             if (rooms[room.id] !== room) return;

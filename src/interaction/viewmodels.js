@@ -201,6 +201,10 @@ function ViewModel() {
         var game = self.current_game();
         if (!game) return;
         var played = game.game_state() !== Game_State.Not_Started;
+        // One rule for every way a client stops simulating -- back to the lobby, out to the
+        // landing screen, a level loaded: the seats it drove go to the AI on an agreed tick,
+        // so the room sees it leave instead of watching a bunny stand still (#7, #17).
+        if (played) game.release_seats();
         game.pause();
         // The board of the match you just left is what the lobby shows; it is not a screen
         // of its own (#13, #35).

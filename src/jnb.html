@@ -133,7 +133,7 @@
         <div class="codebox" data-bind="foreach: code_chars">
             <span data-bind="text: $data"></span>
         </div>
-        <p class="muted centre">This room needs a password.</p>
+        <p class="muted centre">Enter the room's password, if it has one.</p>
         <input type="password" placeholder="Password" data-bind="value: password, valueUpdate: 'input'" />
         <button class="pri" data-bind="click: submit_password">Continue</button>
         <p class="err" data-bind="text: error"></p>
@@ -182,7 +182,7 @@
             <div class="eyebrow">last match</div>
             <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->
         </div>
-        <label class="muted">Load a level:
+        <label class="muted" data-bind="visible: !room_id()">Load a level:
             <input type="file" accept=".dat" data-bind="event: { change: load_level }" />
         </label>
         <button class="sm" data-bind="click: go_landing">Leave</button>

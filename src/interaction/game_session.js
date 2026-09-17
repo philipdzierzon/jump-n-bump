@@ -53,6 +53,10 @@ export function Game_Session(level, config, muted, transport) {
     room.on_match_end = function (msg) {
         if (self.on_match_end) self.on_match_end(msg);
     };
+    // A client that stops simulating hands its seats over rather than leaving them frozen.
+    this.release_seats = function () {
+        room.release();
+    };
     this.announce_end = function (reason) {
         room.end_match(
             reason,
