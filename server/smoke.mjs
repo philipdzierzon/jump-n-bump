@@ -1,4 +1,4 @@
-// Smoke test: proves static serving, /healthz and the WebSocket echo.
+// Smoke test: proves static serving, /healthz and a room over the WebSocket.
 // Usage: node smoke.mjs [base-url]   (default: boots a local server)
 // The bare form needs `npm run build` first — it serves the built client.
 import assert from "node:assert";
@@ -34,15 +34,19 @@ try {
         assert.match(res.headers.get("content-type"), new RegExp(type));
     }
 
-    const ws = new WebSocket(base.replace(/^http/, "ws"));
-    const got = await new Promise((resolve, reject) => {
-        const seen = [];
-        ws.onmessage = (e) => seen.push(e.data) === 2 && resolve(seen);
-        ws.onopen = () => ws.send("ping");
+    // One origin: the same base URL that served the client terminates the socket (#34).
+    const ws = new WebSocket(base.replace(/^http/, "ws") + "/ws");
+    const joined = await new Promise((resolve, reject) => {
+        ws.onmessage = (e) => {
+            const msg = JSON.parse(e.data);
+            if (msg.type === "joined") resolve(msg);
+        };
+        ws.onopen = () => ws.send(JSON.stringify({ type: "create" }));
         ws.onerror = reject;
-        setTimeout(() => reject(new Error("no echo within 5s")), 5000);
+        setTimeout(() => reject(new Error("no room within 5s")), 5000);
     });
-    assert.deepEqual(got, ['{"type":"hello"}', "ping"]);
+    assert.match(joined.id, /^[A-HJ-NP-Z]{5}$/, `${joined.id} is not a room id`);
+    assert.equal(joined.host, true, "the client that creates a room hosts it");
     ws.close();
     console.log(`OK ${base}`);
 } finally {

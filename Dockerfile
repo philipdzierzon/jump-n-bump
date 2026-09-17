@@ -9,11 +9,15 @@ COPY game ./game
 RUN npm run build
 
 FROM node:22-alpine
-WORKDIR /app
+WORKDIR /app/server
 COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev
 COPY server/index.js server/smoke.mjs ./
+# The repo's own layout, because the relay validates room ids with the client's module
+# rather than a second copy of the alphabet (#8).
+WORKDIR /app
+COPY src/net/room_id.js ./src/net/room_id.js
 COPY --from=client /build/game ./game
 ENV CLIENT_DIR=/app/game PORT=8080
 EXPOSE 8080
-CMD ["node", "index.js"]
+CMD ["node", "server/index.js"]

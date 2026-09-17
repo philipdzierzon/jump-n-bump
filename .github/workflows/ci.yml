@@ -16,6 +16,10 @@ jobs:
       # The simulation replays deterministically with no DOM, so it is checked
       # here rather than in a browser.
       - run: npm ci
+      # The relay is tested against a real socket, so its dependencies are installed
+      # here too -- the image installs them separately, without the client's.
+      - run: npm ci
+        working-directory: server
       - run: npm run format:check
       - run: npm test
       # Builds the client and runs it exactly as production does, so one

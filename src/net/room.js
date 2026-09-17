@@ -21,6 +21,7 @@ export function Room(transport, read_input) {
     this.d = 0;
     this.seed = 0;
     this.settings = {};
+    this.on_start = null;
     this.on_match_end = null;
 
     transport.receive(function (msg) {
@@ -29,11 +30,17 @@ export function Room(transport, read_input) {
                 tick = 0;
                 input_at = {};
                 drivers_at = {};
-                drivers = [];
+                // The table rides on `start` rather than as four stamped changes: a
+                // client steps tick 0 the instant `start` lands, and a separate message
+                // for that same tick is a message for a tick already stepped past (#34).
+                drivers = msg.drivers.slice();
                 self.d = msg.d;
                 self.seed = msg.seed;
                 self.settings = msg.settings;
                 held = msg.held;
+                // A socket answers later than a loopback does, so the match's shared
+                // state is not readable on the line after `start` (#34).
+                if (self.on_start) self.on_start(msg);
                 break;
             case "input":
                 schedule_input(msg.t, msg.seats);
