@@ -89,6 +89,8 @@ function ViewModel() {
     // session, so a second match reuses the socket rather than rejoining.
     var transport = new Loopback_Transport();
     var host = true;
+    // Whether this client has already asked to be let into the match that is running.
+    var resuming = false;
     // The room id this client has already spent its no-password attempt on, so Back onto
     // the same link does not open a second socket to be refused by the same room.
     var attempted_id = null;
@@ -395,6 +397,9 @@ function ViewModel() {
         show_countdown();
         granted([]);
         token = null;
+        // The match in progress belonged to the room, so the next one is asked about from
+        // scratch (#40).
+        resuming = false;
         remember("room", { id: null });
     }
 
@@ -475,7 +480,10 @@ function ViewModel() {
                 // Read at propose time, not held from here: a local room's config is
                 // edited inside the lobby this session already exists in (#38).
                 settings: self.config,
-                host: host,
+                // The observable rather than its value: host migrates mid-match, and the
+                // snapshot the room is resynced from is whoever holds host at the time
+                // (#40, #14).
+                host: self.is_host,
                 held: granted(),
                 // Real pause survives in a local room only: there is nothing to desync
                 // from, and nobody to keep waiting (#16, #37).
@@ -548,6 +556,18 @@ function ViewModel() {
             self.board_reason(null);
         }
         self.match_running(!!msg.started);
+        // A match already running, and seats on it: this client asks the relay for the
+        // host's snapshot and the frames since it, which is what joins a match in progress
+        // -- a link followed mid-match, a reload, or seats taken while one runs (#40).
+        // Once per match, because the payload replaces this client's state and a second
+        // one would replace the state the first just built. A client that was handed the
+        // match by `start` asks too, and the relay has nothing cached to answer with until
+        // the host's first snapshot two seconds later.
+        if (!msg.started) resuming = false;
+        else if (msg.held.length && !resuming) {
+            resuming = true;
+            session().resume();
+        }
         host = msg.host;
         self.is_host(host);
         granted(msg.held);
