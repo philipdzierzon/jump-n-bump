@@ -36,3 +36,11 @@ export function Keyboard(key_function_mappings) {
         if (action != null) action();
     };
 }
+
+// The jump key of a scheme, which is how a couch player is added on the names screen
+// (#35). -1 for a key that is nobody's jump.
+export function jump_scheme(keyCode) {
+    return CONTROL_SCHEMES.findIndex(function (keys) {
+        return keys[2] === keyCode;
+    });
+}

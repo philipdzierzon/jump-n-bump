@@ -14,7 +14,7 @@ import ko from "knockout";
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
 }
-var Game_State = Enum({ Not_Started: 0, Playing: 1, Paused: 2 });
+export var Game_State = Enum({ Not_Started: 0, Playing: 1, Paused: 2 });
 
 // `config` is this client's half of the match: the seed and the settings it proposes if it
 // is the host, and nothing at all if it is not. What the match actually runs on arrives on
@@ -30,8 +30,11 @@ export function Game_Session(level, config, muted, transport) {
 
     var key_action_mappings = [];
     var keyboard = new Keyboard(key_action_mappings);
-    var room = new Room(transport, function (scheme) {
-        return keyboard.input_frame(scheme);
+    // Room counts this client's seats in the order it holds them; the scheme driving the
+    // nth of them is the one that participant pressed the jump key of, which is not the
+    // same number (#32, #35).
+    var room = new Room(transport, function (nth) {
+        return keyboard.input_frame(config.schemes[nth]);
     });
 
     var game = null;
@@ -41,6 +44,7 @@ export function Game_Session(level, config, muted, transport) {
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
+    this.on_match_start = null;
 
     // A socket answers `start` a round trip later than a loopback does, so the whole
     // simulation is built out of what the relay handed down rather than out of `config`
@@ -69,14 +73,21 @@ export function Game_Session(level, config, muted, transport) {
         var movement = new Movement(sfx, objects, settings, rnd);
         game = new Game(movement, ai, animation, renderer, objects, room, level, true, rnd);
 
+        // Every client in the room holds a session from the moment it reaches the lobby,
+        // so the host's `start` never lands on a client that is not listening yet (#35).
+        if (self.on_match_start) self.on_match_start();
         if (start_when_ready) self.start();
     };
 
-    // Only the host proposes a match: a joining client plays the one the relay hands it.
-    // ponytail: one client holding every seat, which is what hot-seat play is. upgrade
-    // path: the room hands down the seats this client was actually given (#36).
-    if (config.host)
-        room.start({ seed: config.seed, settings: config.settings, held: [0, 1, 2, 3] });
+    // Only the host proposes a match, and it proposes from the lobby rather than from this
+    // constructor: a session exists for as long as a client is in the room, and the match
+    // begins when the host says so (#35, #37). A joining client plays what it is handed.
+    // ponytail: the seats this client asks for are the seats it takes, unfiltered, so two
+    // clients in a room both drive seat 0 and desync on the first tick. upgrade path: the
+    // room grants seats and the relay drops input for seats the sender does not hold (#36).
+    this.propose = function () {
+        room.start({ seed: config.seed, settings: config.settings, held: config.held });
+    };
 
     this.pause = function () {
         if (!game) return;
@@ -112,11 +123,10 @@ export function Game_Session(level, config, muted, transport) {
             sound_player.toggle_sound();
         }
     };
+    // Pause only: starting a match is the lobby's Start button, and a P typed on a flow
+    // screen must not jump the queue (#35).
     key_action_mappings["P"] = function () {
         switch (self.game_state()) {
-            case Game_State.Not_Started:
-                self.start();
-                break;
             case Game_State.Paused:
                 self.unpause();
                 break;
@@ -129,20 +139,19 @@ export function Game_Session(level, config, muted, transport) {
     // A focused text field owns the keys: typing a P into the room id must not start a
     // game, an M must not toggle the sound, and WAD must not steer a bunny. The guard
     // lives here rather than in `Keyboard`, which is simulation-side and sees no DOM.
-    function typing(evt) {
-        var element = evt.target;
-        return (
-            !!element &&
-            (element.tagName === "INPUT" ||
-                element.tagName === "TEXTAREA" ||
-                element.isContentEditable)
-        );
-    }
-
     document.onkeydown = function (evt) {
-        if (!typing(evt)) keyboard.onKeyDown(evt);
+        if (!is_typing(evt)) keyboard.onKeyDown(evt);
     };
     document.onkeyup = function (evt) {
-        if (!typing(evt)) keyboard.onKeyUp(evt);
+        if (!is_typing(evt)) keyboard.onKeyUp(evt);
     };
+}
+
+// Shared with the flow screens, which have text fields of their own (#35).
+export function is_typing(evt) {
+    var element = evt.target;
+    return (
+        !!element &&
+        (element.tagName === "INPUT" || element.tagName === "TEXTAREA" || element.isContentEditable)
+    );
 }
