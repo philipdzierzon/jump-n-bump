@@ -155,6 +155,9 @@ export function Game_Session(level, config, muted, transport) {
     // any more: in a networked room it never stopped the simulation (#37).
     this.stop = function () {
         forget_board();
+        // The match is over for this client, so its music is over with it: muting used to
+        // ride along with the board, and the board stopped pausing anything (#37).
+        if (sound_player) sound_player.set_muted(true);
         if (game) game.pause();
     };
     // Pressed before `start` has come back, which is a round trip on a socket: remembered
