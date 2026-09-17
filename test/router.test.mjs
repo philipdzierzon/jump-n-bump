@@ -6,7 +6,12 @@ import assert from "node:assert/strict";
 
 import { screen_of } from "../src/interaction/router.js";
 import { jump_scheme } from "../src/game/keyboard.js";
-import { Scores_ViewModel, BUNNY_NAMES } from "../src/interaction/scores_viewmodel.js";
+import {
+    Scores_ViewModel,
+    match_result,
+    BUNNY_NAMES,
+    BUNNY_COLOURS,
+} from "../src/interaction/scores_viewmodel.js";
 
 assert.deepEqual(screen_of(""), { screen: "landing", room_id: null });
 assert.deepEqual(screen_of("#"), { screen: "landing", room_id: null });
@@ -46,6 +51,16 @@ var board = new Scores_ViewModel(
 );
 assert.equal(board.player_row.length, 6, "a seat column each, plus the heading and the row total");
 assert.deepEqual(
+    board.player_row.map((cell) => cell.colour),
+    [null, ...BUNNY_COLOURS, null],
+    "the seat columns are headed by the bunny's own colour, the other two by their labels (#39)",
+);
+assert.deepEqual(
+    board.player_row.map((cell) => cell.label),
+    ["", ...BUNNY_NAMES, "Total kills"],
+    "and every head carries its name, swatch or not: a colour on its own names nobody",
+);
+assert.deepEqual(
     board.score_rows.map((row) => row.length),
     [6, 6, 6, 6, 6],
     "and a row per seat plus the totals row, none of them short",
@@ -55,5 +70,60 @@ assert.deepEqual(
     ["Total deaths", 3, 1, 3, 1, 8],
     "the totals row totals the row-totals column too: as many kills as there were deaths",
 );
+
+// The one line above the board. A draw is joint winners, because sudden death would be a
+// phase the room does not have (#37, #39).
+const won = [
+    [0, 3, 0, 0],
+    [1, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+];
+assert.equal(match_result(won, BUNNY_NAMES, "bumps"), "Dott wins with 3 bumps.");
+assert.equal(match_result(won, BUNNY_NAMES, "time"), "Dott wins with 3 bumps.");
+assert.equal(
+    match_result(won, ["Alice", "Bob", "Fizz", "Miji"], "bumps"),
+    "Alice wins with 3 bumps.",
+    "under the name the seat is played by, which is what the board's rows are headed with",
+);
+const drawn = [
+    [0, 2, 0, 0],
+    [2, 0, 0, 0],
+    [0, 0, 0, 0],
+    [2, 0, 0, 0],
+];
+assert.equal(
+    match_result(drawn, BUNNY_NAMES, "time"),
+    "Dott, Jiffy and Miji draw at 2 bumps.",
+    "a draw is joint winners, however many of them there are",
+);
+assert.equal(
+    match_result(
+        [
+            [0, 1, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ],
+        BUNNY_NAMES,
+        "bumps",
+    ),
+    "Dott wins with 1 bump.",
+);
+assert.equal(
+    match_result(
+        [
+            [0, 0],
+            [0, 0],
+        ],
+        BUNNY_NAMES,
+        "time",
+    ),
+    "Nobody scored.",
+    "a time limit can run out on a match nobody scored in",
+);
+assert.equal(match_result(won, BUNNY_NAMES, "lobby"), "The host ended the match.");
+assert.equal(match_result(won, BUNNY_NAMES, "host_left"), "The host left.");
+assert.equal(match_result(null, BUNNY_NAMES, null), "", "and a match that never ran says nothing");
 
 console.log("router: ok");

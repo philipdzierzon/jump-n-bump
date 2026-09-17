@@ -1,13 +1,13 @@
 import { create_default_level } from "../asset_data/default_levelmap.js";
 import { Dat_Level_Loader } from "../resource_loading/dat_level_loader.js";
 import { Game_Session, Game_State, is_typing } from "../interaction/game_session.js";
-import { Scores_ViewModel, BUNNY_NAMES } from "../interaction/scores_viewmodel.js";
+import { Scores_ViewModel, match_result, BUNNY_NAMES } from "../interaction/scores_viewmodel.js";
 import { screen_of } from "../interaction/router.js";
 import { jump_scheme } from "../game/keyboard.js";
 import { Loopback_Transport } from "../net/loopback_transport.js";
 import { WebSocket_Transport } from "../net/websocket_transport.js";
 import { normalise_room_id } from "../net/room_id.js";
-import { FLAGS, LEVELS, config_diff, default_config } from "../net/room_config.js";
+import { FLAGS, LEVELS, LIMITS, config_diff, default_config } from "../net/room_config.js";
 import ko from "knockout";
 
 // There is no query-param configuration path any more, and that is a correctness
@@ -44,6 +44,8 @@ var LABELS = {
     flies_enabled: "Lord of the flies",
     blood_is_thicker_than_water: "Blood is thicker than water",
     no_gore: "No gore",
+    bump_limit: "Bumps to win",
+    time_limit: "Minutes",
 };
 // A `.dat` loaded from disk. It is not in `LEVELS`, so it never survives the shared
 // validator and never reaches a relay: a level nobody else can fetch belongs to a local
@@ -106,6 +108,12 @@ function ViewModel() {
     // Every seat in the room, by the username of the participant on it -- null for a seat
     // nobody holds, which is the AI's (#36).
     this.seat_names = ko.observableArray([null, null, null, null]);
+    // What the board calls each seat: the last username on it, said the way the room sees
+    // it now -- `Alice`, `Alice (AI)` or `Alice (left)`. The board is seat-keyed, so a seat
+    // keeps its column and its bumps whoever is driving it, and a seat nobody ever took
+    // keeps its bunny's name (#13, #39). Empty in a local room, which has no relay to
+    // remember anything for it.
+    this.seat_labels = ko.observableArray([]);
     // The room's own answer, refreshed on every update: a match that ended, or a host that
     // left and took its announcement with it, must not leave this standing (#36).
     this.match_running = ko.observable(false);
@@ -118,6 +126,9 @@ function ViewModel() {
     this.countdown = ko.observable(null);
     this.current_game = ko.observable(null);
     this.board = ko.observable(null);
+    // Why the last match ended, which is what the line above the board says. It belongs to
+    // the board and is set with it.
+    this.board_reason = ko.observable(null);
     this.loading_level = ko.observable(false);
     // The config the next match runs on, and what the host has staged on top of it. Both
     // are the room's answer online; a local room keeps its own here, because there is no
@@ -139,7 +150,7 @@ function ViewModel() {
     // One observable per config key, which is what the form edits. Nothing is sent until
     // Apply: a half-typed panel is not a staged change (#38).
     this.form = {};
-    FLAGS.concat("level", "ai_fill").forEach(function (key) {
+    FLAGS.concat("level", "ai_fill", Object.keys(LIMITS)).forEach(function (key) {
         self.form[key] = ko.observable(default_config()[key]);
     });
 
@@ -250,9 +261,8 @@ function ViewModel() {
             Object.keys(staged)
                 .map(function (key) {
                     var value = staged[key];
-                    return (
-                        LABELS[key] + " \u2192 " + (key === "level" ? value : value ? "on" : "off")
-                    );
+                    var shown = typeof value === "boolean" ? (value ? "on" : "off") : String(value);
+                    return LABELS[key] + " \u2192 " + shown;
                 })
                 .join(", ") +
             "."
@@ -276,7 +286,7 @@ function ViewModel() {
     // on this keyboard; a seat nobody holds keeps its bunny's name (#13, #36).
     function display_names() {
         return BUNNY_NAMES.map(function (bunny, seat) {
-            return self.seat_names()[seat] || bunny;
+            return self.seat_labels()[seat] || self.seat_names()[seat] || bunny;
         });
     }
 
@@ -303,6 +313,23 @@ function ViewModel() {
             (played ? game.scores() : self.board()) || [[]],
             display_names(),
         );
+    });
+
+    // One line above the board: who won, or who ended it. A draw is joint winners (#39).
+    this.result_text = ko.computed(function () {
+        return match_result(self.board(), display_names(), self.board_reason());
+    });
+
+    // The match clock and the target, in the top bar rather than on the canvas: chrome
+    // costs the wire nothing and the picture nothing (#39). `0` is endless, so there is
+    // nothing to say about it.
+    this.clock = ko.computed(function () {
+        var game = self.current_game();
+        return (game && game.clock()) || "";
+    });
+    this.to_win = ko.computed(function () {
+        var limit = self.config().bump_limit;
+        return limit ? limit + " to win" : "";
     });
 
     this.join_link = ko.computed(function () {
@@ -340,9 +367,11 @@ function ViewModel() {
         // from scratch rather than inheriting this one's couch (#14).
         self.participants([]);
         self.seat_names([null, null, null, null]);
+        self.seat_labels([]);
         // The board belongs to the room's last match, and the room died with the last
         // client in it: a room created on the same id later is a different room.
         self.board(null);
+        self.board_reason(null);
         self.ready(false);
         self.seat_ready(ALL_READY);
         // The config belonged to the room, so it goes with it: the next room's arrives on
@@ -362,8 +391,38 @@ function ViewModel() {
         remember("room", { id: null });
     }
 
+    // Why the match this client is leaving ended, and the board the host counted for it,
+    // from the `match_end` it left on.
+    var ended_because = null;
+    var announced_board = null;
+
+    // The host's board is another client's input, and the relay cannot check it because it
+    // cannot read the simulation (#19). So it is taken only when it really is the matrix:
+    // four seats by four seats, numbers throughout, or this client's own count instead.
+    function is_matrix(matrix) {
+        return (
+            Array.isArray(matrix) &&
+            matrix.length === BUNNY_NAMES.length &&
+            matrix.every(function (row) {
+                return (
+                    Array.isArray(row) &&
+                    row.length === BUNNY_NAMES.length &&
+                    row.every(function (count) {
+                        return typeof count === "number" && isFinite(count) && count >= 0;
+                    })
+                );
+            })
+        );
+    }
+
     function end_match() {
         var game = self.current_game();
+        // Read once and forgotten here, before the guard: the reason and the board belong
+        // to the match being left, and must not be waiting for the next one.
+        var reason = ended_because;
+        var announced = announced_board;
+        ended_because = null;
+        announced_board = null;
         if (!game) return;
         var played = game.game_state() !== Game_State.Not_Started;
         // One rule for every way a client stops simulating -- back to the lobby, out to the
@@ -374,8 +433,12 @@ function ViewModel() {
         // stops it now (#37).
         game.stop();
         // The board of the match you just left is what the lobby shows; it is not a screen
-        // of its own (#13, #35).
-        if (played) self.board(game.scores());
+        // of its own (#13, #35). It stands until the next match starts, so the lobby you
+        // walk back into still has it (#39).
+        if (played) {
+            self.board(announced || game.scores());
+            self.board_reason(reason);
+        }
         self.current_game(null);
     }
 
@@ -403,8 +466,23 @@ function ViewModel() {
         );
         // The host announces the end and every client honours it, so a host walking back
         // to the lobby does not leave the others playing on alone (#22, #11).
-        game.on_match_end = function () {
+        game.on_match_end = function (msg) {
+            // Read by `end_match` on the way out, which is where the board it belongs to is
+            // counted: the reason and the matrix are one answer, not two.
+            ended_because = msg.reason;
+            announced_board = is_matrix(msg.matrix) ? msg.matrix : null;
+            // A client sitting in the lobby never simulated this match and has no board of
+            // its own, which is why the host's travels with the announcement (#19, #39).
+            if (announced_board) {
+                self.board(announced_board);
+                self.board_reason(msg.reason);
+            }
             go("room");
+        };
+        // A limit the simulation reached. Every client stops on the same tick; the host is
+        // what announces it, exactly as it announces a walk back to the lobby (#22, #39).
+        game.on_limit = function (reason) {
+            if (host) game.announce_end(reason);
         };
         // Whoever proposed it, the match begins for this client when `start` lands -- and
         // the session that was handed the match is the current one, whichever flow screen
@@ -413,6 +491,11 @@ function ViewModel() {
         // want of a current session, and rebuild a lobby session that replaces the
         // transport's listener -- orphaning the match it was already in.
         game.on_match_start = function () {
+            // Zeroed at the next start rather than on lobby entry, which is where the last
+            // match's board is read (#13, #39). A networked client that is not playing this
+            // match hears the same thing from the room instead.
+            self.board(null);
+            self.board_reason(null);
             // A client with no seats has nothing to steer -- it was vacated at countdown
             // zero, or its seats went while it was away -- so it holds no session for this
             // match and waits in the lobby for the next one (#37; spectating is #40's).
@@ -430,6 +513,13 @@ function ViewModel() {
     // migrating are all one code path (#36).
     function apply_room(msg) {
         self.seat_names(msg.seats);
+        self.seat_labels(msg.labels || []);
+        // The board of the last match stands until the next one begins, which is where it
+        // is zeroed -- not on entering the lobby, which is where it is read (#13, #39).
+        if (msg.started && !self.match_running()) {
+            self.board(null);
+            self.board_reason(null);
+        }
         self.match_running(!!msg.started);
         host = msg.host;
         self.is_host(host);

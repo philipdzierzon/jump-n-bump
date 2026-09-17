@@ -28,6 +28,21 @@ assert.deepEqual(config_diff(base, { no_gore: false }), {}, "one that does not i
 assert.deepEqual(config_diff(base, { level: "caves" }), { level: "caves" }, "a level in the list");
 assert.deepEqual(config_diff(base, { level: "../levelmap.txt" }), {}, "and one that is not");
 assert.deepEqual(config_diff(base, { win_score: 10 }), {}, "a key nobody declared is dropped");
+// The two match-end limits, which are the one place a config value is a number: zero is
+// endless and is where a room starts, and anything outside the ceiling is dropped rather
+// than clamped -- a silently clamped 99 is a limit nobody chose (#22, #39).
+assert.equal(base.bump_limit, 0, "a room is endless until somebody says otherwise");
+assert.equal(base.time_limit, 0);
+assert.deepEqual(config_diff(base, { bump_limit: 5 }), { bump_limit: 5 }, "a limit inside 0-99");
+assert.deepEqual(config_diff(base, { time_limit: 60 }), { time_limit: 60 }, "and 0-60 minutes");
+assert.deepEqual(config_diff(base, { bump_limit: "7" }), { bump_limit: 7 }, "a number box types");
+assert.deepEqual(config_diff(base, { bump_limit: 100 }), {}, "over the two-digit counter");
+assert.deepEqual(config_diff(base, { time_limit: 61 }), {}, "over the hour");
+assert.deepEqual(config_diff(base, { bump_limit: -1 }), {}, "under nothing at all");
+assert.deepEqual(config_diff(base, { time_limit: 1.5 }), {}, "and half a minute is not one");
+assert.deepEqual(config_diff(base, { bump_limit: "lots" }), {}, "nor is a word");
+assert.deepEqual(config_diff(base, { bump_limit: "" }), {}, "and an emptied box is no value");
+assert.deepEqual(config_diff(base, { bump_limit: 0 }), {}, "endless is what it already is");
 assert.deepEqual(config_diff(base, "nonsense"), {}, "and so is a config that is not one");
 
 const server = await start_server(0);
@@ -286,10 +301,12 @@ const guest = connect({ type: "join", id: "HJZWR" });
 await lobby(guest);
 await guest.seats(["Guest"]);
 owner.socket.close();
-assert.equal(
-    (await guest.until((msg) => msg.type === "room" && msg.host)).host,
-    true,
-    "the guest hosts while the owner is away",
+const while_away = await guest.until((msg) => msg.type === "room" && msg.host);
+assert.equal(while_away.host, true, "the guest hosts while the owner is away");
+assert.deepEqual(
+    while_away.labels,
+    ["Owner (AI)", "Guest", null, null],
+    "and the board says who is really driving that seat while its holder is away (#13, #39)",
 );
 const returned = connect({ type: "join", id: "HJZWR", token: owner_token });
 const restored = await lobby(returned);
@@ -431,6 +448,12 @@ assert.deepEqual(
     vacated.seats,
     ["Host", null, null, null],
     "the un-ready client's seat is free at zero, reserved for nobody",
+);
+assert.deepEqual(
+    vacated.labels,
+    ["Host", "Straggler (left)", "Sitter (left)", null],
+    "but the board keeps the name of whoever last held it: a seat-keyed column of bumps " +
+        "still needs a heading, and a seat nobody ever took has none of its own (#13, #39)",
 );
 await new Promise((resolve) => setTimeout(resolve, 100));
 const short_handed = gate_saw.filter((msg) => msg.type === "start").pop();

@@ -269,6 +269,38 @@ assert.deepEqual(
     "and no frame of its own: a disabled seat is not a driver with the keys released",
 );
 
+// The match ends by itself on a limit the room set, at the end of the tick the condition
+// first holds -- the same tick on every client, because every client steps the same
+// simulation from the same seed (#22, #39). Last, because building a Game replaces the
+// `player` array.
+const endless = start(1, { no_gore: false }, [0]);
+assert.equal(endless.game.ticks_left(), null, "no limits is endless, which is the default");
+endless.game.on_end = () => assert.fail("an endless match never ends by itself");
+for (let tick = 0; tick < 10; tick++) endless.game.step();
+
+const to_five = start(1, { bump_limit: 5 }, [0]);
+const bump_ends = [];
+to_five.game.on_end = (reason) => bump_ends.push(reason);
+player[2].bumps = 4;
+to_five.game.step();
+assert.deepEqual(bump_ends, [], "four bumps of five is not the end of anything");
+player[2].bumps = 5;
+to_five.game.step();
+assert.deepEqual(bump_ends, ["bumps"], "the fifth bump ends the match at the end of its tick");
+to_five.game.step();
+assert.deepEqual(bump_ends, ["bumps"], "and it is announced once, however often it is stepped");
+
+// Ticks, fixed at match start: a minute is 3600 of them, and nothing here reads a clock.
+const to_a_minute = start(1, { time_limit: 1 }, [0]);
+const time_ends = [];
+to_a_minute.game.on_end = (reason) => time_ends.push(reason);
+for (let tick = 0; tick < env.TICKS_PER_MINUTE - 1; tick++) to_a_minute.game.step();
+assert.equal(to_a_minute.game.ticks_left(), 1, "one tick of the minute left");
+assert.deepEqual(time_ends, [], "and the match is still running on it");
+to_a_minute.game.step();
+assert.deepEqual(time_ends, ["time"], "the last tick of the time limit ends the match");
+assert.equal(to_a_minute.game.ticks_left(), 0);
+
 console.log(
     "OK replay is deterministic and headless, schemes bind in join order, and the leftovers ring is bounded",
 );

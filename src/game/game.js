@@ -6,8 +6,17 @@ export let player = [];
 
 export function Game(movement, ai, animation, renderer, objects, room, level, is_server, rnd) {
     "use strict";
+    var self = this;
     var next_time = 0;
     var playing = false;
+    var ended = false;
+    // Both limits are fixed at match start, from the settings the relay handed down -- the
+    // only configuration path there is (#5, #38). Zero is endless, for both.
+    var bump_limit = room.settings.bump_limit || 0;
+    var tick_limit = (room.settings.time_limit || 0) * env.TICKS_PER_MINUTE;
+    // Announced by the host, honoured by everyone; the simulation stops here either way
+    // (#22, #39).
+    this.on_end = null;
     reset_players();
     reset_level();
 
@@ -74,16 +83,39 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
         }
     }
 
+    // Whichever limit fires first, tested at the end of the tick it first holds so that
+    // every client leaves the match on the same one. The time limit is ticks and the bump
+    // limit is the killer's own tally, which is the number the in-game counter shows (#39).
+    function limit_reached() {
+        if (tick_limit && room.now() >= tick_limit) return "time";
+        if (bump_limit)
+            for (var i = 0; i < player.length; i++)
+                if (player[i].bumps >= bump_limit) return "bumps";
+        return null;
+    }
+
     function game_iteration() {
         renderer.clear_pobs();
         steer_players();
         movement.collision_check();
         animation.update_object();
+        var reason = ended ? null : limit_reached();
+        if (reason) {
+            ended = true;
+            self.pause();
+            if (self.on_end) self.on_end(reason);
+        }
     }
 
     // One simulation tick, no clock and no drawing: the headless entry point a
     // replay or a server sim steps by hand (#5).
     this.step = game_iteration;
+
+    // Ticks left of the time limit, or null when there is none. Read by the top bar, which
+    // is chrome rather than canvas and costs the wire nothing (#39).
+    this.ticks_left = function () {
+        return tick_limit ? Math.max(0, tick_limit - room.now()) : null;
+    };
 
     function pump() {
         while (playing) {
@@ -105,8 +137,9 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
 
     this.start = function () {
         // Already pumping: a second loop would step the same simulation twice a frame,
-        // and every way into the match calls this.
-        if (playing) return;
+        // and every way into the match calls this. A match that reached its limit is over
+        // for good -- restarting it would step past the tick the room ended on (#39).
+        if (playing || ended) return;
         next_time = timeGetTime() + 1000;
         playing = true;
         pump();
