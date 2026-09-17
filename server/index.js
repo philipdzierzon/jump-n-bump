@@ -110,6 +110,12 @@ function relay(client, msg) {
             room.tick = 0;
             room.d = input_delay(room);
             room.started = true;
+            // The driver table rides on `start` rather than as four changes stamped for
+            // tick 0: a client steps tick 0 the instant `start` lands, and the browser
+            // delivers each frame as its own event, so stamped changes for that tick
+            // arrive after it has been stepped past and every seat stays with the AI.
+            // ponytail: AI-fill is on, which is the room default. upgrade path: room
+            // config turns it off and an unheld seat goes enabled = false (#7, #38).
             broadcast(room, {
                 type: "start",
                 t: 0,
@@ -117,20 +123,10 @@ function relay(client, msg) {
                 seed: msg.seed,
                 settings: msg.settings,
                 held: msg.held,
+                drivers: [...Array(SEATS).keys()].map((seat) =>
+                    (msg.held || []).indexOf(seat) >= 0 ? "local" : "ai",
+                ),
             });
-            // Initial drivers ride at tick 0, not at the 2d a mid-match change is stamped
-            // for: `start` is itself the synchronisation point, so no client can have
-            // stepped past tick 0 yet, and stamping 2d would leave the first 2d ticks of
-            // every match with no driver at all and every seat handed to the AI.
-            // ponytail: AI-fill is on, which is the room default. upgrade path: room
-            // config turns it off and an unheld seat goes enabled = false (#7, #38).
-            for (let seat = 0; seat < SEATS; seat++)
-                broadcast(room, {
-                    type: "driver",
-                    t: 0,
-                    seat,
-                    driver: (msg.held || []).indexOf(seat) >= 0 ? "local" : "ai",
-                });
             break;
         case "input":
             // Monotonic, and a whole delay ahead of any client's real tick, since `t` is

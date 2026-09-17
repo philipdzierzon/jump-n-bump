@@ -126,6 +126,23 @@ export function Game_Session(level, config, muted, transport) {
         }
     };
 
-    document.onkeydown = keyboard.onKeyDown;
-    document.onkeyup = keyboard.onKeyUp;
+    // A focused text field owns the keys: typing a P into the room id must not start a
+    // game, an M must not toggle the sound, and WAD must not steer a bunny. The guard
+    // lives here rather than in `Keyboard`, which is simulation-side and sees no DOM.
+    function typing(evt) {
+        var element = evt.target;
+        return (
+            !!element &&
+            (element.tagName === "INPUT" ||
+                element.tagName === "TEXTAREA" ||
+                element.isContentEditable)
+        );
+    }
+
+    document.onkeydown = function (evt) {
+        if (!typing(evt)) keyboard.onKeyDown(evt);
+    };
+    document.onkeyup = function (evt) {
+        if (!typing(evt)) keyboard.onKeyUp(evt);
+    };
 }

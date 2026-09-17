@@ -190,8 +190,15 @@ const delayed_transport = {
     },
     send(msg) {
         if (msg.type !== "start") return;
-        this.to_client({ type: "start", t: 0, d: 2, seed: 1, settings: {}, held: [0] });
-        this.to_client({ type: "driver", t: 0, seat: 0, driver: "local" });
+        this.to_client({
+            type: "start",
+            t: 0,
+            d: 2,
+            seed: 1,
+            settings: {},
+            held: [0],
+            drivers: ["local"],
+        });
     },
 };
 const delayed_room = new Room(delayed_transport, () => ({ left: false, right: true, up: false }));

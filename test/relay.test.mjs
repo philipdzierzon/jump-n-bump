@@ -65,9 +65,22 @@ const seen = [];
 generated.socket.receive((msg) => seen.push(msg));
 
 const host_room = new Room(created.socket, () => ({ left: false, right: true, up: false }));
-const started = new Promise((resolve) => (host_room.on_start = resolve));
+// Stepped from inside `on_start`, because that is what a browser does: `Game.start` pumps
+// the first tick synchronously, and the browser delivers every frame after `start` as its
+// own event. Anything the match needs for tick 0 has to be on `start` itself (#34).
+let first_tick = null;
+const started = new Promise(
+    (resolve) =>
+        (host_room.on_start = () => {
+            first_tick = host_room.step();
+            resolve();
+        }),
+);
 host_room.start({ seed: 1234, settings: { no_gore: true }, held: [0, 1] });
 await started;
+
+assert.notEqual(first_tick[0], undefined, "a held seat is its client's from the very first tick");
+assert.equal(first_tick[2], undefined, "and a seat nobody holds is the AI's from the same one");
 
 assert.equal(host_room.seed, 1234, "the seed rides on `start`");
 assert.deepEqual(host_room.settings, { no_gore: true }, "so do the settings, and only there");
@@ -76,7 +89,7 @@ assert.ok(host_room.d >= 2 && host_room.d <= 10, "the delay is clamped to 2..10 
 const fixed = host_room.d;
 // The first d ticks are released frames, because the earliest frame anyone stamps is for
 // tick d -- and then the held seats are driven, the unheld ones left to the AI.
-const frames = [];
+const frames = [first_tick];
 for (let tick = 0; tick < 40; tick++) frames.push(host_room.step());
 assert.equal(host_room.d, fixed, "derived once at match start and never adapted mid-match");
 assert.equal(frames[0][0].right, false, "a held seat is released until its first frame lands");
@@ -87,9 +100,9 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 const start_msg = seen.find((msg) => msg.type === "start");
 assert.equal(start_msg.d, fixed, "every client in the room is handed the same delay");
 assert.deepEqual(
-    seen.filter((msg) => msg.type === "driver" && msg.driver === "local").map((msg) => msg.seat),
-    [0, 1],
-    "the relay stamps the initial drivers rather than riding them on `start`",
+    start_msg.drivers,
+    ["local", "local", "ai", "ai"],
+    "the driver table rides on `start`, so tick 0 has one before anybody steps it",
 );
 
 // A client that follows the link after the host started is told so, rather than waiting on

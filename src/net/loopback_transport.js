@@ -32,6 +32,12 @@ export function Loopback_Transport() {
         switch (msg.type) {
             case "start":
                 current_tick = 0;
+                // The driver table rides on `start`, as it does on the relay: a client
+                // steps tick 0 the instant `start` lands, so a change stamped for that
+                // same tick is one stamped for a tick already stepped past (#34).
+                // ponytail: AI-fill is on, which is the room default and the only local
+                // room there is. upgrade path: room config turns it off and a seat nobody
+                // holds goes enabled = false instead (#7, #38).
                 to_client({
                     type: "start",
                     t: 0,
@@ -39,14 +45,10 @@ export function Loopback_Transport() {
                     seed: msg.seed,
                     settings: msg.settings,
                     held: msg.held,
+                    drivers: [0, 1, 2, 3].map(function (seat) {
+                        return msg.held.indexOf(seat) >= 0 ? "local" : "ai";
+                    }),
                 });
-                // Initial drivers are stamped like any other change rather than riding on
-                // `start`: one mechanism, and at tick 0 it stamps 0.
-                // ponytail: AI-fill is on, which is the room default and the only local
-                // room there is. upgrade path: room config turns it off and a seat nobody
-                // holds goes enabled = false instead (#7, #38).
-                for (var seat = 0; seat < 4; seat++)
-                    stamp_driver(seat, msg.held.indexOf(seat) >= 0 ? "local" : "ai");
                 break;
             case "input":
                 // Echoed to every other client and never to its sender (#12). There is no

@@ -30,7 +30,10 @@ export function Room(transport, read_input) {
                 tick = 0;
                 input_at = {};
                 drivers_at = {};
-                drivers = [];
+                // The table rides on `start` rather than as four stamped changes: a
+                // client steps tick 0 the instant `start` lands, and a separate message
+                // for that same tick is a message for a tick already stepped past (#34).
+                drivers = msg.drivers.slice();
                 self.d = msg.d;
                 self.seed = msg.seed;
                 self.settings = msg.settings;
