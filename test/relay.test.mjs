@@ -511,6 +511,17 @@ const unchanged = await second.until((msg) => msg.type === "room");
 assert.equal(unchanged.you_ready, true, "re-staging a value the room has clears nobody's ready");
 assert.deepEqual(unchanged.staged, pending.staged, "and stages nothing new");
 
+// A value the validator refuses is ignored, never read as a revert: it must not throw away
+// the level that is already staged, and it must not clear the room on the way past.
+chief.socket.send({ type: "config", config: { level: "levelmap.txt" } });
+const refused = await second.until((msg) => msg.type === "room");
+assert.deepEqual(
+    refused.staged,
+    pending.staged,
+    "a level that is not one of the room's is ignored",
+);
+assert.equal(refused.you_ready, true, "and clears nobody's ready on its way to being ignored");
+
 // Applied on restart, and that is the only place it is applied.
 const guest_saw = [];
 second.socket.receive((msg) => guest_saw.push(msg));

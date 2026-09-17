@@ -409,10 +409,15 @@ function host_config(client, msg) {
     if (!client.host) return;
     if ("password" in msg) room.password = String(msg.password) || null;
     if (!msg.config) return broadcast_state(room);
-    // Diffed against the applied config, not against what is already staged: the banner
-    // names the change the next match will make, and staging a value back to the one the
+    // Twice through the validator, because the two questions are different ones. First:
+    // what did the host actually change? Diffing against the effective config drops a key
+    // that is not one of the room's and a level that is not in the list, so an invalid
+    // value is ignored rather than read as a revert of what is already staged.
+    const effective = { ...room.config, ...room.staged };
+    const wanted = { ...effective, ...config_diff(effective, msg.config) };
+    // Second: what will the next match change? Against the applied config, not the staged
+    // one, so the banner names the whole change -- and picking a value back to the one the
     // room already has un-stages it rather than stacking a second change on top.
-    const wanted = { ...room.config, ...room.staged, ...msg.config };
     const staged = config_diff(room.config, wanted);
     const changed = JSON.stringify(staged) !== JSON.stringify(room.staged || {});
     room.staged = Object.keys(staged).length ? staged : null;

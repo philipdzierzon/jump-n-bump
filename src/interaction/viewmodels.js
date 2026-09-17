@@ -78,10 +78,8 @@ function ViewModel() {
     "use strict";
     var self = this;
     var loader = new Dat_Level_Loader();
-    // A level loaded from disk, and the promise for every level loaded by name. Both are
-    // this client's cache: the room config names a level, and resolving that name is each
-    // client's own business (#38).
-    var custom = null;
+    // The promise for every level loaded by name: the room config names a level, and
+    // resolving that name is each client's own business (#38).
     var levels = {};
 
     // Offline play is a room of one over a transport that never opens a socket; an online
@@ -128,9 +126,13 @@ function ViewModel() {
     this.staged = ko.observable(null);
     this.notice = ko.observable("");
     this.new_password = ko.observable("");
-    // The picker's options. `CUSTOM` joins them the moment a `.dat` is loaded from disk,
-    // and only then: it is not a level any other client could fetch.
-    this.level_names = ko.observableArray(LEVELS);
+    // A `.dat` loaded from disk, and the picker's options. `CUSTOM` is offered only in a
+    // local room and only once one is loaded: it is not a level any other client could
+    // fetch, so an online picker must not offer one the relay is bound to refuse (#38).
+    this.custom_level = ko.observable(null);
+    this.level_names = ko.computed(function () {
+        return !self.room_id() && self.custom_level() ? LEVELS.concat(CUSTOM) : LEVELS;
+    });
     this.flag_rows = FLAGS.map(function (flag) {
         return { key: flag, label: LABELS[flag] };
     });
@@ -167,9 +169,19 @@ function ViewModel() {
     // the `.dat` the relay already serves beside the page -- same origin, so there is no
     // second host and nothing to configure (#34, #38). Cached as promises, so a rematch on
     // the same level refetches nothing.
+    function unavailable(name) {
+        // Refused, never quietly swapped for the built-in map: a client left on a stale
+        // bundle would otherwise play a different ban map from everyone else, and that is
+        // a desync rather than a worse picture.
+        self.error("This client does not have that level. Reload the page.");
+        return Promise.reject(new Error("unknown level: " + name));
+    }
+
     function get_level(name) {
-        if (name === CUSTOM && custom) return Promise.resolve(custom);
-        if (LEVELS.indexOf(name) <= 0) return Promise.resolve(create_default_level());
+        if (name === CUSTOM)
+            return self.custom_level() ? Promise.resolve(self.custom_level()) : unavailable(name);
+        if (name === "default") return Promise.resolve(create_default_level());
+        if (LEVELS.indexOf(name) < 0) return unavailable(name);
         if (!levels[name])
             levels[name] = fetch("levels/" + name + "/" + name + ".dat")
                 .then(function (response) {
@@ -339,6 +351,9 @@ function ViewModel() {
         self.staged(null);
         self.notice("");
         self.new_password("");
+        // Forgotten, not merely recomputed: an edit the host never applied belonged to the
+        // room it was typed in, and the next room may happen to have the same config.
+        form_shows = "";
         fill_form();
         deadline = null;
         show_countdown();
@@ -710,7 +725,7 @@ function ViewModel() {
             var next = Object.assign({}, self.config(), config_diff(self.config(), wanted));
             // `CUSTOM` is not in `LEVELS`, so the shared validator drops it -- which is
             // exactly what must happen to it on the wire, and not here.
-            if (wanted.level === CUSTOM && custom) next.level = CUSTOM;
+            if (wanted.level === CUSTOM && self.custom_level()) next.level = CUSTOM;
             self.config(next);
             fill_form();
             preload();
@@ -741,9 +756,8 @@ function ViewModel() {
         self.loading_level(true);
         loader.read(files[0]).then(
             function (level) {
-                custom = level;
+                self.custom_level(level);
                 self.loading_level(false);
-                if (self.level_names.indexOf(CUSTOM) < 0) self.level_names.push(CUSTOM);
                 self.form.level(CUSTOM);
                 self.apply_config();
             },
