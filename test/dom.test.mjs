@@ -78,6 +78,33 @@ function type_into(input, value) {
     input.dispatchEvent(new window.Event("input", { bubbles: true }));
 }
 
+// The room settings panel (#38). Rows are found by their label, as a player finds them.
+// `disabled` on the fieldset is what makes the whole panel read-only for everyone who is
+// not the host, so that is the thing to assert rather than a binding per control.
+const settings = () => all("fieldset", screen("room"))[0];
+const password_panel = () => all("fieldset", screen("room"))[1];
+const password_box = () => screen("room").querySelector('input[type="password"]');
+const notice = () => text(screen("room").querySelector('p[data-bind*="text: notice"]'));
+const banner = () => screen("room").querySelector("div.banner");
+const level_select = () => screen("room").querySelector("select");
+const level_options = () => all("option", level_select()).map((el) => el.value);
+function config_row(label) {
+    const row = all("label", screen("room")).find((el) => text(el) === label);
+    assert.ok(row, `no settings row labelled "${label}"`);
+    return row.querySelector('input[type="checkbox"]');
+}
+// Clicked rather than assigned: Knockout's `checked` binding listens for the click, so a
+// checkbox whose property is set behind its back looks ticked and tells the view model
+// nothing.
+function tick(label, on = true) {
+    const box = config_row(label);
+    if (box.checked !== on) box.click();
+}
+function choose_level(name) {
+    level_select().value = name;
+    level_select().dispatchEvent(new window.Event("change", { bubbles: true }));
+}
+
 // --- the landing screen -------------------------------------------------------------
 
 assert.ok(shown(screen("landing")), "the page opens on the landing screen");
@@ -142,6 +169,27 @@ assert.ok(
     !shown(screen("room").querySelector('div[data-bind*="visible: room_id"]')),
     "and no link to share",
 );
+
+// --- room settings, offline: applied at once, because there is nobody to stage for -----
+
+assert.ok(shown(settings()), "the lobby carries the room settings panel (#38)");
+assert.equal(settings().disabled, false, "and offline you are the host, so it is yours");
+assert.ok(!shown(banner()), "with nothing staged: a local room has nobody to keep waiting");
+assert.ok(!shown(password_panel()), "and no password, which rooms have and tabs do not");
+assert.equal(level_options()[0], "default", "the picker opens on the built-in map");
+assert.ok(
+    level_options().includes("caves") && !level_options().includes("a file of your own"),
+    "and offers the levels shipped beside the page, but no file of your own until one is loaded",
+);
+
+tick("No gore");
+click("Apply to the next match");
+assert.ok(
+    !shown(banner()),
+    "a local room applies the change rather than staging it: no restart to wait for (#16, #38)",
+);
+tick("No gore", false);
+click("Apply to the next match");
 
 // --- the match and the board ---------------------------------------------------------
 
@@ -288,10 +336,145 @@ assert.deepEqual(
     "so the room reads exactly as it did before the countdown ran",
 );
 
+// --- room settings, online: staged for the next match, and a write-only password (#38) -
+
+assert.equal(settings().disabled, false, "the host owns the panel");
+assert.ok(shown(password_panel()), "and online a room is a thing that can carry a password");
+assert.ok(
+    !level_options().includes("a file of your own"),
+    "a level loaded from disk is never offered online: nobody else could fetch it",
+);
+
+assert.equal(text(ready), "Not ready", "this client is ready going in");
+assert.ok(!shown(banner()), "and nothing is announced while nothing is staged");
+choose_level("caves");
+tick("No gore");
+click("Apply to the next match");
+await until("the staged change", () => shown(banner()));
+assert.equal(
+    text(banner()),
+    "Host staged: Level \u2192 caves, No gore \u2192 on. Everyone\u2019s ready was cleared and " +
+        "the countdown stopped. It applies when the next match starts.",
+    "the banner names the diff and what it did: cleared checkboxes alone read as a bug (#10)",
+);
+assert.equal(text(ready), "Ready", "and everyone's ready really was cleared (#37)");
+const staged_seen = guest_saw.filter((msg) => msg.type === "room" && msg.staged).pop();
+assert.deepEqual(
+    staged_seen.staged,
+    { level: "caves", no_gore: true },
+    "the diff is the room's, so the other client in it is told the same thing",
+);
+assert.equal(staged_seen.you_ready, false, "and its ready went with everyone else's");
+
+click("Ready");
+await until("the room to hear it", () => text(ready) === "Not ready");
+choose_level("caves");
+click("Apply to the next match");
+await sleep(50);
+assert.equal(text(ready), "Not ready", "re-staging what is already staged clears nobody's ready");
+
+// Write-only: nothing ever sends it back, so this is a blind replacement (#8).
+type_into(password_box(), "hunter2");
+click("Set it now");
+await until("the confirmation", () => notice());
+assert.equal(notice(), "Password set.", "the host is told it took, never shown the password");
+assert.equal(password_box().value, "", "and the box empties rather than sitting there holding it");
+
+const barred_saw = [];
+const barred = new WebSocket_Transport(
+    origin.replace("http", "ws") + "/ws",
+    { type: "join", id: "QMFTX" },
+    (msg) => barred_saw.push(msg),
+    (code) => barred_saw.push({ type: "error", code }),
+);
+await until("the refusal", () => barred_saw.some((msg) => msg.type === "error"));
+assert.equal(
+    barred_saw.find((msg) => msg.type === "error").code,
+    "ROOM_UNAVAILABLE",
+    "the password the host set guards the door from the moment it lands, not at the next match",
+);
+assert.ok(
+    !JSON.stringify(guest_saw).includes("hunter2"),
+    "and nothing any client in the room was ever sent carries it",
+);
+
+type_into(password_box(), "");
+click("Set it now");
+await until("the removal", () => notice() === "Password removed.");
+const walk_in_saw = [];
+const walk_in = new WebSocket_Transport(
+    origin.replace("http", "ws") + "/ws",
+    { type: "join", id: "QMFTX" },
+    (msg) => walk_in_saw.push(msg),
+    () => {},
+);
+await until("the walk-in", () => walk_in_saw.some((msg) => msg.type === "joined"));
+walk_in.close();
+
 guest.close();
 click("Leave");
 await on("landing");
 assert.ok(!shown(screen("room")), "and the room goes with it");
+
+// --- the same lobby, from a client that does not host it (#10, #38) -------------------
+// Everything above ran as the host, because the page created the room. Here somebody else
+// holds it, which is the half of the panel a host can never see for itself: read-only, and
+// a banner that arrives rather than one this client caused.
+
+const chief_saw = [];
+const chief = new WebSocket_Transport(
+    origin.replace("http", "ws") + "/ws",
+    { type: "create", id: "KFTVW" },
+    (msg) => chief_saw.push(msg),
+    () => {},
+);
+await until("the room", () => chief_saw.some((msg) => msg.type === "joined"));
+chief.send({ type: "seats", names: ["Chief"] });
+await until("the host to sit down", () => chief_saw.some((msg) => msg.type === "room" && msg.host));
+
+click("Join with a room code");
+await on("join");
+type_into(screen("join").querySelector("input"), "KFTVW");
+click("Continue");
+await on("names");
+press(38);
+await until("the participant", () => seats().length === 1);
+click("Take the seats");
+await on("room");
+
+assert.ok(
+    !shown(screen("room").querySelector('button[data-bind*="start_match"]')),
+    "a guest is not offered the match to start",
+);
+assert.equal(settings().disabled, true, "and the settings panel is the host's to change");
+assert.equal(
+    password_panel().disabled,
+    true,
+    "the password with it: it is set blind by whoever holds the room, not by whoever joined",
+);
+assert.equal(
+    level_select().value,
+    "default",
+    "the panel still reads the room's config, which is the point of showing it at all",
+);
+
+chief.send({ type: "config", config: { level: "green", ai_fill: false } });
+await until("the host's staged change", () => text(banner()).startsWith("Host staged"));
+assert.equal(
+    text(banner()),
+    "Host staged: Level \u2192 green, AI on the empty seats \u2192 off. Everyone\u2019s ready " +
+        "was cleared and the countdown stopped. It applies when the next match starts.",
+    "everyone in the room is told what the host staged, not the host alone (#10)",
+);
+assert.equal(
+    level_select().value,
+    "green",
+    "and the read-only panel follows it, so the banner and the rows never disagree",
+);
+
+chief.close();
+click("Leave");
+await on("landing");
 
 server.close();
 console.log("OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it");
