@@ -192,6 +192,9 @@ function ViewModel() {
         // from scratch rather than inheriting this one's couch (#14).
         self.participants([]);
         self.seat_names([null, null, null, null]);
+        // The board belongs to the room's last match, and the room died with the last
+        // client in it: a room created on the same id later is a different room.
+        self.board(null);
         granted([]);
         token = null;
         remember("room", { id: null });
