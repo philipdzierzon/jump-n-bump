@@ -28,13 +28,14 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
         objects.reset_objects();
 
         for (var c1 = 0; c1 < env.JNB_MAX_PLAYERS; c1++) {
-            if (player[c1].enabled) {
-                player[c1].bumps = 0;
-                for (var c2 = 0; c2 < env.JNB_MAX_PLAYERS; c2++) {
-                    player[c1].bumped[c2] = 0;
-                }
-                player[c1].position_player(c1);
+            // Zeroed for every seat, disabled ones included: a disabled seat still has a
+            // row on the scoreboard, and a row shorter than the others draws a table with
+            // cells missing (#37). Only a bunny that is in the match gets placed in it.
+            player[c1].bumps = 0;
+            for (var c2 = 0; c2 < env.JNB_MAX_PLAYERS; c2++) {
+                player[c1].bumped[c2] = 0;
             }
+            if (player[c1].enabled) player[c1].position_player(c1);
         }
     }
 
