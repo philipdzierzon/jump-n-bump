@@ -301,7 +301,10 @@ function relay(client, msg) {
             break;
         case "match_end":
             // Broadcast exactly as the host sent it, final board included: the relay
-            // cannot read the simulation, so it could not compute one (#19, #22).
+            // cannot read the simulation, so it could not compute one (#19, #22). The
+            // announcement is over with it, so an arrival is told about a room and not
+            // about a match nobody is running.
+            room.started = false;
             broadcast(room, msg);
             break;
     }

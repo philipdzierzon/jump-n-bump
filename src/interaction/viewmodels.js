@@ -166,6 +166,10 @@ function ViewModel() {
     });
 
     function go(hash, replace) {
+        // Navigating to the screen you are already on fires no `hashchange`, so the route
+        // has to be applied by hand: a reload lands on `#room`, and the rejoin that follows
+        // it would otherwise never build the session the next `start` arrives on.
+        if (window.location.hash === "#" + hash) return apply_route();
         // `replace` for a redirect the flow makes on your behalf, so Back skips the screen
         // you were only passing through.
         if (replace) window.location.replace("#" + hash);
@@ -221,6 +225,11 @@ function ViewModel() {
             muted,
             transport,
         );
+        // The host announces the end and every client honours it, so a host walking back
+        // to the lobby does not leave the others playing on alone (#22, #11).
+        game.on_match_end = function () {
+            go("room");
+        };
         // Whoever proposed it, the match begins for this client when `start` lands -- and
         // the session that was handed the match is the current one, whichever flow screen
         // this client happens to be sitting on. Without that, a client that had stepped
@@ -384,6 +393,11 @@ function ViewModel() {
         go("browse");
     };
     this.go_lobby = function () {
+        // Only the host ends the match for everyone; anybody else is just leaving it, and
+        // their seat goes quiet until the next one (#22).
+        var game = self.current_game();
+        if (host && game && game.game_state() !== Game_State.Not_Started)
+            game.announce_end("lobby");
         go("room");
     };
     // Offline is the same flow over the loopback: names, lobby, match, board (#16).

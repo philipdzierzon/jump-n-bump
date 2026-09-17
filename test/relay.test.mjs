@@ -197,6 +197,24 @@ const late = connect({ type: "join", id: "QMFTX" });
 assert.equal((await lobby(late)).started, true, "a room with a match running says so on join");
 late.socket.close();
 
+// The host announces the end -- the relay cannot read the simulation, so the final board
+// travels with the message -- and the announcement is over with it (#22).
+host_room.end_match("lobby", [[0, 1]]);
+await new Promise((resolve) => setTimeout(resolve, 100));
+const ended = seen.find((msg) => msg.type === "match_end");
+assert.equal(ended.reason, "lobby", "the reason is relayed verbatim");
+assert.deepEqual(ended.matrix, [[0, 1]], "and so is the board the host counted");
+const quiet = connect({ type: "join", id: "QMFTX" });
+assert.equal(
+    (await lobby(quiet)).started,
+    false,
+    "a room whose match was announced over stops telling arrivals one is running",
+);
+quiet.socket.close();
+// Started again, so the host-departure rule at the end of this file has something to clear.
+host_room.start({ seed: 1234, settings: {}, held: [] });
+await new Promise((resolve) => setTimeout(resolve, 100));
+
 // Fan-out: every other client in the room, and never the sender -- a client schedules its
 // own frames when it sends them, which is what makes the delay one-way (#12). And a frame
 // for a seat the sender does not hold is dropped on the way through (#7).

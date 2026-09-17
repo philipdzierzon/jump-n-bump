@@ -45,6 +45,22 @@ export function Game_Session(level, config, muted, transport) {
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
     this.on_match_start = null;
+    this.on_match_end = null;
+
+    // The relay cannot read the simulation, so the host announces the end and the final
+    // board travels with it (#22, #19). It comes back to the announcer too, which is what
+    // makes every client leave the match on the same message rather than on its own.
+    room.on_match_end = function (msg) {
+        if (self.on_match_end) self.on_match_end(msg);
+    };
+    this.announce_end = function (reason) {
+        room.end_match(
+            reason,
+            player.map(function (p) {
+                return p.bumped;
+            }),
+        );
+    };
 
     // A socket answers `start` a round trip later than a loopback does, so the whole
     // simulation is built out of what the relay handed down rather than out of `config`
