@@ -7,23 +7,13 @@ import { jump_scheme } from "../game/keyboard.js";
 import { Loopback_Transport } from "../net/loopback_transport.js";
 import { WebSocket_Transport } from "../net/websocket_transport.js";
 import { normalise_room_id } from "../net/room_id.js";
+import { FLAGS, LEVELS, config_diff, default_config } from "../net/room_config.js";
 import ko from "knockout";
 
-// Read once for the page, not once per match: settings belong to the room, and every
-// client in it must hold the same object (#5).
-// ponytail: the URL is the only way to configure the one client there is. Upgrade path:
-// host-staged room config over the wire (#3), which retires these query params entirely.
-function read_url(q) {
-    return {
-        pogostick: q.get("pogostick") === "1",
-        jetpack: q.get("jetpack") === "1",
-        bunnies_in_space: q.get("space") === "1",
-        flies_enabled: q.get("lordoftheflies") === "1",
-        blood_is_thicker_than_water: q.get("bloodisthickerthanwater") === "1",
-        no_gore: q.get("nogore") === "1",
-        muted: q.get("nosound") === "1",
-    };
-}
+// There is no query-param configuration path any more, and that is a correctness
+// requirement rather than a tidy-up: a `?nogore=1` one client had and another did not
+// desynced the RNG stream on the first kill (#5). Settings belong to the room, the host
+// configures them, and the relay hands the whole object down on `start` (#38).
 
 // Same origin as the page it was served from, so there is no host to configure and no
 // second certificate: wss:// off https://, ws:// off http:// (#11, #34).
@@ -43,6 +33,22 @@ var CODE_HINT = "A code is 5 letters, no I and no O.";
 // by definition (#37).
 var ALL_READY = [true, true, true, true];
 var UNAVAILABLE = "That room is not available. Check the code, and the password if it has one.";
+// The settings panel's own wording. The relay validates the keys and never renders them,
+// so the labels live here and nowhere near the wire (#38).
+var LABELS = {
+    level: "Level",
+    ai_fill: "AI on the empty seats",
+    pogostick: "Pogo stick",
+    jetpack: "Jetpack",
+    bunnies_in_space: "Bunnies in space",
+    flies_enabled: "Lord of the flies",
+    blood_is_thicker_than_water: "Blood is thicker than water",
+    no_gore: "No gore",
+};
+// A `.dat` loaded from disk. It is not in `LEVELS`, so it never survives the shared
+// validator and never reaches a relay: a level nobody else can fetch belongs to a local
+// room alone (#16, #38).
+var CUSTOM = "a file of your own";
 
 // The token is the relay's to mint; this only remembers it, keyed by room id, so a reload
 // reclaims every seat this client held (#7). `sessionStorage` survives a refresh and dies
@@ -72,9 +78,9 @@ function ViewModel() {
     "use strict";
     var self = this;
     var loader = new Dat_Level_Loader();
-    var url = read_url(new URLSearchParams(window.location.search));
-    var muted = url.muted;
-    delete url.muted;
+    // The promise for every level loaded by name: the room config names a level, and
+    // resolving that name is each client's own business (#38).
+    var levels = {};
 
     // Offline play is a room of one over a transport that never opens a socket; an online
     // room is the same room over a WebSocket (#16, #33). The transport outlives the
@@ -112,8 +118,30 @@ function ViewModel() {
     this.countdown = ko.observable(null);
     this.current_game = ko.observable(null);
     this.board = ko.observable(null);
-    this.current_level = create_default_level();
     this.loading_level = ko.observable(false);
+    // The config the next match runs on, and what the host has staged on top of it. Both
+    // are the room's answer online; a local room keeps its own here, because there is no
+    // relay under it to hold one (#16, #38).
+    this.config = ko.observable(default_config());
+    this.staged = ko.observable(null);
+    this.notice = ko.observable("");
+    this.new_password = ko.observable("");
+    // A `.dat` loaded from disk, and the picker's options. `CUSTOM` is offered only in a
+    // local room and only once one is loaded: it is not a level any other client could
+    // fetch, so an online picker must not offer one the relay is bound to refuse (#38).
+    this.custom_level = ko.observable(null);
+    this.level_names = ko.computed(function () {
+        return !self.room_id() && self.custom_level() ? LEVELS.concat(CUSTOM) : LEVELS;
+    });
+    this.flag_rows = FLAGS.map(function (flag) {
+        return { key: flag, label: LABELS[flag] };
+    });
+    // One observable per config key, which is what the form edits. Nothing is sent until
+    // Apply: a half-typed panel is not a staged change (#38).
+    this.form = {};
+    FLAGS.concat("level", "ai_fill").forEach(function (key) {
+        self.form[key] = ko.observable(default_config()[key]);
+    });
 
     // The board is not a screen of the flow and not a phase of the room: it is this
     // client's own, drawn over a simulation that keeps running in a networked room and
@@ -136,6 +164,100 @@ function ViewModel() {
             ticker = null;
         }
     }
+
+    // The room names a level and every client resolves that name for itself, by fetching
+    // the `.dat` the relay already serves beside the page -- same origin, so there is no
+    // second host and nothing to configure (#34, #38). Cached as promises, so a rematch on
+    // the same level refetches nothing.
+    function unavailable(name) {
+        // Refused, never quietly swapped for the built-in map: a client left on a stale
+        // bundle would otherwise play a different ban map from everyone else, and that is
+        // a desync rather than a worse picture.
+        self.error("This client does not have that level. Reload the page.");
+        return Promise.reject(new Error("unknown level: " + name));
+    }
+
+    function get_level(name) {
+        if (name === CUSTOM)
+            return self.custom_level() ? Promise.resolve(self.custom_level()) : unavailable(name);
+        if (name === "default") return Promise.resolve(create_default_level());
+        if (LEVELS.indexOf(name) < 0) return unavailable(name);
+        if (!levels[name])
+            levels[name] = fetch("levels/" + name + "/" + name + ".dat")
+                .then(function (response) {
+                    if (!response.ok) throw new Error(name + ": " + response.status);
+                    return response.blob();
+                })
+                .then(function (blob) {
+                    return loader.read(blob);
+                })
+                .catch(function (err) {
+                    // Not remembered as a failure: it is worth another try next match.
+                    // And this client stays in the lobby rather than playing the default
+                    // map instead -- a differing ban map is a desync, not a worse picture.
+                    delete levels[name];
+                    self.error("That level would not load. Ask the host for another one.");
+                    throw err;
+                });
+        return levels[name];
+    }
+
+    // Fetched the moment the room names it, not when the match starts. A lockstep room
+    // cannot wait for one client's download: every other client would step past the ticks
+    // it was loading through, fill its seat with released keys and never hear its real
+    // frames -- which is a desync, not a stutter. Staging is what buys the time to do this
+    // in: the level is named in the lobby and applied a match later (#38).
+    // ponytail: a cold cache and an instant start still race, and the loser desyncs.
+    // upgrade path: hold `start` until every client says it has the level (#42).
+    var preloaded = null;
+    function preload() {
+        var named = Object.assign({}, self.config(), self.staged()).level;
+        // Once per name, because this runs on every room update -- a seat taken, a ready
+        // toggled -- and a level that will not load must not be refetched on each of them.
+        // The match start asks again anyway, which is the retry.
+        if (named === preloaded) return;
+        preloaded = named;
+        get_level(named).catch(function () {});
+    }
+
+    // The form mirrors the config the next match will run on: what is applied, with what
+    // the host has staged on top. Refilled only when that answer really changes, so a room
+    // update caused by somebody taking a seat does not discard a half-edited panel.
+    var form_shows = "";
+    function fill_form() {
+        var effective = Object.assign({}, self.config(), self.staged());
+        if (JSON.stringify(effective) === form_shows) return;
+        form_shows = JSON.stringify(effective);
+        Object.keys(self.form).forEach(function (key) {
+            self.form[key](effective[key]);
+        });
+    }
+    function read_form() {
+        var wanted = {};
+        Object.keys(self.form).forEach(function (key) {
+            wanted[key] = self.form[key]();
+        });
+        return wanted;
+    }
+
+    // The staged banner names the diff *and* what it did, because cleared ready checkboxes
+    // on their own read as a bug rather than as a consequence (#10, #38).
+    this.staged_text = ko.computed(function () {
+        var staged = self.staged();
+        if (!staged) return "";
+        return (
+            "Host staged: " +
+            Object.keys(staged)
+                .map(function (key) {
+                    var value = staged[key];
+                    return (
+                        LABELS[key] + " \u2192 " + (key === "level" ? value : value ? "on" : "off")
+                    );
+                })
+                .join(", ") +
+            "."
+        );
+    });
 
     this.code_chars = ko.computed(function () {
         return (self.pending_id() || "").split("");
@@ -223,6 +345,16 @@ function ViewModel() {
         self.board(null);
         self.ready(false);
         self.seat_ready(ALL_READY);
+        // The config belonged to the room, so it goes with it: the next room's arrives on
+        // its handshake, and a local room starts from the defaults (#38).
+        self.config(default_config());
+        self.staged(null);
+        self.notice("");
+        self.new_password("");
+        // Forgotten, not merely recomputed: an edit the host never applied belonged to the
+        // room it was typed in, and the next room may happen to have the same config.
+        form_shows = "";
+        fill_form();
         deadline = null;
         show_countdown();
         granted([]);
@@ -251,10 +383,12 @@ function ViewModel() {
         if (self.current_game()) return self.current_game();
         var participants = self.participants();
         var game = new Game_Session(
-            self.current_level,
+            get_level,
             {
                 seed: Date.now() | 0,
-                settings: url,
+                // Read at propose time, not held from here: a local room's config is
+                // edited inside the lobby this session already exists in (#38).
+                settings: self.config,
                 host: host,
                 held: granted(),
                 // Real pause survives in a local room only: there is nothing to desync
@@ -264,7 +398,7 @@ function ViewModel() {
                     return participant.scheme;
                 }),
             },
-            muted,
+            false,
             transport,
         );
         // The host announces the end and every client honours it, so a host walking back
@@ -304,6 +438,15 @@ function ViewModel() {
         self.seat_ready(msg.ready || ALL_READY);
         deadline = msg.countdown == null ? null : Date.now() + msg.countdown;
         show_countdown();
+        // The room's config is the room's answer, refreshed on every update like the seats
+        // are: a staged change, a match that applied one, and a host migrating are all the
+        // same code path (#36, #38). The password is in none of them (#8).
+        if (msg.config) {
+            self.config(msg.config);
+            self.staged(msg.staged || null);
+            fill_form();
+            preload();
+        }
         if (!msg.held.length) {
             // Every seat gone: un-ready at countdown zero, which reserves nothing. The
             // client is still in the room, so the names screen is where it asks for seats
@@ -569,21 +712,60 @@ function ViewModel() {
     this.cancel_countdown = function () {
         transport.send({ type: "cancel" });
     };
+
+    // Staged, never immediate: the match being played is never reconfigured under the
+    // people playing it, and the relay applies the diff when the next one begins (#38).
+    this.apply_config = function () {
+        self.error("");
+        self.notice("");
+        var wanted = read_form();
+        if (!self.room_id()) {
+            // A local room has no relay to stage against and nobody to keep waiting, so
+            // the change lands here and the next match runs on it (#16).
+            var next = Object.assign({}, self.config(), config_diff(self.config(), wanted));
+            // `CUSTOM` is not in `LEVELS`, so the shared validator drops it -- which is
+            // exactly what must happen to it on the wire, and not here.
+            if (wanted.level === CUSTOM && self.custom_level()) next.level = CUSTOM;
+            self.config(next);
+            fill_form();
+            preload();
+            return;
+        }
+        transport.send({ type: "config", config: wanted });
+    };
+
+    // Write-only, and the host is not exempt: nothing ever sends a password back, so this
+    // is a blind replacement and an empty box is how a room's password is removed (#8).
+    // It takes effect at once rather than at the next match -- it guards the door, not the
+    // match -- which is why it is its own button and not part of Apply.
+    this.set_password = function () {
+        self.error("");
+        transport.send({ type: "config", password: self.new_password() });
+        self.notice(self.new_password() ? "Password set." : "Password removed.");
+        self.new_password("");
+    };
     this.copy_link = function () {
         if (navigator.clipboard) navigator.clipboard.writeText(self.join_link());
     };
 
+    // A level of your own, in a local room: it cannot be shared, because the other clients
+    // in a room resolve a level by fetching its name and there is nothing to fetch (#38).
     this.load_level = function (vm, evt) {
         var files = evt.target.files;
         if (!files.length) return;
         self.loading_level(true);
-        document.addEventListener(loader.on_loaded_event_text, function () {
-            self.current_level = loader.read_level();
-            // The next match is the one that runs on it: the session bakes its level in.
-            end_match();
-            self.loading_level(false);
-        });
-        loader.load(files[0]);
+        loader.read(files[0]).then(
+            function (level) {
+                self.custom_level(level);
+                self.loading_level(false);
+                self.form.level(CUSTOM);
+                self.apply_config();
+            },
+            function () {
+                self.loading_level(false);
+                self.error("That file is not a level.");
+            },
+        );
     };
 
     apply_route();

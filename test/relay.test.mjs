@@ -5,6 +5,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 
 import { normalise_room_id } from "../src/net/room_id.js";
+import { LEVELS, config_diff, default_config } from "../src/net/room_config.js";
 import { start_server } from "../server/index.js";
 import { Room } from "../src/net/room.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
@@ -16,6 +17,18 @@ assert.equal(normalise_room_id("ABCDI"), null, "I is not in the alphabet");
 assert.equal(normalise_room_id("ABCDO"), null, "O is not in the alphabet");
 assert.equal(normalise_room_id("ABCD"), null, "four characters is not a room id");
 assert.equal(normalise_room_id(undefined), null, "nor is nothing at all");
+
+// Room config is host input, so the shared validator is what the relay trusts and the only
+// thing it stages: unknown keys are dropped, a level that is not one of the room's is not a
+// level, and a value the room already has is not a change (#38).
+const base = default_config();
+assert.deepEqual(base.level, "default", "a room starts on the built-in map");
+assert.deepEqual(config_diff(base, { no_gore: true }), { no_gore: true }, "a flag that flips");
+assert.deepEqual(config_diff(base, { no_gore: false }), {}, "one that does not is not a change");
+assert.deepEqual(config_diff(base, { level: "caves" }), { level: "caves" }, "a level in the list");
+assert.deepEqual(config_diff(base, { level: "../levelmap.txt" }), {}, "and one that is not");
+assert.deepEqual(config_diff(base, { win_score: 10 }), {}, "a key nobody declared is dropped");
+assert.deepEqual(config_diff(base, "nonsense"), {}, "and so is a config that is not one");
 
 const server = await start_server(0);
 const url = "ws://localhost:" + server.address().port + "/ws";
@@ -171,7 +184,11 @@ assert.notEqual(first_tick[0], undefined, "a held seat is its client's from the 
 assert.equal(first_tick[2], undefined, "and a seat nobody holds is the AI's from the same one");
 
 assert.equal(host_room.seed, 1234, "the seed rides on `start`");
-assert.deepEqual(host_room.settings, { no_gore: true }, "so do the settings, and only there");
+assert.deepEqual(
+    host_room.settings,
+    default_config(),
+    "the settings ride there too -- the room's own, not the ones this client proposed (#38)",
+);
 assert.ok(host_room.d >= 2 && host_room.d <= 10, "the delay is clamped to 2..10 ticks");
 
 const fixed = host_room.d;
@@ -459,6 +476,100 @@ assert.ok(
     "and every client in it hears the match end on the same broadcast the host would send",
 );
 late_ready.socket.close();
+
+// Host config (#38): staged, applied when the next match begins, and a password that is
+// write-only. Configuration has exactly one path now, which is why a client's own proposed
+// settings are ignored above -- a differing no_gore desyncs the RNG on the first kill (#5).
+const chief = connect({ type: "create", id: "WXYZB" });
+const chief_joined = await lobby(chief);
+assert.deepEqual(chief_joined.config, default_config(), "a new room starts on the defaults");
+assert.equal(chief_joined.staged, null, "with nothing staged");
+await chief.seats(["Chief"]);
+const second = connect({ type: "join", id: "WXYZB" });
+await lobby(second);
+await second.seats(["Guest"]);
+second.socket.send({ type: "ready", ready: true });
+await second.until((msg) => msg.type === "room" && msg.you_ready);
+
+// A client that is not the host configures nothing, so the jetpack never reaches the diff.
+second.socket.send({ type: "config", config: { jetpack: true } });
+chief.socket.send({ type: "config", config: { level: "caves", no_gore: true, ai_fill: false } });
+const pending = await second.until((msg) => msg.type === "room" && msg.staged);
+assert.deepEqual(
+    pending.staged,
+    { level: "caves", no_gore: true, ai_fill: false },
+    "the host's change is staged as a diff, and only the host's",
+);
+assert.deepEqual(pending.config, default_config(), "the match being waited on is unchanged");
+assert.equal(pending.you_ready, false, "and everyone's ready is cleared, which the banner says");
+
+// Staging what is already staged changes nothing, so it must not clear the room again.
+second.socket.send({ type: "ready", ready: true });
+await second.until((msg) => msg.type === "room" && msg.you_ready);
+chief.socket.send({ type: "config", config: { level: "caves", nonsense: true } });
+const unchanged = await second.until((msg) => msg.type === "room");
+assert.equal(unchanged.you_ready, true, "re-staging a value the room has clears nobody's ready");
+assert.deepEqual(unchanged.staged, pending.staged, "and stages nothing new");
+
+// A value the validator refuses is ignored, never read as a revert: it must not throw away
+// the level that is already staged, and it must not clear the room on the way past.
+chief.socket.send({ type: "config", config: { level: "levelmap.txt" } });
+const refused = await second.until((msg) => msg.type === "room");
+assert.deepEqual(
+    refused.staged,
+    pending.staged,
+    "a level that is not one of the room's is ignored",
+);
+assert.equal(refused.you_ready, true, "and clears nobody's ready on its way to being ignored");
+
+// Applied on restart, and that is the only place it is applied.
+const guest_saw = [];
+second.socket.receive((msg) => guest_saw.push(msg));
+chief.socket.send({ type: "start", seed: 9, settings: { level: "mario", no_gore: false } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const configured = guest_saw.find((msg) => msg.type === "start");
+assert.equal(configured.settings.level, "caves", "the match runs on the room's staged level");
+assert.equal(configured.settings.no_gore, true, "and on its flags, not on the host's proposal");
+assert.deepEqual(
+    configured.drivers,
+    ["local", "local", "off", "off"],
+    "AI-fill off disables the seats nobody holds instead of growing bunnies on them",
+);
+const applied = await second.until((msg) => msg.type === "room" && msg.started);
+assert.equal(applied.staged, null, "the staged change is spent, so the banner comes down");
+assert.equal(applied.config.level, "caves", "and the room's config is the one being played");
+
+// The password is write-only: set blind, never in a room view, and an empty one clears it
+// (#8). It is the one setting that applies at once -- it guards the door, not the match.
+chief.socket.send({ type: "config", password: "hunter2" });
+await second.until((msg) => msg.type === "room");
+const barred = connect({ type: "join", id: "WXYZB" });
+assert.equal((await lobby(barred)).code, "ROOM_UNAVAILABLE", "a new password takes effect at once");
+barred.socket.close();
+second.socket.send({ type: "config", password: "" });
+const admitted = connect({ type: "join", id: "WXYZB", password: "hunter2" });
+const admitted_view = await lobby(admitted);
+assert.equal(admitted_view.type, "joined", "a second cannot clear the host's password");
+assert.ok(
+    !JSON.stringify(admitted_view).includes("hunter2"),
+    "and nothing a client is ever sent carries it, the host included",
+);
+admitted.socket.close();
+chief.socket.send({ type: "config", password: "" });
+await second.until((msg) => msg.type === "room");
+const walk_in = connect({ type: "join", id: "WXYZB" });
+assert.equal((await lobby(walk_in)).type, "joined", "an empty password is how a room loses one");
+walk_in.socket.close();
+second.socket.close();
+chief.socket.close();
+
+// A level name is resolved by fetching `levels/<name>/<name>.dat` beside the page, so the
+// list is only an allowlist while every name in it is really there (#38).
+for (const level of LEVELS.slice(1))
+    assert.ok(
+        fs.existsSync(new URL("../game/levels/" + level + "/" + level + ".dat", import.meta.url)),
+        level + " is offered in the level picker, so the relay has to be serving it",
+    );
 
 // The relay runs no simulation of its own, and the cheapest way to keep it that way is to
 // notice when it starts importing one (#6).

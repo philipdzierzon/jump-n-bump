@@ -35,9 +35,6 @@ export function Loopback_Transport() {
                 // The driver table rides on `start`, as it does on the relay: a client
                 // steps tick 0 the instant `start` lands, so a change stamped for that
                 // same tick is one stamped for a tick already stepped past (#34).
-                // ponytail: AI-fill is on, which is the room default and the only local
-                // room there is. upgrade path: room config turns it off and a seat nobody
-                // holds goes enabled = false instead (#7, #38).
                 to_client({
                     type: "start",
                     t: 0,
@@ -45,8 +42,12 @@ export function Loopback_Transport() {
                     seed: msg.seed,
                     settings: msg.settings,
                     held: msg.held,
+                    // A seat nobody holds goes to the AI, or is disabled when the room's
+                    // AI-fill is off and the match runs short-handed -- the same rule the
+                    // relay applies, read from the same config (#7, #38).
                     drivers: [0, 1, 2, 3].map(function (seat) {
-                        return msg.held.indexOf(seat) >= 0 ? "local" : "ai";
+                        if (msg.held.indexOf(seat) >= 0) return "local";
+                        return msg.settings.ai_fill !== false ? "ai" : "off";
                     }),
                 });
                 break;

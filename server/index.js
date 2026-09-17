@@ -16,6 +16,7 @@ import express from "express";
 import { WebSocketServer } from "ws";
 
 import { generate_room_id, normalise_room_id } from "../src/net/room_id.js";
+import { config_diff, default_config } from "../src/net/room_config.js";
 
 const PORT = process.env.PORT || 8080;
 const TICK_MS = 1000 / 60;
@@ -64,10 +65,13 @@ function create(client, msg) {
         // The whole phase model: a room is in lobby or in-game, and there is no third
         // (#21). The countdown is part of the lobby, not a phase of its own.
         started: false,
-        // ponytail: AI-fill is on unless the creator says otherwise, and nothing in the
-        // client says otherwise yet. upgrade path: host-staged room config, which is where
-        // this setting belongs (#38).
-        ai_fill: msg.ai_fill !== false,
+        // The room's config, and the only configuration path there is: the creator gets
+        // the defaults and the host stages changes from the lobby (#38). Nothing on the
+        // handshake sets it, so a link cannot carry one either.
+        config: default_config(),
+        // Changes the host has staged, applied when the next match begins -- never to the
+        // one being played (#38). Null when there is nothing waiting.
+        staged: null,
         deadline: null,
         timer: null,
         pending: null,
@@ -184,6 +188,12 @@ function room_view(room, client) {
         // count the client accumulates: a hidden tab stops its game loop but not its
         // clock, and a countdown built on frames would freeze with it (#51).
         countdown: room.deadline ? Math.max(0, room.deadline - Date.now()) : null,
+        // The config the next match will run on, and what the host has staged on top of
+        // it: everyone sees both, because a banner naming the diff is what stops the
+        // cleared ready checkboxes reading as a bug (#10, #38). The password is in neither
+        // -- it is write-only, and the host is not exempt (#8).
+        config: room.config,
+        staged: room.staged,
     };
 }
 
@@ -324,6 +334,11 @@ function stamp_driver(room, seat, driver) {
 // a countdown run out (#37).
 function begin(room, msg) {
     cancel_countdown(room);
+    // Staged changes land here and nowhere else: "applied on restart" is this line (#38).
+    if (room.staged) {
+        room.config = { ...room.config, ...room.staged };
+        room.staged = null;
+    }
     room.tick = 0;
     room.d = input_delay(room);
     room.started = true;
@@ -343,7 +358,7 @@ function begin(room, msg) {
     // next match. upgrade path: the released-frame and AI takeover (#42).
     const online = online_seats(room);
     const drivers = room.seats.map((seat, index) =>
-        seat && online.has(index) ? "local" : room.ai_fill ? "ai" : "off",
+        seat && online.has(index) ? "local" : room.config.ai_fill ? "ai" : "off",
     );
     for (const other of room.clients)
         send(other, {
@@ -351,10 +366,17 @@ function begin(room, msg) {
             t: 0,
             d: room.d,
             seed: msg.seed,
-            settings: msg.settings,
+            // The room's, never the proposer's: a client that configured itself -- an old
+            // query param, a stale tab, a bot -- would desync the RNG stream on the first
+            // kill, so what a `start` carries in `settings` is ignored here (#5, #38).
+            settings: room.config,
             held: other.seats,
             drivers,
         });
+    // The room changed on the way in -- the staged config landed -- and a client that is
+    // not playing this match hears about it on the same broadcast every other change uses
+    // (#36). It is also what retires the staged banner once the match it named begins.
+    broadcast_state(room);
 }
 
 // At zero, a client that never readied gives up every seat it holds and reserves nothing:
@@ -371,6 +393,38 @@ function countdown_zero(room) {
     // first: a client vacated at zero has to hear that it holds nothing.
     broadcast_state(room);
     begin(room, pending);
+}
+
+// The host configures the room, and only the host (#38). Two clocks in one message: the
+// password takes effect the moment it lands, because it guards the door rather than the
+// match, and everything else is staged for the next match so a config change can never
+// alter one being played.
+//
+// The password is write-only. It is compared in memory, never broadcast, never logged and
+// never embedded in a link, so the host sets a replacement blind -- and an empty one clears
+// it, which is the only way to remove one (#8). It travels plaintext over WSS; there is no
+// database to protect at rest.
+function host_config(client, msg) {
+    const room = client.room;
+    if (!client.host) return;
+    if ("password" in msg) room.password = String(msg.password) || null;
+    if (!msg.config) return broadcast_state(room);
+    // Twice through the validator, because the two questions are different ones. First:
+    // what did the host actually change? Diffing against the effective config drops a key
+    // that is not one of the room's and a level that is not in the list, so an invalid
+    // value is ignored rather than read as a revert of what is already staged.
+    const effective = { ...room.config, ...room.staged };
+    const wanted = { ...effective, ...config_diff(effective, msg.config) };
+    // Second: what will the next match change? Against the applied config, not the staged
+    // one, so the banner names the whole change -- and picking a value back to the one the
+    // room already has un-stages it rather than stacking a second change on top.
+    const staged = config_diff(room.config, wanted);
+    const changed = JSON.stringify(staged) !== JSON.stringify(room.staged || {});
+    room.staged = Object.keys(staged).length ? staged : null;
+    // Ready resets on a staged change and the countdown goes with it (#37) -- but only on a
+    // real one, or the host reading its own settings back would clear the room.
+    if (changed) reset_ready(room);
+    broadcast_state(room);
 }
 
 function relay(client, msg) {
@@ -430,6 +484,9 @@ function relay(client, msg) {
             break;
         case "driver":
             stamp_driver(room, msg.seat, msg.driver);
+            break;
+        case "config":
+            host_config(client, msg);
             break;
         case "match_end":
             // Broadcast exactly as the host sent it, final board included: the relay
