@@ -41,10 +41,21 @@ export var FLAGS = [
     "no_gore",
 ];
 
+// The two match-end knobs and their ceilings. Bumps stop at 99 because the in-game counter
+// paints a two-digit number; minutes stop at 60 because an hour is already endless in
+// practice. Zero is endless for both, which is the game's original behaviour and the
+// default (#22, #39). The time limit is minutes here and ticks in the simulation, which is
+// the only place it is ever compared against -- a clock is a thing four clients disagree
+// about, and a tick count is not.
+export var LIMITS = { bump_limit: 99, time_limit: 60 };
+
 export function default_config() {
     var config = { level: "default", ai_fill: true };
     FLAGS.forEach(function (flag) {
         config[flag] = false;
+    });
+    Object.keys(LIMITS).forEach(function (key) {
+        config[key] = 0;
     });
     return config;
 }
@@ -60,6 +71,16 @@ export function config_diff(current, wanted) {
         diff.level = wanted.level;
     FLAGS.concat("ai_fill").forEach(function (key) {
         if (key in wanted && !!wanted[key] !== current[key]) diff[key] = !!wanted[key];
+    });
+    // Whole numbers inside their ceiling, and anything else dropped rather than clamped: a
+    // host typing 900 into a text box means nothing in particular, and a silently clamped
+    // 99 is a setting nobody chose (#39). A number field hands over a string, so it is
+    // parsed here rather than trusted.
+    Object.keys(LIMITS).forEach(function (key) {
+        if (!(key in wanted) || wanted[key] === "" || wanted[key] == null) return;
+        var value = Number(wanted[key]);
+        if (!isFinite(value) || value < 0 || value > LIMITS[key] || value % 1) return;
+        if (value !== current[key]) diff[key] = value;
     });
     return diff;
 }

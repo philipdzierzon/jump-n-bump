@@ -19,6 +19,9 @@ import { JSDOM, VirtualConsole } from "jsdom";
 
 import { start_server } from "../server/index.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
+// The page's own simulation, not a copy of it: node hands every importer the same module,
+// so a bump scored here is a bump the match the page is playing really has (#39).
+import { player } from "../src/game/game.js";
 
 // The relay is started first because the page's origin is what it is served from: the
 // client derives `ws://<host>/ws` from `window.location`, so the origin has to be the real
@@ -203,10 +206,17 @@ assert.ok(!shown(overlay), "with no board over it");
 press(80, "keyup"); // P, which is a keyup in this game
 await until("the board", () => shown(overlay));
 const board = all("tr", overlay).map((row) => all("th, td", row).map(text));
+const head = (row) => all("th", row).map((el) => el.getAttribute("title"));
 assert.deepEqual(
-    board[0],
+    head(all("tr", overlay)[0]),
     ["", "Dott", "Jiffy", "Fizz", "Miji", "Total kills"],
     "the board names every seat, taken or not (#13)",
+);
+assert.deepEqual(
+    all("tr", overlay)[0].querySelectorAll("span.swatch").length,
+    4,
+    "and heads the four seat columns with the bunnies' colours rather than their names, " +
+        "which is what fits six columns on a phone (#39)",
 );
 const board_rows = board.slice(1);
 assert.equal(board_rows.length, 5, "four bunnies and the total");
@@ -240,18 +250,65 @@ click("Start the match");
 await on("play");
 click("Back to the lobby");
 await on("room");
-const last = all("tr", screen("room").querySelector('div[data-bind*="visible: board"]')).map(
-    (row) => all("th, td", row).map(text),
-);
+const board_panel = () => screen("room").querySelector('div[data-bind*="visible: board"]');
+const last = all("tr", board_panel()).map((row) => all("th, td", row).map(text));
 assert.deepEqual(
-    last[0],
+    head(all("tr", board_panel())[0]),
     ["", "Dott", "Jiffy", "Fizz", "Miji", "Total kills"],
     "the lobby's last-match board names every seat",
+);
+assert.equal(
+    text(board_panel().querySelector("p.banner")),
+    "The host ended the match.",
+    "with one line above it saying how it ended, and no end-of-match screen (#39)",
 );
 assert.equal(last.length, 6, "the header, four bunnies and the totals row");
 assert.ok(
     last.slice(1).every((row) => row.length === last[0].length),
     "and every row of it is as wide as the header, with no cell missing",
+);
+
+// --- a match that ends by itself (#39) -----------------------------------------------
+// Two knobs, one ending, whichever fires first. Both default to 0 -- endless, which is what
+// every match above ran on and what the game has always done.
+function number_row(label) {
+    const row = all("label", screen("room")).find((el) => text(el) === label);
+    assert.ok(row, `no settings row labelled "${label}"`);
+    return row.querySelector('input[type="number"]');
+}
+assert.equal(number_row("Bumps to win").value, "0", "a room is endless until somebody says so");
+assert.equal(number_row("Minutes").value, "0");
+type_into(number_row("Bumps to win"), "3");
+type_into(number_row("Minutes"), "1");
+click("Apply to the next match");
+
+click("Start the match");
+await on("play");
+const chrome = () => all("li", screen("play")).map(text).filter(Boolean);
+await until("the clock", () => chrome().some((item) => /^\d+:\d\d$/.test(item)));
+assert.ok(
+    chrome().includes("3 to win"),
+    "the clock and the target live in the top bar: no wire bytes and no canvas pixels (#39)",
+);
+
+// Scored in the page's own simulation, because the tick a seat reaches the limit on is the
+// tick every client ends the match on -- and the host is what announces it (#22, #39).
+player[1].bumps = 3;
+player[1].bumped[0] = 3;
+await sleep(300);
+assert.ok(
+    shown(screen("play")),
+    "the last frame is held for a moment rather than cut away on the tick it was drawn (#39)",
+);
+await on("room");
+assert.equal(
+    text(board_panel().querySelector("p.banner")),
+    "Jiffy wins with 3 bumps.",
+    "the bump limit ends the match by itself, and the line above the board says who took it",
+);
+assert.ok(
+    !chrome().some((item) => /^\d+:\d\d$/.test(item)),
+    "and the clock goes with the match it was counting",
 );
 
 click("Leave");
@@ -410,6 +467,39 @@ const walk_in = new WebSocket_Transport(
 );
 await until("the walk-in", () => walk_in_saw.some((msg) => msg.type === "joined"));
 walk_in.close();
+
+// The board of a match this client never simulated: it was in the lobby for all of it, so
+// the matrix it shows is the one the host counted and announced (#19, #39).
+guest.send({
+    type: "match_end",
+    t: 900,
+    reason: "time",
+    matrix: [
+        [0, 1, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+    ],
+});
+await until("the announced board", () => shown(board_panel()));
+assert.equal(
+    text(board_panel().querySelector("p.banner")),
+    "Dott wins with 1 bump.",
+    "a client that never played the match still gets its board, because the host sent one",
+);
+assert.deepEqual(
+    all("tr", board_panel())
+        .slice(1)
+        .map((row) => all("th, td", row).map(text)),
+    [
+        ["Dott", "0", "1", "0", "0", "1"],
+        ["Zip", "0", "0", "0", "0", "0"],
+        ["Fizz", "0", "0", "0", "0", "0"],
+        ["Miji", "0", "0", "0", "0", "0"],
+        ["Total deaths", "0", "1", "0", "0", "1"],
+    ],
+    "seat-keyed and headed by the username on each seat, kills across and deaths down (#13)",
+);
 
 guest.close();
 click("Leave");

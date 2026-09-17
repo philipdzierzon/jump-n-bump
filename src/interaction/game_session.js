@@ -50,6 +50,7 @@ export function Game_Session(get_level, config, muted, transport) {
     var sound_player = null;
     var start_when_ready = false;
     var board_timer = null;
+    var clock_timer = null;
     // Which `start` the pending level load belongs to. The host can start another match
     // while this client is still fetching the last one's level, and the loser of that race
     // must not build a simulation over the winner's.
@@ -57,8 +58,15 @@ export function Game_Session(get_level, config, muted, transport) {
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
+    // Time left of a time-limited match, mm:ss, or null when the match is endless. It is
+    // sampled off the simulation's own tick rather than a clock, and it is chrome: no wire
+    // bytes and no canvas pixels (#39).
+    this.clock = ko.observable(null);
     this.on_match_start = null;
     this.on_match_end = null;
+    // A limit the simulation reached. Every client reaches it on the same tick and stops
+    // there; only the host announces it, which is what the others leave the match on (#22).
+    this.on_limit = null;
 
     // The relay cannot read the simulation, so the host announces the end and the final
     // board travels with it (#22, #19). It comes back to the announcer too, which is what
@@ -116,6 +124,10 @@ export function Game_Session(get_level, config, muted, transport) {
         sfx = new Sfx(sound_player);
         var movement = new Movement(sfx, objects, settings, rnd);
         game = new Game(movement, ai, animation, renderer, objects, room, level, true, rnd);
+        game.on_end = function (reason) {
+            show_clock();
+            if (self.on_limit) self.on_limit(reason);
+        };
 
         // Every client in the room holds a session from the moment it reaches the lobby,
         // so the host's `start` never lands on a client that is not listening yet (#35).
@@ -148,6 +160,16 @@ export function Game_Session(get_level, config, muted, transport) {
         board_timer = null;
     }
 
+    // Sampled on a wall clock like the board's refresh is, because nothing in the loop
+    // knows the top bar is there -- but what it reads is the simulation's own tick, so the
+    // number the bar shows and the tick the match ends on are the same count (#39).
+    function show_clock() {
+        var left = game ? game.ticks_left() : null;
+        if (left == null) return self.clock(null);
+        var seconds = Math.ceil(left / 60);
+        self.clock(Math.floor(seconds / 60) + ":" + ("0" + (seconds % 60)).slice(-2));
+    }
+
     // Simulating, with no board up. `Game.start` is a no-op while it is already pumping,
     // which is what lets every way back into the match share this.
     function play() {
@@ -155,6 +177,11 @@ export function Game_Session(get_level, config, muted, transport) {
         self.game_state(Game_State.Playing);
         sound_player.set_muted(muted);
         game.start();
+        show_clock();
+        // ponytail: the bar's clock is up to 250ms behind the tick it counts, which nobody
+        // can see on a clock that shows seconds. upgrade path: a per-frame callback out of
+        // the pump loop if anything ever needs the tick itself.
+        if (!clock_timer) clock_timer = setInterval(show_clock, 250);
     }
 
     // The board, over a simulation that carries on scoring behind it. Its refresh is on a
@@ -181,6 +208,9 @@ export function Game_Session(get_level, config, muted, transport) {
         // build it would land in is cancelled with the same counter a second `start` uses.
         starting++;
         forget_board();
+        clearInterval(clock_timer);
+        clock_timer = null;
+        self.clock(null);
         // Counted here, because the lobby reads this board the moment the match is left and
         // the overlay's own refresh is the only other thing that ever fills it: leaving a
         // match nobody pressed P on handed the lobby the empty matrix this starts life as,

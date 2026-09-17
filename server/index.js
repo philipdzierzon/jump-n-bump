@@ -60,6 +60,14 @@ function create(client, msg) {
         // { token, name } or null; the token is the client holding it, which is what makes
         // a seat reclaimable across a disconnect (#7).
         seats: new Array(SEATS).fill(null),
+        // The last username on each seat, kept for as long as the room lives. The board is
+        // seat-keyed, so a seat that has been vacated still has a column of bumps on it and
+        // still needs a name over that column (#13, #39).
+        last_names: new Array(SEATS).fill(null),
+        // Who is driving each seat, as last stamped. The relay runs no simulation, but it
+        // does route every driver change, and that is the difference between a bunny its
+        // participant is steering and one the AI took over (#13, #39).
+        drivers: new Array(SEATS).fill(null),
         tick: 0,
         d: 2,
         // The whole phase model: a room is in lobby or in-game, and there is no third
@@ -142,6 +150,24 @@ function all_ready(room) {
     return true;
 }
 
+// What the board calls each seat. The three states are all the room's own knowledge: a
+// seat held by a connected client is that participant, a seat whose holder is not connected
+// is played by the AI, and a seat nobody holds any more keeps the name of whoever last did.
+// A seat nobody ever took has no name here at all, and the client falls back to the bunny's
+// (#13, #39).
+function seat_labels(room) {
+    const online = online_seats(room);
+    return room.last_names.map((name, seat) =>
+        !name
+            ? null
+            : !room.seats[seat]
+              ? name + " (left)"
+              : online.has(seat) && room.drivers[seat] !== "ai"
+                ? name
+                : name + " (AI)",
+    );
+}
+
 // Per seat, for display only: its holder's own flag, and ready for a seat the AI has.
 function ready_seats(room) {
     const ready = room.seats.map(() => true);
@@ -179,6 +205,7 @@ function to_lobby(room, msg) {
 function room_view(room, client) {
     return {
         seats: room.seats.map((seat) => (seat ? seat.name : null)),
+        labels: seat_labels(room),
         held: client.seats,
         host: !!client.host,
         started: room.started,
@@ -212,9 +239,10 @@ function take_seats(client, msg) {
     const free = room.seats.map((seat, index) => (seat ? -1 : index)).filter((i) => i >= 0);
     if (free.length < names.length) return send(client, { type: "error", code: "ROOM_FULL" });
     client.seats = free.slice(0, names.length);
-    client.seats.forEach(
-        (seat, nth) => (room.seats[seat] = { token: client.token, name: names[nth] }),
-    );
+    client.seats.forEach((seat, nth) => {
+        room.seats[seat] = { token: client.token, name: names[nth] };
+        room.last_names[seat] = names[nth];
+    });
     ensure_host(room);
     broadcast_state(room);
 }
@@ -328,6 +356,11 @@ function input_delay(room) {
 // the change, since that tick never comes round again.
 function stamp_driver(room, seat, driver) {
     broadcast(room, { type: "driver", t: room.tick + 2 * room.d, seat, driver });
+    // A client that walks back to the lobby keeps its seats and hands the AI its bunnies,
+    // so the seat is held, its holder is connected, and the AI is driving it all the same.
+    // The board has to say so, which means the room is described again (#13, #39).
+    room.drivers[seat] = driver;
+    broadcast_state(room);
 }
 
 // The match itself begins here whichever way the host got to it -- every client ready, or
@@ -360,6 +393,7 @@ function begin(room, msg) {
     const drivers = room.seats.map((seat, index) =>
         seat && online.has(index) ? "local" : room.config.ai_fill ? "ai" : "off",
     );
+    room.drivers = drivers;
     for (const other of room.clients)
         send(other, {
             type: "start",

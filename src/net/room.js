@@ -72,6 +72,12 @@ export function Room(transport, read_input) {
         transport.send({ type: "driver", seat: seat, driver: driver });
     };
 
+    // The tick this room is on, which is the tick the match is on: what a time limit is
+    // measured against, and the one counter there is (#39).
+    this.now = function () {
+        return tick;
+    };
+
     // The host announces the end; the relay cannot read the simulation, so the final board
     // travels with it (#22, #19).
     this.end_match = function (reason, matrix) {
