@@ -249,6 +249,27 @@ assert.equal(
     true,
     "the host migrates when the host leaves",
 );
+
+// A deliberate Leave frees the seats at once: the relay cannot tell one from a dropped
+// connection unless it is told (#7). A dropped connection reserves them instead, and the
+// window frees them when it expires (#17).
+back.socket.send({ type: "leave" });
+assert.deepEqual(
+    (await stranger.until((msg) => msg.type === "room" && !msg.seats[1])).seats,
+    ["Sender", null, "Stranger", null],
+    "Leave frees the seat at once -- while seat 0's dropped holder keeps its reservation",
+);
+process.env.RESERVE_MS = "60";
+const dropper = connect({ type: "join", id: "ECHZX" });
+await lobby(dropper);
+assert.deepEqual((await dropper.seats(["Dropper"])).held, [1], "the freed seat is handed on");
+dropper.socket.close();
+assert.equal(
+    (await stranger.until((msg) => msg.type === "room" && !msg.seats[1])).seats[1],
+    null,
+    "a seat dropped by a disconnect is freed when its reservation window expires",
+);
+delete process.env.RESERVE_MS;
 back.socket.close();
 stranger.socket.close();
 
@@ -257,7 +278,16 @@ stranger.socket.close();
 const source = fs.readFileSync(new URL("../server/index.js", import.meta.url), "utf8");
 assert.ok(!/from "\.\.\/src\/game\//.test(source), "the relay imports nothing from the simulation");
 
+// The host is what announced the match, so a room left without one stops telling arrivals
+// that a match is running (#36).
 created.socket.close();
+const after = connect({ type: "join", id: "QMFTX" });
+assert.equal(
+    (await lobby(after)).started,
+    false,
+    "the match in progress goes with the host that announced it",
+);
+after.socket.close();
 generated.socket.close();
 
 server.close();

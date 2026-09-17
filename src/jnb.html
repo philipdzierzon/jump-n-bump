@@ -145,13 +145,15 @@
         <p class="muted">Press the jump key of every control scheme you want: <b>&uarr;</b>, <b>W</b>, <b>NumPad 8</b> or <b>I</b>. Up to four on one keyboard.</p>
         <ul class="seats" data-bind="foreach: participants">
             <li>
-                <input class="grow" maxlength="16" data-bind="value: name, valueUpdate: 'input'" aria-label="name" />
+                <input class="grow" maxlength="16" data-bind="value: name, valueUpdate: 'input', attr: { readonly: $parent.seated }" aria-label="name" />
                 <small data-bind="text: $parent.scheme_name(scheme)"></small>
-                <button class="sm" data-bind="click: $parent.drop_participant" aria-label="remove">&times;</button>
+                <button class="sm" data-bind="click: $parent.drop_participant, visible: !$parent.seated()" aria-label="remove">&times;</button>
             </li>
         </ul>
         <p class="muted" data-bind="visible: participants().length === 0">Nobody yet.</p>
-        <button class="pri" data-bind="click: take_seats, enable: participants().length > 0">Take the seats</button>
+        <p class="muted" data-bind="visible: seated">These seats are taken and keep their names for as long as you are in the room.</p>
+        <p class="muted" data-bind="visible: match_running">A match is in progress; you are in for the next one.</p>
+        <button class="pri" data-bind="click: take_seats, enable: participants().length > 0, text: seated() ? 'Back to the lobby' : 'Take the seats'"></button>
         <p class="err" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Start over</button>
     </div>
@@ -172,6 +174,7 @@
             </li>
         </ul>
         <p class="muted">Every seat in the room. The ones nobody takes are played by the AI.</p>
+        <p class="muted" data-bind="visible: match_running">A match is in progress; you are in for the next one.</p>
         <button class="pri" data-bind="visible: is_host, click: start_match, enable: !loading_level()">Start the match</button>
         <p class="muted" data-bind="visible: !is_host()">Waiting for the host to start.</p>
         <p class="err" data-bind="text: error"></p>

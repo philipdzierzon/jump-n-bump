@@ -22,6 +22,11 @@ const TICK_MS = 1000 / 60;
 const PING_MS = 1000;
 const SEATS = 4;
 const MAX_NAME = 16;
+// How long a seat stays reserved for the token that dropped it. Long enough for a reload
+// and for a phone moving WiFi -> cellular, which is what #17 sized it for; a deliberate
+// Leave frees the seat at once and never waits for this. Read per disconnect rather than
+// once, so a test can shorten it without a second knob.
+const reserve_ms = () => Number(process.env.RESERVE_MS || 60000);
 
 const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
@@ -118,6 +123,7 @@ function room_view(room, client) {
         seats: room.seats.map((seat) => (seat ? seat.name : null)),
         held: client.seats,
         host: !!client.host,
+        started: room.started,
     };
 }
 
@@ -141,6 +147,16 @@ function take_seats(client, msg) {
     );
     ensure_host(room);
     broadcast_state(room);
+}
+
+// Frees every seat a client holds. Deliberate: pressing Leave says so before the socket
+// goes, which is the only way the relay can tell a Leave from a dropped connection (#7).
+function vacate(client) {
+    const room = client.room;
+    for (const seat of client.seats)
+        if (room.seats[seat] && room.seats[seat].token === client.token) room.seats[seat] = null;
+    client.seats = [];
+    ensure_host(room);
 }
 
 function admit(client, room, msg) {
@@ -184,10 +200,25 @@ function leave(client) {
         console.log("room %s ended", room.id);
         return;
     }
-    // ponytail: the leaver's seats stay held by its token until the room empties, so a
-    // reload reclaims them and nobody else can take them meanwhile. upgrade path: the
-    // reservation window, AI takeover and take seat (#42).
+    // A dropped connection reserves its seats for the token that held them, so a reload
+    // reclaims them -- and frees them when the window expires, so a closed tab does not
+    // hold a seat for the room's whole life (#17).
+    // ponytail: the reserved seat is played by the AI from the next match start and the
+    // dropped client is told nothing. upgrade path: the released-frame, AI takeover
+    // mid-match and the Reconnecting... overlay (#42).
+    if (client.seats.length)
+        setTimeout(() => {
+            if (rooms[room.id] !== room) return;
+            for (const other of room.clients) if (other.token === client.token) return;
+            vacate(client);
+            broadcast_state(room);
+        }, reserve_ms()).unref();
     ensure_host(room);
+    // The host is what announced the match, so a room left without one retires the
+    // announcement: the client arriving next is joining a room, not waiting on a match
+    // nobody runs.
+    // ponytail: the real match-end triggers are #22's, and this is not one of them.
+    if (![...room.clients].some((other) => other.host)) room.started = false;
     broadcast_state(room);
 }
 
@@ -259,6 +290,11 @@ function relay(client, msg) {
             break;
         case "seats":
             take_seats(client, msg);
+            break;
+        case "leave":
+            // The socket usually follows, but the seats are free either way.
+            vacate(client);
+            broadcast_state(room);
             break;
         case "driver":
             stamp_driver(room, msg.seat, msg.driver);

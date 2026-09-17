@@ -97,6 +97,9 @@ function ViewModel() {
     // Every seat in the room, by the username of the participant on it -- null for a seat
     // nobody holds, which is the AI's (#36).
     this.seat_names = ko.observableArray([null, null, null, null]);
+    // The room's own answer, refreshed on every update: a match that ended, or a host that
+    // left and took its announcement with it, must not leave this standing (#36).
+    this.match_running = ko.observable(false);
     this.current_game = ko.observable(null);
     this.board = ko.observable(null);
     this.current_level = create_default_level();
@@ -115,6 +118,12 @@ function ViewModel() {
     this.scheme_name = function (scheme) {
         return SCHEME_NAMES[scheme];
     };
+    // Once the relay has granted the seats, the names on them are the room's: a client's
+    // count is fixed and a rename would need a second collision check nobody asked for
+    // (#7, #14). The names screen says so rather than accepting edits it would discard.
+    this.seated = ko.computed(function () {
+        return granted().length > 0;
+    });
 
     // The room's own seat table, so the board names every participant and not only the ones
     // on this keyboard; a seat nobody holds keeps its bunny's name (#13, #36).
@@ -164,6 +173,9 @@ function ViewModel() {
     }
 
     function leave_room() {
+        // A deliberate Leave frees the seats now; only a dropped connection reserves them
+        // for a reload (#17). The relay cannot tell the two apart without being told.
+        if (self.room_id() && transport.send) transport.send({ type: "leave" });
         if (transport.close) transport.close();
         transport = new Loopback_Transport();
         host = true;
@@ -209,8 +221,14 @@ function ViewModel() {
             muted,
             transport,
         );
-        // Whoever proposed it, the match begins for this client when `start` lands.
+        // Whoever proposed it, the match begins for this client when `start` lands -- and
+        // the session that was handed the match is the current one, whichever flow screen
+        // this client happens to be sitting on. Without that, a client that had stepped
+        // back to the names screen would build the match, bounce off the play route for
+        // want of a current session, and rebuild a lobby session that replaces the
+        // transport's listener -- orphaning the match it was already in.
         game.on_match_start = function () {
+            self.current_game(game);
             go("play");
         };
         self.current_game(game);
@@ -223,6 +241,7 @@ function ViewModel() {
     // migrating are all one code path (#36).
     function apply_room(msg) {
         self.seat_names(msg.seats);
+        self.match_running(!!msg.started);
         host = msg.host;
         self.is_host(host);
         granted(msg.held);
@@ -269,12 +288,6 @@ function ViewModel() {
                     // The lobby's own URL is `#room`, which says nothing about which room:
                     // this is what a reload reads to find its way back to one (#36).
                     remember("room", { id: msg.id });
-                    // The host started before this client arrived, so there is nothing to
-                    // join until the next match -- which this session picks up when it
-                    // comes (#40).
-                    self.error(
-                        msg.started ? "A match is in progress; you are in for the next one." : "",
-                    );
                 } else if (transport !== socket) return;
                 apply_room(msg);
                 // A reload lands back in the lobby, because the token brought the seats
