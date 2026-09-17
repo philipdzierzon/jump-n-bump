@@ -2,21 +2,27 @@
 
 HTML5/canvas port of Jump 'n Bump. Build with `npm run build` (webpack, `src/` → `game/`),
 then open `game/index.html` directly — offline play needs no server, and there is no linter,
-so rendering, sound and input are verified manually: build, open, play.
+so rendering and sound are verified manually: build, open, play.
 
 Online play needs the relay in `server/`, which has dependencies of its own: `npm ci` in
 `server/` once, then `node server/index.js` from anywhere serves the built client and the
 WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
 `Dockerfile` is how it actually ships.
 
-`npm test` runs three files. `test/replay.test.mjs` replays the simulation twice from one seed
+`npm test` runs four files. `test/replay.test.mjs` replays the simulation twice from one seed
 and one input log, with no DOM, hashed to an FNV-1a checksum: anything that makes the
 simulation depend on wall-clock time, the environment or unseeded randomness fails it.
 `test/relay.test.mjs` boots the real relay on a real socket and drives the protocol through
 it. `test/router.test.mjs` covers the two pure pieces of the room flow -- which screen a
-hash names, and which control scheme a jump key belongs to; the rest of that flow is
-Knockout bindings, which are verified by opening the page. Node runs `src/` directly, which
-is why every relative import carries its `.js` extension.
+hash names, and which control scheme a jump key belongs to. `test/dom.test.mjs` walks the
+rest of that flow in jsdom: it loads `src/jnb.html`, imports `viewmodels.js` so Knockout
+binds for real, and clicks and types its way from the landing screen through the couch,
+the lobby, a match and the board, then does it again through a relay on a real socket.
+Node runs `src/` directly, which is why every relative import carries its `.js` extension.
+
+What the DOM test cannot see is what is still verified by opening the page: jsdom has no
+2d context (stubbed with a no-op, so the renderer runs but paints nothing) and no media
+playback, so pixels and sound stay manual.
 
 Architecture notes for this port, and for the sibling C original it was translated from,
 live in the workspace-level `CLAUDE.md` one directory up (`sbx/jumpnbump/CLAUDE.md`).
