@@ -57,6 +57,31 @@ the compromise, e.g.:
 `/ponytail-debt` harvests those into a ledger so a deferral can't quietly become permanent.
 The `code-review` skill reads this section as the repo's documented coding standards.
 
+### Implementation workflow
+
+One worktree per implementation, and never on `master`:
+
+```bash
+git worktree add .claude/worktrees/<issue> -b <issue>-<slug> master
+cd .claude/worktrees/<issue>
+ln -s ../../../node_modules node_modules          # deps are not copied into a worktree
+ln -s ../../../../server/node_modules server/node_modules # `npm test` boots the real relay
+```
+
+`.claude/worktrees/` is git-ignored and Prettier-ignored, so a sibling worktree is never
+committed and never formatted: the pre-commit hook checks the whole of the tree it runs
+in, which in a worktree is that branch's changes and nothing else. Format and test from
+inside the worktree.
+
+When the work is done: commit on the branch, `git push -u origin <branch>`, then
+`gh pr create --base master --fill` (see `docs/agents/issue-tracker.md` for the `gh`
+conventions, and reference the issue the work came from).
+
+**Never merge a PR.** Merging is the maintainer's call, on the maintainer's word --
+finishing the work means an open PR, not a merged one. The worktree stays until then, so
+review comments can be answered in it; `git worktree remove` once the PR is merged or
+closed.
+
 ### Formatting
 
 Prettier, pinned exact (patch releases change output, and a reformat-everything diff is
