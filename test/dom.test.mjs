@@ -185,6 +185,27 @@ assert.ok(
     "the board of the match you just left is the lobby's, not a screen of its own (#13, #35)",
 );
 
+// A second match, left without ever opening the overlay: the board is counted when the
+// match is left, not only while P is held up, or the lobby draws the empty matrix the
+// session starts life with -- two rows of one cell under a five-column header (#13).
+click("Start the match");
+await on("play");
+click("Back to the lobby");
+await on("room");
+const last = all("tr", screen("room").querySelector('div[data-bind*="visible: board"]')).map(
+    (row) => all("th, td", row).map(text),
+);
+assert.deepEqual(
+    last[0],
+    ["", "Dott", "Jiffy", "Fizz", "Miji", "Total kills"],
+    "the lobby's last-match board names every seat",
+);
+assert.equal(last.length, 6, "the header, four bunnies and the totals row");
+assert.ok(
+    last.slice(1).every((row) => row.length === last[0].length),
+    "and every row of it is as wide as the header, with no cell missing",
+);
+
 click("Leave");
 await on("landing");
 

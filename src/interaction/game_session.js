@@ -181,6 +181,11 @@ export function Game_Session(get_level, config, muted, transport) {
         // build it would land in is cancelled with the same counter a second `start` uses.
         starting++;
         forget_board();
+        // Counted here, because the lobby reads this board the moment the match is left and
+        // the overlay's own refresh is the only other thing that ever fills it: leaving a
+        // match nobody pressed P on handed the lobby the empty matrix this starts life as,
+        // which draws two rows of one cell instead of the grid (#13, #37).
+        if (game) snapshot();
         // The match is over for this client, so its music is over with it: muting used to
         // ride along with the board, and the board stopped pausing anything (#37).
         if (sound_player) sound_player.set_muted(true);
