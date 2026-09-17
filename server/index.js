@@ -64,6 +64,10 @@ function create(client, msg) {
         // seat-keyed, so a seat that has been vacated still has a column of bumps on it and
         // still needs a name over that column (#13, #39).
         last_names: new Array(SEATS).fill(null),
+        // Who is driving each seat, as last stamped. The relay runs no simulation, but it
+        // does route every driver change, and that is the difference between a bunny its
+        // participant is steering and one the AI took over (#13, #39).
+        drivers: new Array(SEATS).fill(null),
         tick: 0,
         d: 2,
         // The whole phase model: a room is in lobby or in-game, and there is no third
@@ -158,7 +162,7 @@ function seat_labels(room) {
             ? null
             : !room.seats[seat]
               ? name + " (left)"
-              : online.has(seat)
+              : online.has(seat) && room.drivers[seat] !== "ai"
                 ? name
                 : name + " (AI)",
     );
@@ -352,6 +356,11 @@ function input_delay(room) {
 // the change, since that tick never comes round again.
 function stamp_driver(room, seat, driver) {
     broadcast(room, { type: "driver", t: room.tick + 2 * room.d, seat, driver });
+    // A client that walks back to the lobby keeps its seats and hands the AI its bunnies,
+    // so the seat is held, its holder is connected, and the AI is driving it all the same.
+    // The board has to say so, which means the room is described again (#13, #39).
+    room.drivers[seat] = driver;
+    broadcast_state(room);
 }
 
 // The match itself begins here whichever way the host got to it -- every client ready, or
@@ -384,6 +393,7 @@ function begin(room, msg) {
     const drivers = room.seats.map((seat, index) =>
         seat && online.has(index) ? "local" : room.config.ai_fill ? "ai" : "off",
     );
+    room.drivers = drivers;
     for (const other of room.clients)
         send(other, {
             type: "start",

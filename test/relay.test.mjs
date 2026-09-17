@@ -280,6 +280,17 @@ assert.deepEqual(
 );
 assert.deepEqual(sender_saw, [], "and the sender is never echoed its own");
 
+// A client that walks back to the lobby keeps its seats and hands its bunnies to the AI, so
+// the seat is held by somebody who is still in the room and driven by nobody. The board says
+// which: "(AI)" is not only for a holder who dropped its connection (#13, #39).
+other.socket.send({ type: "driver", seat: 1, driver: "ai" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.deepEqual(
+    sender.events.filter((msg) => msg.type === "room").pop().labels,
+    ["Sender", "Other (AI)", null, null],
+    "a seat its holder handed over is named for the holder, and said to be the AI's",
+);
+
 // The token reclaims every seat that client held, across a disconnect (#7).
 other.socket.close();
 const back = connect({ type: "join", id: "ECHZX", token });
