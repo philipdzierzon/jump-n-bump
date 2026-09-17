@@ -5,7 +5,6 @@ import { Offscreen_Canvas } from "../resource_loading/offscreen_canvas.js";
 export function Dat_Level_Loader() {
     "use strict";
     var self = this;
-    this.on_loaded_event_text = "level_loaded";
     this.flip = false;
     var dat_index;
     var datafile_buffer;
@@ -13,26 +12,36 @@ export function Dat_Level_Loader() {
         PIXEL_HEIGHT = 256,
         PALETTE_256_SIZE = 768;
 
-    this.load = function (dat_filename) {
-        var reader = new FileReader();
-        reader.onload = function (e) {
-            //TODO consider supporting gzipped files too
-            datafile_buffer = new Uint8Array(reader.result);
-            this.file_name = dat_filename;
-            dat_index = read_dat_index();
-            document.dispatchEvent(new Event(self.on_loaded_event_text));
-        };
-        reader.readAsArrayBuffer(dat_filename);
+    // One archive at a time, and the whole of it decoded before this settles: the index and
+    // the buffer are fields, so the parse must not be interleaved with another file's. It
+    // is, which is why the level is read here rather than left to a caller to ask for.
+    // A `.dat` that will not parse rejects rather than going quiet (#38).
+    this.read = function (blob) {
+        return new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onerror = reject;
+            reader.onload = function () {
+                //TODO consider supporting gzipped files too
+                try {
+                    datafile_buffer = new Uint8Array(reader.result);
+                    dat_index = read_dat_index();
+                    resolve(read_level());
+                } catch (e) {
+                    reject(e);
+                }
+            };
+            reader.readAsArrayBuffer(blob);
+        });
     };
 
-    this.read_level = function () {
+    function read_level() {
         var level = read_level_image();
         return {
             ban_map: read_levelmap(),
             image: level,
             mask: read_mask_image(level),
         };
-    };
+    }
 
     function read_levelmap() {
         var chr;

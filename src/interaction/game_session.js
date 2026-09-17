@@ -11,6 +11,8 @@ import { make_rnd } from "../game/rnd.js";
 import { Room } from "../net/room.js";
 import ko from "knockout";
 
+function noop() {}
+
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
 }
@@ -25,9 +27,12 @@ export var Game_State = Enum({ Not_Started: 0, Playing: 1, Board: 2 });
 // a differing no_gore desyncs the RNG stream on the first kill (#5). `muted` is not in it:
 // it is this client's preference and nobody else's business.
 //
+// `get_level(name)` resolves the level the room named, which is why it is a promise and not
+// a level: a `.dat` is fetched and decoded, and the name only arrives on `start` (#38).
+//
 // The transport is handed in: a loopback for a local room, a socket for a networked one,
 // and nothing below this line knows which it got (#16).
-export function Game_Session(level, config, muted, transport) {
+export function Game_Session(get_level, config, muted, transport) {
     "use strict";
     var self = this;
 
@@ -45,6 +50,10 @@ export function Game_Session(level, config, muted, transport) {
     var sound_player = null;
     var start_when_ready = false;
     var board_timer = null;
+    // Which `start` the pending level load belongs to. The host can start another match
+    // while this client is still fetching the last one's level, and the loser of that race
+    // must not build a simulation over the winner's.
+    var starting = 0;
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
@@ -78,6 +87,17 @@ export function Game_Session(level, config, muted, transport) {
         // pump loop would go on stepping the `player` array the new one replaces, and its
         // music would go on playing.
         if (game) game.pause();
+        var mine = ++starting;
+        // The level is the room's, named in the settings the relay handed down, and a
+        // `.dat` has to be fetched and decoded before anything can be built on it (#38).
+        // A client that cannot load it stays where it is rather than playing a different
+        // map: a differing ban map is a desync, not a degraded picture.
+        get_level(room.settings.level).then(function (level) {
+            if (mine === starting) build(level);
+        }, noop);
+    };
+
+    function build(level) {
         var rnd = make_rnd(room.seed);
         var settings = room.settings;
 
@@ -101,15 +121,18 @@ export function Game_Session(level, config, muted, transport) {
         // so the host's `start` never lands on a client that is not listening yet (#35).
         if (self.on_match_start) self.on_match_start();
         if (start_when_ready) self.start();
-    };
+    }
 
     // Only the host proposes a match, and it proposes from the lobby rather than from this
     // constructor: a session exists for as long as a client is in the room, and the match
     // begins when the host says so (#35, #37). A joining client plays what it is handed.
     // The seats are the room's to grant, not this client's to claim: `held` here is what a
     // local room runs on, and a networked one is handed its own back on `start` (#36).
+    // `settings` is read at propose time rather than held from construction: a session
+    // lives for as long as this client is in the lobby, and a local room's config is edited
+    // inside it (#38). A networked room's relay ignores what is proposed here anyway.
     this.propose = function () {
-        room.start({ seed: config.seed, settings: config.settings, held: config.held });
+        room.start({ seed: config.seed, settings: config.settings(), held: config.held });
     };
 
     function snapshot() {
@@ -154,6 +177,9 @@ export function Game_Session(level, config, muted, transport) {
     // The way out of the match, whichever screen it is leaving for. The board is not that
     // any more: in a networked room it never stopped the simulation (#37).
     this.stop = function () {
+        // Any level still loading belongs to a match this client is no longer in, so the
+        // build it would land in is cancelled with the same counter a second `start` uses.
+        starting++;
         forget_board();
         // The match is over for this client, so its music is over with it: muting used to
         // ride along with the board, and the board stopped pausing anything (#37).
