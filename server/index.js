@@ -458,11 +458,14 @@ function resume(client) {
     for (let i = ahead.length - 1; i >= 0; i--) drivers[ahead[i].seat] = ahead[i].was;
     send(client, {
         type: "start",
-        // The tick the snapshot was taken on, and the tick to replay the gap up to: as far
-        // as the room's fastest client has stamped, less the delay it stamps ahead by. The
-        // joiner lands on the tick that client is about to step, which is where every
-        // other client is playing from -- a client that lands ahead of the room has no
-        // frames for the ticks it is ahead by, and reads them as all keys released.
+        // The tick the snapshot was taken on, and the tick to replay the gap up to. A
+        // client at tick c has stamped frames up to c + d, so `room.tick - d - 1` is the
+        // tick the room's fastest client has just stepped: the joiner lands one tick
+        // behind it, which is inside the window every other client is playing in. Landing
+        // ahead of the room instead would leave it with no frames for the ticks it is
+        // ahead by, and it would read them as all keys released -- which is also what
+        // every client in the room does for a client more than d ticks behind, joiner or
+        // no joiner (#6, #17).
         t: room.snapshot.t,
         until,
         d: room.d,
