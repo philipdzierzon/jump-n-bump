@@ -1,5 +1,8 @@
 /game/
 /prototype/
+# One worktree per implementation, all of them under here: a sibling worktree is another
+# branch's tree, and the pre-commit hook checks the whole of the tree it runs in.
+.claude/worktrees/
 package-lock.json
 server/package-lock.json
 # Hand-written webpack template with whitespace-sensitive Knockout markup, and no
