@@ -319,6 +319,147 @@ delete process.env.RESERVE_MS;
 back.socket.close();
 stranger.socket.close();
 
+// The ready gate and the countdown (#37, #21). Ready is per client, the countdown's length
+// is the deployment's, and both routes into the lobby are the one broadcast.
+process.env.COUNTDOWN_MS = "2000";
+const gate = connect({ type: "create", id: "TVWXY" });
+await lobby(gate);
+await gate.seats(["Host"]);
+const late_ready = connect({ type: "join", id: "TVWXY" });
+await lobby(late_ready);
+await late_ready.seats(["Straggler"]);
+const gate_saw = [];
+const straggler_saw = [];
+gate.socket.receive((msg) => gate_saw.push(msg));
+late_ready.socket.receive((msg) => straggler_saw.push(msg));
+
+gate.socket.send({ type: "start", seed: 1, settings: {} });
+const counting = await late_ready.until((msg) => msg.type === "room" && msg.countdown);
+assert.ok(counting.countdown <= 2000, "the countdown is what is left of the relay's deadline");
+assert.equal(counting.started, false, "a room counting down is still in the lobby");
+assert.deepEqual(
+    counting.ready,
+    [true, false, true, true],
+    "starting counts as readying, a straggler is not ready, and an AI seat always is",
+);
+assert.equal(counting.you_ready, false, "ready is the client's own answer");
+
+// Auto-ready on arrival: whoever joins inside a countdown has had nothing to press (#37).
+const latecomer = connect({ type: "join", id: "TVWXY" });
+assert.equal((await lobby(latecomer)).you_ready, true, "joining during a countdown is auto-ready");
+latecomer.socket.close();
+
+// Cancellable by the host alone, and un-readying inside one does not cancel it either
+// (#21). Drained first, so the answer is the broadcast these two messages cause.
+late_ready.events.length = 0;
+late_ready.socket.send({ type: "cancel" });
+late_ready.socket.send({ type: "ready", ready: false });
+assert.ok(
+    (await late_ready.until((msg) => msg.type === "room")).countdown,
+    "neither a straggler's cancel nor its un-readying stops the countdown",
+);
+gate.socket.send({ type: "cancel" });
+assert.equal(
+    (await late_ready.until((msg) => msg.type === "room" && !msg.countdown)).started,
+    false,
+    "the host can cancel it, and cancelling starts nothing",
+);
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(!straggler_saw.some((msg) => msg.type === "start"), "a cancelled countdown never starts");
+
+// The stragglers readying mid-countdown collapses it to an instant start (#21).
+gate.socket.send({ type: "start", seed: 2, settings: {} });
+await late_ready.until((msg) => msg.type === "room" && msg.countdown);
+late_ready.socket.send({ type: "ready", ready: true });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const collapsed = straggler_saw.find((msg) => msg.type === "start");
+assert.ok(collapsed, "the last straggler readying starts the match at once");
+assert.deepEqual(
+    collapsed.drivers,
+    ["local", "local", "ai", "ai"],
+    "and the seats nobody holds are AI-filled",
+);
+
+// Both routes into the lobby are the same broadcast, and ready resets on entry (#37).
+gate.socket.send({ type: "match_end", t: 0, reason: "lobby", matrix: [] });
+const lobbied = await late_ready.until((msg) => msg.type === "room" && !msg.started);
+assert.equal(lobbied.you_ready, false, "ready resets on lobby entry");
+assert.ok(
+    straggler_saw.some((msg) => msg.type === "match_end"),
+    "the host's announcement reaches every client in the room",
+);
+
+// Seat churn is not a ready change: a stranger sitting down clears nobody's answer (#21).
+late_ready.socket.send({ type: "ready", ready: true });
+await late_ready.until((msg) => msg.type === "room" && msg.you_ready);
+const sitter = connect({ type: "join", id: "TVWXY" });
+await lobby(sitter);
+await sitter.seats(["Sitter"]);
+assert.equal(
+    (await late_ready.until((msg) => msg.type === "room" && msg.seats[2])).you_ready,
+    true,
+    "ready survives somebody else taking a seat",
+);
+sitter.socket.send({ type: "leave" });
+await late_ready.until((msg) => msg.type === "room" && !msg.seats[2]);
+
+// At zero, a client that never readied gives up every seat and reserves nothing, and the
+// match starts short of it (#17, #37).
+process.env.COUNTDOWN_MS = "150";
+late_ready.socket.send({ type: "ready", ready: false });
+await late_ready.until((msg) => msg.type === "room" && !msg.you_ready);
+gate.socket.send({ type: "start", seed: 3, settings: {} });
+const vacated = await late_ready.until((msg) => msg.type === "room" && !msg.held.length);
+assert.deepEqual(
+    vacated.seats,
+    ["Host", null, null, null],
+    "the un-ready client's seat is free at zero, reserved for nobody",
+);
+await new Promise((resolve) => setTimeout(resolve, 100));
+const short_handed = gate_saw.filter((msg) => msg.type === "start").pop();
+assert.deepEqual(
+    short_handed.drivers,
+    ["local", "ai", "ai", "ai"],
+    "and the match runs with the AI on the seat it gave up",
+);
+// A host that leaves takes its countdown with it: a successor inherits the room, never a
+// match it did not propose (#37).
+const leaver = connect({ type: "create", id: "PRSTV" });
+await lobby(leaver);
+await leaver.seats(["Leaver"]);
+const stayer = connect({ type: "join", id: "PRSTV" });
+await lobby(stayer);
+await stayer.seats(["Stayer"]);
+const stayer_saw = [];
+stayer.socket.receive((msg) => stayer_saw.push(msg));
+leaver.socket.send({ type: "start", seed: 4, settings: {} });
+await stayer.until((msg) => msg.type === "room" && msg.countdown);
+leaver.socket.close();
+assert.equal(
+    (await stayer.until((msg) => msg.type === "room" && !msg.countdown)).host,
+    true,
+    "the host leaving mid-countdown hands the room to the successor and cancels it",
+);
+await new Promise((resolve) => setTimeout(resolve, 200));
+assert.ok(
+    !stayer_saw.some((msg) => msg.type === "start"),
+    "and the countdown it cancelled starts nothing",
+);
+stayer.socket.close();
+
+delete process.env.COUNTDOWN_MS;
+
+// The server-observed route into the lobby: the same `match_end`, with no board, because
+// the relay ran no simulation to count one (#22, #37).
+gate.socket.close();
+const orphan = await late_ready.until((msg) => msg.type === "room" && !msg.started);
+assert.equal(orphan.started, false, "a room left with no host is back in the lobby");
+assert.ok(
+    straggler_saw.filter((msg) => msg.type === "match_end").length > 1,
+    "and every client in it hears the match end on the same broadcast the host would send",
+);
+late_ready.socket.close();
+
 // The relay runs no simulation of its own, and the cheapest way to keep it that way is to
 // notice when it starts importing one (#6).
 const source = fs.readFileSync(new URL("../server/index.js", import.meta.url), "utf8");

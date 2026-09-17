@@ -88,6 +88,12 @@ export function Room(transport, read_input) {
         });
     };
 
+    // A seat the room disabled: nobody holds it and the room's AI-fill is off, so the
+    // match runs short-handed rather than growing a bunny nobody asked for (#7, #37).
+    this.enabled_seat = function (seat) {
+        return drivers[seat] !== "off";
+    };
+
     // One tick of the room: apply the driver changes stamped for it, send this client's
     // input frame for every seat it drives, and hand back the frames to simulate now. A
     // seat with no driver at all is one nobody is holding, which is the AI's (#7).
@@ -112,7 +118,7 @@ export function Room(transport, read_input) {
         // AI -- a missing frame is a missing frame (#6). The first d ticks of every match
         // are exactly this, since the earliest frame anyone stamps is for tick d.
         drivers.forEach(function (driver, seat) {
-            if (driver !== "ai" && !frames[seat]) frames[seat] = RELEASED;
+            if (driver === "local" && !frames[seat]) frames[seat] = RELEASED;
         });
         tick++;
         return frames;

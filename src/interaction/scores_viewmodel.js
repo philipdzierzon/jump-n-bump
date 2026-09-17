@@ -16,10 +16,13 @@ export function Scores_ViewModel(raw_scores, names) {
             return prev + cur;
         });
     }
+    // One total per column of the rows above it, which is one more than there are rows:
+    // the per-row "Total kills" column needs a total too, and without it the table's
+    // bottom-right cell simply is not there to draw a border on.
     function with_totals_row(score_grid) {
         if (score_grid == undefined || score_grid.length == 0) return 0;
         var totals_row = [];
-        for (var index = 0; index < score_grid.length; index++) {
+        for (var index = 0; index < score_grid[0].length; index++) {
             totals_row.push(column_sum(score_grid, index));
         }
         return score_grid.concat([totals_row]);
