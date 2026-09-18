@@ -321,6 +321,14 @@ function ViewModel() {
     // Once the relay has granted the seats, the names on them are the room's: a client's
     // count is fixed and a rename would need a second collision check nobody asked for
     // (#7, #14). The names screen says so rather than accepting edits it would discard.
+    // A match is running and this client holds seats in it, but is sitting in the lobby
+    // watching: it walked out, or it was in the room before the match began. Either way the
+    // way back in is a button rather than nothing at all, because leaving the room and
+    // following the link again used to be the only one there was (#42).
+    this.can_rejoin = ko.computed(function () {
+        return !!self.room_id() && self.match_running() && granted().length > 0;
+    });
+
     this.seated = ko.computed(function () {
         return granted().length > 0;
     });
@@ -1019,6 +1027,17 @@ function ViewModel() {
             return taken.indexOf(bunny.toLowerCase()) < 0;
         });
     }
+
+    // Walking back into the match this client walked out of. The ask refuses a client that
+    // left a match it still holds seats in -- the answer would drag it straight back in the
+    // moment it left, which is the opposite of what Back to the lobby means -- so pressing
+    // this is the client saying it wants exactly that. Forgetting which seats it was last in
+    // the match with is the whole of it: the relay hands its bunnies back off the AI on the
+    // same `resume` a mid-match joiner asks for (#40, #42).
+    this.rejoin_match = function () {
+        in_match_with = "";
+        ask_to_resume();
+    };
 
     // The other way into a seat: one the AI is driving, taken by somebody already in the
     // room. It works in the lobby and in a running match alike, and it can grow this client

@@ -215,7 +215,8 @@
             </li>
         </ul>
         <p class="muted">Every seat in the room. The ones nobody takes are played by the AI.</p>
-        <p class="muted" data-bind="visible: match_running">A match is in progress; you are in for the next one.</p>
+        <p class="muted" data-bind="visible: match_running() &amp;&amp; !seated()">A match is in progress; you are in for the next one.</p>
+        <button class="pri" data-bind="visible: can_rejoin, click: rejoin_match">Rejoin the match</button>
         <button class="sm" data-bind="visible: room_id() &amp;&amp; seated(), click: toggle_ready, text: ready() ? 'Not ready' : 'Ready'"></button>
         <p class="muted" data-bind="visible: countdown">Starting in <span data-bind="text: countdown"></span>s. Anyone not ready by then gives up their seats.</p>
         <button class="pri" data-bind="visible: is_host, click: start_match, enable: !loading_level() &amp;&amp; !countdown()">Start the match</button>

@@ -1130,11 +1130,24 @@ async function two_pages() {
     const watcher = relay_client({ type: "join", id: room_e }, watcher_saw);
     await until("the watcher in the room", () => watcher_saw.some((msg) => msg.type === "joined"));
 
-    // Throttled across the rejoin, because on an unthrottled machine the rebuild is a
-    // handful of milliseconds and lands inside d -- there is no gap to fail to close, and
-    // the bug hides. Eight times slower is a phone, and it is the same dial #70 measured a
-    // repair with. Lifted the moment the match is back, so what is watched below is whether
-    // the client closes the gap it landed with rather than whether it can run at all.
+    // Out of the match and straight back into the seat it already holds. A client that
+    // walks out keeps its seats and hands its bunnies to the AI, and this is what it says
+    // to take them back -- leaving the room and following the link again was the only way
+    // in before, which is no way at all (#42).
+    await click("Back to the lobby", guest);
+    await on("room", guest);
+    await click("Rejoin the match", guest);
+    await on("play", guest);
+    await until("the seat to come back off the AI", () => {
+        const room = watcher_saw.filter((msg) => msg.type === "room").pop();
+        return room && room.labels[1] === "Zip";
+    });
+
+    // Throttled across this one, because on an unthrottled machine the rebuild is a handful
+    // of milliseconds and lands inside d -- there is no gap to fail to close, and the bug
+    // hides. Eight times slower is a phone, and it is the dial #70 measured a repair with.
+    // Lifted the moment the match is back, so what is watched below is whether the client
+    // closes the gap it landed with rather than whether it can run at all while throttled.
     const throttle = await guest.context().newCDPSession(guest);
     await throttle.send("Emulation.setCPUThrottlingRate", { rate: 8 });
     await click("Back to the lobby", guest);
