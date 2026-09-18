@@ -37,6 +37,26 @@ export function Room(transport, read_input) {
     // in the payload: fetching a level and unpacking a state takes time the room spends
     // playing (#40).
     var newest = 0;
+    // What a late frame cost this client, counted per match (#70). The substitution below
+    // *is* the divergence: the relay rings a frame on to everybody whenever it arrives, but
+    // each client steps the tick it was stamped for at its own moment, so a frame that
+    // crosses late is used by whoever had not reached that tick yet and substituted for by
+    // whoever had (#17, #42). Nothing counted it, so a desync was an inference; this makes
+    // it a number. `margin` is the ticks of slack a frame landed with -- d when it crossed
+    // instantly, zero in the nick of time, negative for a tick already stepped -- so the
+    // worst of them starts at d, the best any frame can do, and falls from there. `late_by`
+    // is how the late ones were distributed, which is the number a d has to cover and the
+    // one thing a single worst case cannot tell you (#70).
+    var stats = null;
+    // A repair is something that happens inside a match, so it keeps the count going; a
+    // match beginning and a match joined both start one. Tracked here because `start` and
+    // `match_end` are both this layer's.
+    var in_match = false;
+    reset_stats();
+
+    function reset_stats() {
+        stats = { substituted: 0, arrived: 0, late: 0, worst_margin: self.d, late_by: {} };
+    }
 
     // Set by the relay's `start`, which is where everything the match must agree on rides
     // -- the seed and the settings both, since a differing no_gore desyncs the RNG stream
@@ -73,6 +93,8 @@ export function Room(transport, read_input) {
                 self.settings = msg.settings;
                 held = msg.held;
                 self.resume = msg.snapshot || null;
+                if (!in_match || !msg.snapshot) reset_stats();
+                in_match = true;
                 catch_up_to = Math.max(tick, msg.until == null ? tick : msg.until | 0);
                 // The frames the relay rang since that snapshot: the gap between the
                 // state and now, scheduled exactly as live ones are (#40).
@@ -91,12 +113,22 @@ export function Room(transport, read_input) {
                 if (self.on_start) self.on_start(msg);
                 break;
             case "input":
+                // Measured on arrival rather than on use: this is the only moment the wire
+                // trip and the sender's own lateness are both visible (#70).
+                stats.arrived++;
+                var margin = (msg.t | 0) - tick;
+                if (margin < 0) {
+                    stats.late++;
+                    stats.late_by[margin] = (stats.late_by[margin] || 0) + 1;
+                }
+                if (margin < stats.worst_margin) stats.worst_margin = margin;
                 schedule_input(msg.t, msg.seats);
                 break;
             case "driver":
                 (drivers_at[msg.t] = drivers_at[msg.t] || []).push(msg);
                 break;
             case "match_end":
+                in_match = false;
                 if (self.on_match_end) self.on_match_end(msg);
                 break;
         }
@@ -155,6 +187,12 @@ export function Room(transport, read_input) {
 
     this.set_driver = function (seat, driver) {
         transport.send({ type: "driver", seat: seat, driver: driver });
+    };
+
+    // What the match cost this client: frames substituted for, frames that arrived after
+    // the tick they were stamped for, and the worst slack any frame landed with (#70).
+    this.stats = function () {
+        return stats;
     };
 
     // The tick this room is on, which is the tick the match is on: what a time limit is
@@ -219,7 +257,12 @@ export function Room(transport, read_input) {
         // AI -- a missing frame is a missing frame (#6). The first d ticks of every match
         // are exactly this, since the earliest frame anyone stamps is for tick d.
         drivers.forEach(function (driver, seat) {
-            if (driver === "local" && !frames[seat]) frames[seat] = RELEASED;
+            if (driver !== "local" || frames[seat]) return;
+            frames[seat] = RELEASED;
+            // Not the first d ticks, where every seat is substituted for by definition, and
+            // not a replayed gap, whose holes are the relay's ring rather than this
+            // client's lateness (#70).
+            if (!catching_up && tick >= self.d) stats.substituted++;
         });
         tick++;
         return frames;
