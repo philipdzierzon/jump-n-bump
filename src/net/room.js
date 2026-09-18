@@ -7,6 +7,11 @@ var RELEASED = { left: false, right: false, up: false };
 // short: the caller checks `gap()` and stays in the lobby (#40).
 export var MAX_CATCH_UP = 3600;
 
+// How often a client hashes its own simulation and hands the hash to the relay, which holds
+// the host's and compares (#41). Half a second: the relay keeps eight of the host's, so a
+// client's hash for a tick has four seconds to arrive before the tick it names is aged out.
+var CHECKSUM_TICKS = 30;
+
 // The client's half of a room (#33). It owns the tick counter, the input-delay buffer and
 // the driver table, and it never knows whether the transport under it is a WebSocket or
 // the in-tab loopback -- offline play is a room of one, not a second code path (#16).
@@ -45,6 +50,10 @@ export function Room(transport, read_input) {
     this.resume = null;
     this.on_start = null;
     this.on_match_end = null;
+    // What this client hashes its state to for a given tick, or null in a local room, which
+    // has nobody to disagree with and checksums nothing (#41, #16). Set by the session,
+    // because the state being hashed is the simulation's and this layer sees none of it.
+    this.checksum = null;
 
     transport.receive(function (msg) {
         switch (msg.type) {
@@ -137,8 +146,9 @@ export function Room(transport, read_input) {
         transport.send({ type: "snapshot", t: t, matrix: matrix, body: body });
     };
 
-    // Asks for that payload: what a client sends to join a match in progress, and what
-    // #41 will send when its own state has gone wrong.
+    // Asks for that payload: what a client sends to join a match in progress. A client
+    // whose state has gone wrong never asks, because it cannot tell -- the relay sees the
+    // checksums disagree and pushes the same payload down unprompted (#41).
     this.request_resume = function () {
         transport.send({ type: "resync" });
     };
@@ -194,6 +204,13 @@ export function Room(transport, read_input) {
             // (#12, #6).
             schedule_input(tick + self.d, seats);
             transport.send({ type: "input", t: tick + self.d, seats: seats });
+            // On the same tick on every client, and from the same point in it: the state
+            // hashed here is every tick before this one applied and none of this one, which
+            // is a state each client reaches in its own time and all of them agree on. Not
+            // while replaying a gap, for the reason no frame is sent there -- those ticks
+            // are history, and the host hashed them seconds ago (#41).
+            if (self.checksum && tick % CHECKSUM_TICKS === 0)
+                transport.send({ type: "checksum", t: tick, h: self.checksum(tick) });
         }
 
         var frames = input_at[tick] || {};

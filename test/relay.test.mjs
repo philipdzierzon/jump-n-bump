@@ -753,6 +753,86 @@ assert.deepEqual(
 );
 early_guest.socket.close();
 
+// --- checksum desync detection (#41) ---------------------------------------------------
+//
+// The relay substitutes a missing frame, so every client in a room plays the same input
+// stream and a divergence is a determinism bug rather than drift (#6, #17). The host's hash
+// is the reference -- there is no vote, because a two-client room splits 1-1 every time --
+// and the repair is the resync payload the join path already sends.
+const chk_host = connect({ type: "create", id: "CHKSM" });
+await lobby(chk_host);
+await chk_host.seats(["Chief"]);
+chk_host.socket.send({ type: "start", seed: 5, settings: {}, held: [] });
+await new Promise((resolve) => setTimeout(resolve, 100));
+chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "REFERENCE-BODY" });
+
+const chk_guest = connect({ type: "join", id: "CHKSM" });
+await lobby(chk_guest);
+await chk_guest.seats(["Guest"]);
+const chk_saw = [];
+chk_guest.socket.receive((msg) => chk_saw.push(msg));
+
+chk_host.socket.send({ type: "checksum", t: 30, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 30, h: 111 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "two clients that agree on a tick hear nothing about it",
+);
+
+// Eight of the host's are kept, which at one every 30 ticks is four seconds -- long enough
+// for a client's hash for the same tick to arrive either side of it, and no longer.
+for (let t = 180; t <= 180 + 7 * 30; t += 30) chk_host.socket.send({ type: "checksum", t, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 30, h: 999 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "and a hash for a tick the window has aged out has nothing to disagree with",
+);
+
+// The host's first, then the client's: the mismatch is the desync, and the answer is the
+// same payload a mid-match joiner gets.
+chk_host.socket.send({ type: "checksum", t: 600, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 600, h: 222 });
+const repaired = await awaited(chk_saw, "start");
+assert.equal(repaired.snapshot, "REFERENCE-BODY", "a mismatch is answered with the host's state");
+assert.equal(repaired.t, 0, "on the tick the host took it, which is the resync path exactly");
+
+// The client's first this time. Clients run at their own pace, so either order happens; a
+// hash with no host hash yet is held and compared when one arrives.
+chk_saw.length = 0;
+chk_guest.socket.send({ type: "checksum", t: 630, h: 222 });
+chk_host.socket.send({ type: "checksum", t: 630, h: 111 });
+assert.ok(
+    await awaited(chk_saw, "start"),
+    "a hash that arrives before the host's is still compared",
+);
+
+chk_saw.length = 0;
+chk_host.socket.send({ type: "checksum", t: 660, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 660, h: 222 });
+assert.ok(await awaited(chk_saw, "start"), "three repairs in a match, and the room counts them");
+
+// The fourth is a client the room cannot carry: a desync never heals on its own, so three
+// repairs that did not take is a server-observed failure rather than a kick.
+chk_saw.length = 0;
+chk_host.socket.send({ type: "checksum", t: 690, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 690, h: 222 });
+assert.equal(
+    (await chk_guest.until((msg) => msg.type === "error")).code,
+    "DESYNC",
+    "the fourth desync in a match closes the connection instead of repairing it",
+);
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "with no fourth payload behind it",
+);
+chk_host.socket.close();
+chk_guest.socket.close();
+
 // Two builds of the simulation in one lockstep room is two different matches: the same seed
 // drawn through different code diverges, and no amount of agreeing on input fixes it. The
 // relay cannot tell one build from another by watching a room play, so it is told on the way

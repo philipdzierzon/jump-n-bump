@@ -9,6 +9,7 @@ import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
 import {
     bump_matrix,
+    checksum_snapshot,
     decode_snapshot,
     encode_snapshot,
     pack_snapshot,
@@ -57,6 +58,14 @@ export function Game_Session(get_level, config, muted, transport) {
     var room = new Room(transport, function (nth) {
         return keyboard.input_frame(config.schemes[nth]);
     });
+    // The room hashes this client's state every 30 ticks and the relay compares it against
+    // the host's for the same tick; a mismatch is answered with the resync payload the join
+    // path already has (#41). A local room is a room of one and has nothing to disagree
+    // with, so it hashes nothing (#16). The host hashes too -- its own is the reference.
+    if (!config.local)
+        room.checksum = function (t) {
+            return checksum_snapshot(pack_snapshot(rnd, objects, t));
+        };
 
     var game = null;
     var sfx = null;

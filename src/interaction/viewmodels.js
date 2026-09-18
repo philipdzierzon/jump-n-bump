@@ -681,7 +681,12 @@ function ViewModel() {
                 if (msg.type === "joined") go(msg.held.length ? "room" : "names", true);
             },
             function (code) {
-                if (code === "DISCONNECTED") {
+                // DESYNC is a connection the relay closed rather than one that died, and
+                // it reads the same from here: three resyncs did not take, so this client's
+                // simulation is not the room's any more (#41). No words of its own -- a
+                // desync correction and a lag correction look alike, and this is the one
+                // that could not be corrected.
+                if (code === "DISCONNECTED" || code === "DESYNC") {
                     // A socket that died under a live room leaves this client with no
                     // transport at all: falling back to a local one keeps the game playable
                     // without a reload. upgrade path: reconnect into the seat (#42).
