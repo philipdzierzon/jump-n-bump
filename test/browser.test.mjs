@@ -53,9 +53,37 @@ page.on("pageerror", (error) => page_errors.push(error.message));
 // unreadable from the DOM alone: the screen it ended on says what happened, and this says
 // which message did it.
 const frames = [];
-page.on("websocket", (ws) =>
-    ws.on("framereceived", ({ payload }) => frames.push(String(payload).slice(0, 220))),
-);
+// Every route the page took, recorded in the page because the flow is a hash router: a
+// screen that never appeared is nearly always a route that was taken and then taken back.
+await page.addInitScript(() => {
+    window.__routes = [];
+    window.addEventListener("hashchange", () =>
+        setTimeout(
+            () =>
+                window.__routes.push(
+                    location.hash +
+                        " shown=" +
+                        [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
+                            .filter((el) => el.offsetParent !== null)
+                            .map((el) => el.getAttribute("data-bind").match(/'(\w+)'/)[1])
+                            .join(",") +
+                        " participants=" +
+                        document.querySelectorAll("div[data-bind*=\"screen() === 'names'\"] li")
+                            .length,
+                ),
+            0,
+        ),
+    );
+});
+let sockets = 0;
+page.on("websocket", (ws) => {
+    const n = ++sockets;
+    ws.on("framereceived", ({ payload }) =>
+        frames.push(`s${n} <- ` + String(payload).slice(0, 200)),
+    );
+    ws.on("framesent", ({ payload }) => frames.push(`s${n} -> ` + String(payload).slice(0, 200)));
+    ws.on("close", () => frames.push(`s${n} closed`));
+});
 
 // --- helpers ---------------------------------------------------------------------------
 
@@ -728,11 +756,18 @@ try {
                 .filter((el) => el.offsetParent !== null)
                 .map((el) => el.getAttribute("data-bind").match(/screen\(\) === '(\w+)'/)[1]),
             error: document.querySelector("p.err")?.textContent.trim() || "",
+            // The participant rows are the `participants` array, and an empty one is what
+            // bounces the lobby back to the names screen.
+            participants: document.querySelectorAll("div[data-bind*=\"screen() === 'names'\"] li")
+                .length,
         }))
         .catch(() => null);
     console.error("page was at:", JSON.stringify(where));
+    const routes = await page.evaluate(() => window.__routes || []).catch(() => []);
+    console.error("routes the page took (last 20):");
+    for (const route of routes.slice(-20)) console.error("  " + route);
     console.error("last frames the page was sent:");
-    for (const frame of frames.slice(-12)) console.error("  " + frame);
+    for (const frame of frames.slice(-25)) console.error("  " + frame);
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
     // nothing to read.
     await context.tracing.stop({ path: "trace-flow.zip" });
