@@ -712,8 +712,20 @@ try {
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it",
     );
 } catch (error) {
-    // Only on failure: the trace is for reading a two-page timing bug in CI, and a passing
-    // run has nothing to read.
+    // Where the page actually was, which a locator timeout never says: "not visible" reads
+    // the same whether the flow went nowhere or went somewhere else entirely.
+    const where = await page
+        .evaluate(() => ({
+            hash: window.location.hash,
+            showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
+                .filter((el) => el.offsetParent !== null)
+                .map((el) => el.getAttribute("data-bind").match(/screen\(\) === '(\w+)'/)[1]),
+            error: document.querySelector("p.err")?.textContent.trim() || "",
+        }))
+        .catch(() => null);
+    console.error("page was at:", JSON.stringify(where));
+    // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
+    // nothing to read.
     await context.tracing.stop({ path: "trace-flow.zip" });
     if (page_errors.length) console.error("page errors:", page_errors);
     console.error("trace written to trace-flow.zip -- npx playwright show-trace trace-flow.zip");
