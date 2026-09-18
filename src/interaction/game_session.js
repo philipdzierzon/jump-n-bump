@@ -25,10 +25,22 @@ function noop() {}
 // latest one for the next client to join the match (#40).
 var SNAPSHOT_MS = 2000;
 
-// How far behind the room this client has to be before it says so. `Room.gap()` is its own
-// tick against the newest one anybody in the room has stamped a frame for, which is a tick
-// or two in normal play; half a second of it is a client that has fallen behind and is
-// being repaired, or about to be (#41, #17).
+// How long a repair keeps the message up. Longer than the relay's two-second repair
+// cooldown, and longer than the gaps a real episode showed -- a 6x-throttled client was
+// repaired every two to four and a half seconds -- so a client being repeatedly repaired
+// says so continuously rather than blinking between repairs (#41).
+// ponytail: it therefore lingers up to five seconds after the last repair, saying
+// "reconnecting" about a client that already has. upgrade path: the relay could say when it
+// stops repairing, which is a message for a thing that is over.
+var RECONNECTING_MS = 5000;
+
+// How far behind the room this client has to be before it says so on its own account.
+// `Room.gap()` is its tick against the newest one anybody has stamped a frame for, and it
+// catches the other way a client stops being in step: one whose loop is not running at all.
+// `pump` catches up to the wall clock in a `while` loop, so a client that is merely slow
+// loses drawn frames rather than ticks and its gap stays nothing -- but a backgrounded tab's
+// `setTimeout` is throttled to about once a second, and that one really does fall behind
+// (#51). Half a second, which is well past the tick or two of normal jitter.
 var BEHIND_TICKS = 30;
 
 function Enum(obj) {
@@ -89,6 +101,11 @@ export function Game_Session(get_level, config, muted, transport) {
     // while this client is still fetching the last one's level, and the loser of that race
     // must not build a simulation over the winner's.
     var starting = 0;
+    // When the relay last replaced this client's simulation with the host's. A client that
+    // is late cannot see it from the inside -- its own tick keeps up, its own inputs are its
+    // own, and what went wrong is that its frames reached everybody else after the tick they
+    // were stamped for (#6, #68). The repair landing is the only local evidence there is.
+    var repaired_at = 0;
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
@@ -132,7 +149,11 @@ export function Game_Session(get_level, config, muted, transport) {
     // A socket answers `start` a round trip later than a loopback does, so the whole
     // simulation is built out of what the relay handed down rather than out of `config`
     // (#12, #34).
-    room.on_start = function () {
+    room.on_start = function (msg) {
+        // A state landing on a client that is already playing: the relay found this one's
+        // checksum disagreeing with the host's and repaired it (#41). A mid-match join
+        // carries a state too, but never onto a match this client was already in.
+        if (self.in_match && msg.snapshot) repaired_at = Date.now();
         // Set before the level is fetched, not after the simulation is built: a client
         // that has been handed this match is in it from the moment `start` lands, and
         // asking to be let into a match it is already playing would replace the state it
@@ -255,7 +276,7 @@ export function Game_Session(get_level, config, muted, transport) {
     // either of them is there.
     function sample_chrome() {
         show_clock();
-        self.reconnecting(room.gap() > BEHIND_TICKS);
+        self.reconnecting(Date.now() - repaired_at < RECONNECTING_MS || room.gap() > BEHIND_TICKS);
     }
 
     // Sampled on a wall clock like the board's refresh is, because nothing in the loop

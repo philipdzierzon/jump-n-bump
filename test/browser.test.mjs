@@ -822,12 +822,11 @@ async function walk() {
 
     boss.send({ type: "start", seed: 4321, settings: {}, held: [] });
     await on("play");
-    // Said only to a client that has fallen behind the room, which this one has not: the
-    // page stamps its own frames, so the newest tick anybody has stamped is its own and the
-    // gap it measures itself by is nothing (#41).
+    // Said only to a client the relay has had to repair, or one whose loop has stopped
+    // keeping up with the room's ticks. This one is neither (#41).
     assert.ok(
         !(await page.locator(".reconnecting").isVisible()),
-        "a client keeping up with the room is told nothing over the match",
+        "a client in step with the room is told nothing over the match",
     );
     // A snapshot for the relay to answer with, because the thing under test is what this
     // page does when there *is* one to be handed: a room whose host never snapshots cannot
@@ -840,9 +839,19 @@ async function walk() {
         matrix: new Array(16).fill(0),
         body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
     });
-    await settle();
+    // #41 end to end, through the real relay: the host claims a hash for ticks this page
+    // also hashes, they disagree, and the page is handed the host's state back. A hash the
+    // page cannot check for itself is the whole point -- a client that is late looks fine
+    // from the inside, because its own tick keeps up and its own inputs are its own. The
+    // repair landing is the only local evidence there is, which is what the overlay says.
+    // Eight ticks' worth, which is the window the relay keeps and four seconds of match.
+    for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", t, h: 1 });
+    await until("the repair to land", () => page.locator(".reconnecting").isVisible());
     await click("Back to the lobby");
     await on("room");
+    // And it goes with the match, rather than standing over the lobby this page walked to --
+    // which it would, since it is raised on a timer that outlives the repair by seconds.
+    assert.ok(!(await page.locator(".reconnecting").isVisible()), "said over a match, or not");
     // Long enough for the ask to have been made, answered and acted on, which is what this
     // is here to prove did not happen.
     await settle();
