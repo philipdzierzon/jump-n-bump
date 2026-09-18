@@ -31,6 +31,7 @@ import { chromium } from "playwright";
 import { start_server } from "../server/index.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { generate_room_id } from "../src/net/room_id.js";
+import { decode_snapshot } from "../src/game/snapshot.js";
 
 // Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does.
 const given = process.env.JNB_BASE_URL;
@@ -40,6 +41,7 @@ const origin = given ? given.replace(/\/$/, "") : "http://localhost:" + server.a
 // container without the second run colliding with the first run's rooms.
 const room_a = generate_room_id({});
 const room_b = generate_room_id({ [room_a]: true });
+const room_c = generate_room_id({ [room_a]: true, [room_b]: true });
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -676,6 +678,79 @@ async function walk() {
     );
 
     chief.close();
+    await click("Leave");
+    await on("landing");
+
+    // --- the host is the reference state, and a client joins the match it runs (#40) ---
+    // The page hosts and plays. Two seconds in it has packed its own simulation and handed
+    // it to the relay, which is what the next client to ask is given: the state, the frames
+    // since it, and the settings block that goes with them.
+
+    await click("Create a room");
+    await on("create");
+    await screen("create").locator("input").fill(room_c);
+    await click("Create");
+    await on("names");
+    await page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats().count()) === 1);
+    await click("Take the seats");
+    await on("room");
+    // Alone in the room, so there is nobody to be ready for and the match begins at once.
+    await click("Start the match");
+    await on("play");
+    // Everything this page says and hears from here on, which is what the assertion below
+    // is really about: a client handed the match by `start` must not also ask to be let in.
+    const in_match = frames.length;
+
+    const joiner_saw = [];
+    const joiner = relay_client({ type: "join", id: room_c }, joiner_saw);
+    await until("the joiner", () => joiner_saw.some((msg) => msg.type === "joined"));
+    const resumed = [];
+    joiner.receive((msg) => resumed.push(msg));
+    joiner.send({ type: "seats", names: ["Zip"] });
+    await until("the seat", () => joiner_saw.some((msg) => msg.type === "room" && msg.held.length));
+    // The host snapshots on a wall clock, so this waits one out rather than a tick count. It
+    // is the one assertion in this file that the page really is packing its own simulation,
+    // and no fake clock can stand in for it: the relay is on the real one.
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    joiner.send({ type: "resync" });
+    await until("the match in progress", () => resumed.some((msg) => msg.type === "start"));
+
+    const payload = resumed.find((msg) => msg.type === "start");
+    assert.ok(
+        decode_snapshot(payload.snapshot),
+        "the body is a packed simulation of the size the serializer packs, not an opaque nothing",
+    );
+    assert.ok(payload.t > 0, "taken on a tick somewhere in the middle of the match");
+    assert.ok(payload.until >= payload.t, "and replayed forward from it, never backwards");
+    assert.ok(payload.inputs.length, "with the input frames the relay rang since it");
+    assert.equal(
+        payload.settings.level,
+        "default",
+        "and the settings block: a joiner with the wrong no_gore desyncs on the first kill (#22)",
+    );
+    // The relay remembers an ask it cannot answer yet and answers it with the host's first
+    // snapshot. That had the host resyncing itself two seconds into every match: the
+    // simulation rebuilt under the player, and a second copy of the looping music started
+    // over the first (#28, #40).
+    // Over the whole walk, not just this match: every room this page has been in either had
+    // no match running or handed it one, and neither is a room to ask about.
+    assert.deepEqual(
+        frames.filter((frame) => frame.includes('"type":"resync"')),
+        [],
+        "a client handed the match by `start` never asks to be let into it",
+    );
+    assert.deepEqual(
+        frames.slice(in_match).filter((frame) => frame.includes('<- {"type":"start"')),
+        [],
+        "so it is handed the match once, and plays its own through its own snapshot",
+    );
+
+    joiner.close();
+    // The host ends the match on the way out, so the room it leaves behind is a lobby again
+    // rather than one the relay still thinks is playing (#22).
+    await click("Back to the lobby");
+    await on("room");
     await click("Leave");
     await on("landing");
 
