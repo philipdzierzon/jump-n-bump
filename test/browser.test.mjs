@@ -1117,6 +1117,56 @@ async function two_pages() {
     await settle();
     await settle();
 
+    // --- leaving the match and taking an AI seat back into it (#42) --------------------
+    // One host, one client, two AI bunnies, and the client walks out and sits back down on
+    // one of the bunnies nobody was driving. Two real pages, because the thing that broke
+    // needs a second simulation running on its own 60 Hz clock: the client replays to the
+    // tick the room was on when the relay built the payload, and decoding that state and
+    // building the graph take time the room spends playing -- so it lands behind, and every
+    // frame it sends is stamped for a tick the room has passed and dropped by the relay.
+    // Its bunnies stop answering the keyboard and the relay hands both seats back to the AI
+    // thirty ticks later. Which is what the room is watched for here.
+    const watcher_saw = [];
+    const watcher = relay_client({ type: "join", id: room_e }, watcher_saw);
+    await until("the watcher in the room", () => watcher_saw.some((msg) => msg.type === "joined"));
+
+    // Throttled across the rejoin, because on an unthrottled machine the rebuild is a
+    // handful of milliseconds and lands inside d -- there is no gap to fail to close, and
+    // the bug hides. Eight times slower is a phone, and it is the same dial #70 measured a
+    // repair with. Lifted the moment the match is back, so what is watched below is whether
+    // the client closes the gap it landed with rather than whether it can run at all.
+    const throttle = await guest.context().newCDPSession(guest);
+    await throttle.send("Emulation.setCPUThrottlingRate", { rate: 8 });
+    await click("Back to the lobby", guest);
+    await on("room", guest);
+    await click("Take seat (A D W)", guest);
+    // Up to a couple of seconds: the relay can only hand back a match it has a state for,
+    // and the host snapshots every two (#40).
+    await on("play", guest);
+    await throttle.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+
+    // A fixed wait, because what is asserted is that something did *not* happen: thirty
+    // missing ticks is half a second, and this is twice that.
+    await settle();
+    await settle();
+    await settle();
+    await settle();
+    await settle();
+    await settle();
+    await settle();
+    assert.deepEqual(
+        watcher_saw.filter((msg) => msg.type === "room").pop().labels,
+        ["Dott", "Zip", "Jiffy", null],
+        "both of the client's seats are still its own a second later: it is keeping up with " +
+            "the room, so its frames are on time and nothing is substituted for it (#42)",
+    );
+    assert.equal(
+        await guest.evaluate(() => window.location.hash),
+        "#play",
+        "and it is still in the match it took the seat to get back into",
+    );
+    watcher.close();
+
     await click("Back to the lobby", host);
     await on("room", host);
     // The guest is not leaving: it is being told the match is over, and it walks itself back
@@ -1133,7 +1183,7 @@ async function two_pages() {
     const host_board = named(await grid(board_panel(host)));
     assert.deepEqual(
         host_board.slice(1).map((row) => row[0]),
-        ["Dott", "Zip", "Fizz", "Miji", "Total deaths"],
+        ["Dott", "Zip", "Jiffy", "Miji", "Total deaths"],
         "a row per seat, named by the username on it, and the totals under them (#13)",
     );
     assert.deepEqual(
@@ -1403,7 +1453,7 @@ async function reconnect() {
     // because the seat it just took is the AI's until the relay says otherwise (#42).
     await click("Back to the lobby", dropped);
     await on("room", dropped);
-    await click("Take seat", dropped);
+    await click("Take seat (A D W)", dropped);
     await until("the room to seat it twice", () => {
         const room = host_saw.filter((msg) => msg.type === "room").pop();
         return room && room.seats[2] === "Jiffy";

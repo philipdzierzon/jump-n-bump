@@ -348,6 +348,11 @@ function ViewModel() {
                 // anybody already in the room can sit down on it, in either phase (#42).
                 // A local room has no relay to ask, and its seats are the couch's.
                 takeable: !!self.room_id() && !self.seat_names()[seat],
+                // Which keys it will answer to, on the button rather than in the row it
+                // grows: one keyboard cannot drive two bunnies with the same three keys,
+                // and a bunny that ignores the arrows you already hold reads as broken
+                // rather than as a second player (#7, #32).
+                take_label: "Take seat (" + SCHEME_NAMES[free_scheme()] + ")",
             };
         });
     });

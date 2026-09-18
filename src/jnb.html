@@ -211,7 +211,7 @@
                 <small data-bind="text: ready ? 'ready' : 'not ready', visible: $parent.room_id"></small>
                 <small data-bind="text: bunny"></small>
                 <small data-bind="text: scheme, visible: scheme"></small>
-                <button class="sm" data-bind="visible: takeable, click: $parent.take_seat">Take seat</button>
+                <button class="sm" data-bind="visible: takeable, click: $parent.take_seat, text: take_label"></button>
             </li>
         </ul>
         <p class="muted">Every seat in the room. The ones nobody takes are played by the AI.</p>

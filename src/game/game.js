@@ -125,6 +125,23 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
         while (playing) {
             game_iteration();
             var now = timeGetTime();
+            // Behind the room rather than behind its own clock. The ticks between here and
+            // the newest frame anybody has stamped are ticks whose input has already
+            // arrived, so stepping them is replay and not guesswork -- and a client that
+            // paces them off its own clock instead never closes the gap, because it steps
+            // at the same 60 Hz the room does. Every frame it sends is then stamped for a
+            // tick the room has already passed, which the relay drops (#42).
+            //
+            // A rebuild is where that gap comes from: a resumed client replays to the tick
+            // the room was on when the payload was built, and decoding a state, building an
+            // object graph and replaying the gap all take time the room spends playing
+            // (#40, #70). The budget is re-seeded rather than advanced, because the ticks
+            // just stepped are the room's backlog and not this client's own schedule --
+            // advancing it would sleep the gap straight back open.
+            if (room.gap() > 0) {
+                next_time = now + 1000 / 60;
+                continue;
+            }
             var time_diff = next_time - now;
             next_time += 1000 / 60;
 
