@@ -147,6 +147,10 @@ export function decode_snapshot(body) {
 // serializer's own output rather than a field list of its own: a field this file packs is a
 // field the checksum covers, and one it does not is one neither the resync nor the check
 // ever needed. Signed, because that is what JSON carries back out of `| 0`.
+//
+// ponytail: 32 bits, so one desync in four billion hashes to the host's and is missed. The
+// next check is 30 ticks later, and a desync is permanent. upgrade path: a wider hash if a
+// room ever runs long enough for that to be the thing that went wrong.
 export function checksum_snapshot(ints) {
     var bytes = new Uint8Array(ints.buffer);
     var hash = 2166136261;

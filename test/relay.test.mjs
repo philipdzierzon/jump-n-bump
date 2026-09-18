@@ -793,12 +793,27 @@ assert.equal(
 );
 
 // The host's first, then the client's: the mismatch is the desync, and the answer is the
-// same payload a mid-match joiner gets.
+// same payload a mid-match joiner gets. The frame is what puts a tick on the room, which is
+// the tick the repair below is measured from.
+chk_host.socket.send({ type: "input", t: 500, seats: {} });
 chk_host.socket.send({ type: "checksum", t: 600, h: 111 });
 chk_guest.socket.send({ type: "checksum", t: 600, h: 222 });
 const repaired = await awaited(chk_saw, "start");
 assert.equal(repaired.snapshot, "REFERENCE-BODY", "a mismatch is answered with the host's state");
 assert.equal(repaired.t, 0, "on the tick the host took it, which is the resync path exactly");
+
+// A hash the client had already sent when the repair was decided on: it belongs to the
+// state being replaced, and counting it would spend a second of the room's three repairs on
+// the desync already being repaired.
+chk_saw.length = 0;
+chk_guest.socket.send({ type: "checksum", t: 450, h: 222 });
+chk_host.socket.send({ type: "checksum", t: 450, h: 111 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a hash stamped before the repair is not a second desync",
+);
 
 // The client's first this time. Clients run at their own pace, so either order happens; a
 // hash with no host hash yet is held and compared when one arrives.
@@ -832,6 +847,37 @@ assert.equal(
 );
 chk_host.socket.close();
 chk_guest.socket.close();
+
+// A mismatch the relay has nothing to answer with yet: the host's first snapshot is two
+// seconds into a match and the first hashes half a second in, so four of them can land
+// before a single repair could be sent. Marked and answered by that snapshot, not counted.
+const early_chk_host = connect({ type: "create", id: "CHKZR" });
+await lobby(early_chk_host);
+await early_chk_host.seats(["Chief"]);
+early_chk_host.socket.send({ type: "start", seed: 6, settings: {}, held: [] });
+const early_chk = connect({ type: "join", id: "CHKZR" });
+await lobby(early_chk);
+await early_chk.seats(["Early"]);
+const early_chk_saw = [];
+early_chk.socket.receive((msg) => early_chk_saw.push(msg));
+for (const t of [30, 60, 90, 120]) {
+    early_chk_host.socket.send({ type: "checksum", t, h: 111 });
+    early_chk.socket.send({ type: "checksum", t, h: 222 });
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    early_chk.events.find((msg) => msg.type === "error"),
+    undefined,
+    "a desync the relay cannot repair yet does not spend the room's three repairs",
+);
+early_chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "LATE-BODY" });
+assert.equal(
+    (await awaited(early_chk_saw, "start")).snapshot,
+    "LATE-BODY",
+    "the host's first snapshot repairs it, exactly as it answers a joiner that asked early",
+);
+early_chk_host.socket.close();
+early_chk.socket.close();
 
 // Two builds of the simulation in one lockstep room is two different matches: the same seed
 // drawn through different code diverges, and no amount of agreeing on input fixes it. The

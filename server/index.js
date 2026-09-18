@@ -42,13 +42,19 @@ const MAX_RING = 2000;
 // A snapshot body is ~10 KB of base64 the relay never decodes. Bounded because it is
 // client input the relay stores and hands to the next joiner.
 const MAX_SNAPSHOT = 64 * 1024;
-// How many ticks the host's checksums are remembered for, at one every 30 ticks: four
-// seconds, which is a whole snapshot interval plus the round trip a client's own hash for
-// the same tick takes to arrive (#41).
+// How many of the host's checksums are remembered, at one every 30 ticks: four seconds,
+// which is a whole snapshot interval plus the round trip a client's own hash for the same
+// tick takes to arrive (#41).
+// ponytail: a hash for a tick that has fallen out of the window is dropped uncompared, so a
+// client more than four seconds behind the host is never checked. upgrade path: widen the
+// window if that is ever a client worth checking rather than one already unplayable (#6).
 const CHECKSUM_WINDOW = 8;
-// Resyncs a client gets in one match before the relay gives up on it. A desync is a
-// determinism bug, not drift: it never heals on its own, so a client that keeps disagreeing
-// after three repairs is one the room cannot carry (#41).
+// Repairs a room gets in one match before the relay gives up on the client that earned the
+// fourth. A desync is a determinism bug, not drift: it never heals on its own, so a room
+// that keeps needing repairs is not one more resync away from being fine (#41).
+// ponytail: the budget is the room's, not each client's, so three clients disagreeing once
+// each closes the fourth on its first. upgrade path: count per client if a room ever loses
+// somebody who had been in sync all match.
 const MAX_DESYNCS = 3;
 
 const rooms = {};
@@ -98,10 +104,10 @@ function create(client, msg) {
         seed: 0,
         snapshot: null,
         inputs: [],
-        // One entry per checksummed tick, newest CHECKSUM_WINDOW kept: the host's hash for
-        // that tick and any client hash that arrived before it (#41). `desyncs` is the
-        // room's own counter, which is how a determinism defect gets noticed in the wild --
-        // it is the number in the log line.
+        // The host's hash for each of the last CHECKSUM_WINDOW checksummed ticks, and
+        // nobody else's: a client cannot push an entry in here, so it cannot flush the
+        // reference out of it either (#41). `desyncs` is the room's own counter, which is
+        // how a determinism defect gets noticed in the wild -- it is the number in the log.
         checksums: [],
         desyncs: 0,
         // Driver changes stamped for a tick nobody has stepped yet. The table above is
@@ -478,6 +484,7 @@ function resume(client) {
     // replaced, and some of it is still in flight: counting it would spend a second of the
     // room's three repairs on the desync already being repaired (#41).
     client.resync_t = room.tick;
+    client.pending = null;
     const until = Math.max(room.snapshot.t, room.tick - room.d - 1);
     // The driver table as it was on the tick the snapshot was taken, which is the tick the
     // replay starts from: every change stamped since -- pruned to exactly those when that
@@ -511,32 +518,35 @@ function resume(client) {
     });
 }
 
-// The host is the reference and there is no vote: a two-client room splits 1-1 every time,
-// and a host that is wrong takes the room with it, self-consistently (#41 amends #19).
+// The host is the reference and there is no vote: a two-client room splits 1-1 every time
+// (#41 amends #19). A client's hash for a tick may arrive either side of the host's for it,
+// so both sides compare on the way in and whichever came first is held. The relay reads
+// none of it -- a hash is four bytes it matches against another four.
 //
-// A client's hash for a tick may arrive either side of the host's for it, so both sides
-// compare on the way in and an entry holds whichever came first. The relay reads none of it
-// -- a hash is four bytes it matches against another four.
+// ponytail: a host that is wrong takes the room with it, self-consistently. upgrade path:
+// none short of a server-side simulation, which is the thing this whole design avoids (#6).
 function keep_checksum(client, msg) {
     const room = client.room;
     if (!room.started) return;
     if (!Number.isInteger(msg.t) || !Number.isInteger(msg.h)) return;
-    if (!client.host && msg.t <= (client.resync_t || 0)) return;
-    let entry = room.checksums.find((one) => one.t === msg.t);
-    if (!entry) {
-        room.checksums.push((entry = { t: msg.t, host: null, clients: [] }));
-        if (room.checksums.length > CHECKSUM_WINDOW) room.checksums.shift();
-    }
     if (!client.host) {
-        if (entry.host === null) entry.clients.push({ client, h: msg.h });
-        else if (entry.host !== msg.h) desync(client, msg.t);
+        if (msg.t <= (client.resync_t || 0)) return;
+        const reference = room.checksums.find((one) => one.t === msg.t);
+        // Held one deep rather than queued: a client has one tick in flight at a time, and
+        // a hash it sent for a tick the host has not reached yet is the newer question.
+        if (!reference) return void (client.pending = { t: msg.t, h: msg.h });
+        if (reference.h !== msg.h) desync(client, msg.t);
         return;
     }
-    entry.host = msg.h;
-    // Answered here rather than held: the ones that agreed are the ones nobody asks about
-    // again, and the ones that did not are being repaired.
-    for (const waiting of entry.clients) if (waiting.h !== msg.h) desync(waiting.client, msg.t);
-    entry.clients = [];
+    room.checksums.push({ t: msg.t, h: msg.h });
+    if (room.checksums.length > CHECKSUM_WINDOW) room.checksums.shift();
+    // Answered here rather than held: the clients that agreed are the ones nobody asks
+    // about again, and the ones that did not are being repaired.
+    for (const other of room.clients) {
+        if (!other.pending || other.pending.t !== msg.t) continue;
+        if (other.pending.h !== msg.h) desync(other, msg.t);
+        other.pending = null;
+    }
 }
 
 // A mismatch is the desync -- the relay substitutes a missing frame, so every client's input
@@ -548,6 +558,11 @@ function desync(client, t) {
     // A hash held for a host hash that arrived after its sender went is nobody's disagreement
     // any more, and must not spend one of the room's three repairs.
     if (!room.clients.has(client)) return;
+    // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
+    // and the first hashes are half a second in, so the budget would be spent three times
+    // over before a single repair could be sent. Marked instead, and answered by that first
+    // snapshot exactly as a mid-match joiner's ask is (#40).
+    if (!room.snapshot) return void (client.waiting = true);
     room.desyncs++;
     console.log("room %s desync %d at tick %d", room.id, room.desyncs, t);
     if (room.desyncs > MAX_DESYNCS) {
@@ -586,6 +601,7 @@ function begin(room, msg) {
     for (const other of room.clients) {
         other.waiting = false;
         other.resync_t = 0;
+        other.pending = null;
     }
     // The driver table rides on `start` rather than as four changes stamped for tick 0: a
     // client steps tick 0 the instant `start` lands, and the browser delivers each frame
