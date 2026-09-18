@@ -287,17 +287,22 @@ function reset_ready(room) {
 // Both routes into the lobby -- the host announcing the end, and the server observing one --
 // are this same broadcast and this same reset (#37, #22). The relay cannot read the
 // simulation, so a final board rides along only when the host sent one (#19).
+// What the relay had to invent to keep the room in one stream, and what it threw away doing
+// it: the per-room counters #42 asked for, on one line per match. Both ends of a match say
+// it -- one that reaches the lobby and one whose room died with its last client.
+function report_match(room) {
+    if (!room.started) return;
+    console.log(
+        "room %s match over: %d frames substituted, %d late, %d forged",
+        room.id,
+        room.substituted,
+        room.late,
+        room.forged,
+    );
+}
+
 function to_lobby(room, msg) {
-    // What the relay had to invent to keep the room in one stream, and what it threw away
-    // doing it: the per-room counters #42 asked for, on one line per match.
-    if (room.started)
-        console.log(
-            "room %s match over: %d frames substituted, %d late, %d forged",
-            room.id,
-            room.substituted,
-            room.late,
-            room.forged,
-        );
+    report_match(room);
     room.started = false;
     reset_ready(room);
     broadcast(room, msg);
@@ -360,7 +365,7 @@ function take_seats(client, msg) {
 // what grows a client past the seat count it fixed at the names screen -- one path, and it
 // works in either phase. A seat somebody else reserved is refused: a reservation is
 // exclusive to its token for as long as it lasts, and free to anyone the moment it expires.
-function take_seat(client, msg) {
+function claim_seat(client, msg) {
     const room = client.room;
     const seat = msg.seat | 0;
     if (!(seat >= 0 && seat < SEATS) || client.seats.includes(seat)) return;
@@ -449,6 +454,7 @@ function leave(client) {
     // The room dies with its last client, not with its creator: host migration is what
     // retired that rule (#14).
     if (!room.clients.size) {
+        report_match(room);
         delete rooms[room.id];
         console.log("room %s ended", room.id);
         return;
@@ -554,6 +560,12 @@ function driver_at(room, seat, t) {
 // `room.tick - d - 1` is the tick the room's fastest client has just stepped, and a frame
 // for it has had its whole delay to arrive. This runs off arriving frames rather than off a
 // timer -- a room where nobody is sending has nobody to substitute for.
+//
+// ponytail: two ceilings, both sized for four seats. A room whose every client stops sending
+// at once stops substituting and never hands a seat over -- a room with nobody left in the
+// match to notice -- and `holder_of` and `driver_at` are linear scans run per seat per tick.
+// upgrade path: a 60 Hz interval per started room, and a seat -> holder map, if a room ever
+// has a spectator watching four AI bunnies play on after everybody dropped.
 function substitute(room) {
     const limit = room.tick - room.d - 1;
     while (room.due <= limit) {
@@ -576,6 +588,11 @@ function substitute(room) {
             // covered for meanwhile, which is what the first d ticks of every match are
             // anyway -- and what a cold cache fetching the room's level looks like from
             // here (#38). A socket that closed is not this: its holder is nobody.
+            // ponytail: so a tab that hangs before its first frame keeps a bunny standing
+            // still for the whole match, which is what #42 found rather than what it broke.
+            // upgrade path: a second, longer gap that converts a seat nobody ever drove, if
+            // a level ever takes long enough to load that thirty ticks cannot tell them
+            // apart.
             if (holder && holder.last_t < 0) continue;
             if (++room.missing[seat] >= AI_AFTER) {
                 room.missing[seat] = 0;
@@ -980,7 +997,7 @@ function relay(client, msg) {
             take_seats(client, msg);
             break;
         case "take":
-            take_seat(client, msg);
+            claim_seat(client, msg);
             break;
         case "leave":
             // The socket usually follows, but the seats are free either way.

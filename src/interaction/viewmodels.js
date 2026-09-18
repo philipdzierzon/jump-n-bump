@@ -112,6 +112,9 @@ function ViewModel() {
     // and spends that window asking for them back. `reserve` is how long the relay says the
     // window is, which arrives on the handshake -- guessing at it would either give up on a
     // seat still being held or retry into one somebody else already has.
+    // ponytail: 60s until the handshake says otherwise, which is the relay's own default --
+    // a client that retried past a shorter window would be asking for a seat somebody else
+    // already has. upgrade path: none needed while both numbers are read from one place.
     var reserve = 60000;
     var reconnect_timer = null;
     var reconnect_attempt = 0;
@@ -255,8 +258,11 @@ function ViewModel() {
     // it was loading through, fill its seat with released keys and never hear its real
     // frames -- which is a desync, not a stutter. Staging is what buys the time to do this
     // in: the level is named in the lobby and applied a match later (#38).
-    // ponytail: a cold cache and an instant start still race, and the loser desyncs.
-    // upgrade path: hold `start` until every client says it has the level (#42).
+    // ponytail: a cold cache and an instant start still race. The loser keeps its seat --
+    // the relay covers a client that has not sent a first frame yet rather than handing its
+    // bunny to the AI (#42) -- but it simulates the ticks it loaded through off its own
+    // inputs while the room used the released frames the relay rang, so it desyncs and is
+    // repaired (#41). upgrade path: hold `start` until every client says it has the level.
     var preloaded = null;
     function preload() {
         var named = Object.assign({}, self.config(), self.staged()).level;
@@ -534,11 +540,7 @@ function ViewModel() {
                 local: !self.room_id(),
                 // A function, not the list: taking a seat mid-match grows this client's
                 // seats, and the session outlives the growth (#42).
-                schemes: function () {
-                    return self.participants().map(function (participant) {
-                        return participant.scheme;
-                    });
-                },
+                schemes: schemes_of,
             },
             false,
             transport,
@@ -690,12 +692,7 @@ function ViewModel() {
             });
             // So a reload binds the grown couch's keyboards back in the order the relay
             // hands the seats down in (#7).
-            if (grew)
-                remember(self.room_id(), {
-                    schemes: self.participants().map(function (participant) {
-                        return participant.scheme;
-                    }),
-                });
+            if (grew) remember(self.room_id(), { schemes: schemes_of() });
         } else {
             // A reload comes back with the seats but not with the keyboards: schemes are
             // client-local and bind to held seats in join order (#7).
@@ -817,6 +814,9 @@ function ViewModel() {
         if (Date.now() >= reconnect_until) return give_up();
         var wait = Math.min(5000, 1000 * Math.pow(2, reconnect_attempt++));
         reconnect_timer = setTimeout(function () {
+            // Checked again on the way out, not only on the way in: a wait armed just inside
+            // the window lands outside it, and the seats are anybody's by then.
+            if (Date.now() >= reconnect_until) return give_up();
             connect({
                 type: "join",
                 id: self.room_id(),
@@ -991,20 +991,14 @@ function ViewModel() {
             return go("room");
         }
         self.error("");
-        remember(self.room_id(), {
-            schemes: participants.map(function (participant) {
-                return participant.scheme;
-            }),
-        });
+        remember(self.room_id(), { schemes: schemes_of() });
         transport.send({ type: "seats", names: names });
     };
 
     // The first control scheme nobody on this couch is already using, for a seat taken
     // after the names screen fixed the rest (#42).
     function free_scheme() {
-        var used = self.participants().map(function (participant) {
-            return participant.scheme;
-        });
+        var used = schemes_of();
         for (var scheme = 0; scheme < SCHEME_NAMES.length; scheme++)
             if (used.indexOf(scheme) < 0) return scheme;
         return 0;
@@ -1028,6 +1022,14 @@ function ViewModel() {
         self.error("");
         transport.send({ type: "take", seat: row.seat, name: free_name() });
     };
+
+    // Which keyboard drives each of this client's seats, in the order the relay hands them
+    // down: read live, because a seat taken mid-match adds one (#7, #42).
+    function schemes_of() {
+        return self.participants().map(function (participant) {
+            return participant.scheme;
+        });
+    }
 
     // The keyboard is the form: a couch player is added by pressing that control scheme's
     // jump key, never by a fourth text box (#7, #35).
