@@ -77,6 +77,24 @@ await page.addInitScript(() => {
         ),
     );
 });
+// Every <audio> the page plays, and whether it is still playing. Sound_Player creates them
+// and keeps them to itself -- they are never in the document -- so patching the prototype is
+// the only way to see them from out here. A match builds one Sound_Player, so a match being
+// played sounds one looping track and a match that is over sounds none; two loops at once
+// was a session left running behind the one on screen, which is how it was heard (#28, #40).
+await page.addInitScript(() => {
+    window.__audio = new Set();
+    window.__sounding = () =>
+        [...window.__audio]
+            .filter((audio) => !audio.paused)
+            .map((audio) => audio.src.split("/").pop() + (audio.loop ? " (loop)" : ""));
+    const play = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+        window.__audio.add(this);
+        return play.apply(this, arguments);
+    };
+});
+
 let sockets = 0;
 page.on("websocket", (ws) => {
     const n = ++sockets;
@@ -123,6 +141,8 @@ async function on(name, root = page) {
     await screen(name, root).waitFor({ state: "visible" });
     await root.waitForFunction((n) => window.location.hash === "#" + n, name);
 }
+
+const sounding = (root = page) => root.evaluate(() => window.__sounding());
 
 const seats = (root = page) => screen("names", root).locator("li");
 const overlay = (root = page) => root.locator("div.overlay");
@@ -702,6 +722,12 @@ async function walk() {
     // is really about: a client handed the match by `start` must not also ask to be let in.
     const in_match = frames.length;
 
+    // One looping track while a match is played. A browser that refused to autoplay sounds
+    // none at all, which is why this counts rather than requires: what it is here to catch
+    // is a second simulation playing its own music behind the one on screen.
+    const loops = (await sounding()).filter((track) => track.includes("(loop)"));
+    assert.ok(loops.length <= 1, "one match, one music: " + JSON.stringify(loops));
+
     const joiner_saw = [];
     const joiner = relay_client({ type: "join", id: room_c }, joiner_saw);
     await until("the joiner", () => joiner_saw.some((msg) => msg.type === "joined"));
@@ -751,6 +777,9 @@ async function walk() {
     // rather than one the relay still thinks is playing (#22).
     await click("Back to the lobby");
     await on("room");
+    // And none once it is over. The music is stopped by the match it belongs to being left,
+    // so a simulation nothing stopped goes on playing in an empty lobby.
+    assert.deepEqual(await sounding(), [], "a match that is over sounds nothing");
     await click("Leave");
     await on("landing");
 
