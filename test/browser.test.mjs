@@ -31,7 +31,7 @@ import { chromium } from "playwright";
 import { start_server } from "../server/index.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { generate_room_id } from "../src/net/room_id.js";
-import { decode_snapshot } from "../src/game/snapshot.js";
+import { SNAPSHOT_INTS, decode_snapshot, encode_snapshot } from "../src/game/snapshot.js";
 
 // Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does.
 const given = process.env.JNB_BASE_URL;
@@ -822,6 +822,18 @@ async function walk() {
 
     boss.send({ type: "start", seed: 4321, settings: {}, held: [] });
     await on("play");
+    // A snapshot for the relay to answer with, because the thing under test is what this
+    // page does when there *is* one to be handed: a room whose host never snapshots cannot
+    // walk anybody back into anything. The relay never decodes a body, so an empty
+    // simulation of the right size is as good as a played one -- and the page really does
+    // unpack it, which is why it has to be the right size.
+    boss.send({
+        type: "snapshot",
+        t: 0,
+        matrix: new Array(16).fill(0),
+        body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
+    });
+    await settle();
     await click("Back to the lobby");
     await on("room");
     // Long enough for the ask to have been made, answered and acted on, which is what this
