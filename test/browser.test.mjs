@@ -42,6 +42,7 @@ const origin = given ? given.replace(/\/$/, "") : "http://localhost:" + server.a
 const room_a = generate_room_id({});
 const room_b = generate_room_id({ [room_a]: true });
 const room_c = generate_room_id({ [room_a]: true, [room_b]: true });
+const room_d = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true });
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -790,6 +791,50 @@ async function walk() {
     // And none once it is over. The music is stopped by the match it belongs to being left,
     // so a simulation nothing stopped goes on playing in an empty lobby.
     assert.deepEqual(await sounding(), [], "a match that is over sounds nothing");
+    await click("Leave");
+    await on("landing");
+
+    // --- leaving a match that is still running (#37, #40) -----------------------------
+    // Somebody else hosts this one, so the match goes on without this page: a client that
+    // walks back to the lobby keeps its seats and hands its bunnies to the AI, and the room
+    // it left is still a room with a match running. Asking to be let into a match in
+    // progress is what a client that just left must not do -- it walked out on purpose, and
+    // the answer would walk it straight back in.
+
+    const boss_saw = [];
+    const boss = relay_client({ type: "create", id: room_d }, boss_saw);
+    await until("the room", () => boss_saw.some((msg) => msg.type === "joined"));
+    boss.send({ type: "seats", names: ["Boss"] });
+    await until("the host to sit down", () =>
+        boss_saw.some((msg) => msg.type === "room" && msg.host),
+    );
+
+    await click("Join with a room code");
+    await on("join");
+    await screen("join").locator("input").fill(room_d);
+    await click("Continue");
+    await on("names");
+    await page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats().count()) === 1);
+    await click("Take the seats");
+    await on("room");
+    await click("Ready");
+
+    boss.send({ type: "start", seed: 4321, settings: {}, held: [] });
+    await on("play");
+    await click("Back to the lobby");
+    await on("room");
+    // Long enough for the ask to have been made, answered and acted on, which is what this
+    // is here to prove did not happen.
+    await settle();
+    await settle();
+    assert.equal(
+        await page.evaluate(() => window.location.hash),
+        "#room",
+        "a client that left the match stays left, and is not walked back into it",
+    );
+    assert.deepEqual(await sounding(), [], "and the match it left sounds nothing");
+    boss.close();
     await click("Leave");
     await on("landing");
 

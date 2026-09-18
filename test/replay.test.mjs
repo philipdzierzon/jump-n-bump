@@ -393,6 +393,19 @@ assert.deepEqual(
     "and sends no frames of its own for ticks that are already history",
 );
 
+// Where the replay ends is the newest tick anybody has stamped a frame for, less the delay,
+// and not only the number the relay put in the payload: fetching a level and unpacking a
+// state takes time the room spends playing, so a client that lands where the room was when
+// it asked is behind by all of it -- and a client behind by more than the delay has its
+// frames arrive for ticks everybody else has stepped past (#40, #6).
+join_transport.to_client({ type: "input", t: HALF * 2 + 30, seats: {} });
+joiner.room.catch_up(joiner.game.step);
+assert.equal(
+    joiner.room.now(),
+    HALF * 2 + 30,
+    "a replay lands on the tick the room is on now, not the one it was on when it answered",
+);
+
 console.log(
     "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, and a snapshot plus the input gap lands in the host's state",
 );

@@ -93,8 +93,12 @@ function ViewModel() {
     // session, so a second match reuses the socket rather than rejoining.
     var transport = new Loopback_Transport();
     var host = true;
-    // Whether this client has already asked to be let into the match that is running.
+    // Whether this client has already asked to be let into the match that is running, and
+    // whether it has been in that match at all. Both are the room's match rather than this
+    // session's, because a session is rebuilt every time this client walks between the
+    // lobby and the match, and neither question is answered by the one it happens to hold.
     var resuming = false;
+    var been_in_match = false;
     // The room id this client has already spent its no-password attempt on, so Back onto
     // the same link does not open a second socket to be refused by the same room.
     var attempted_id = null;
@@ -403,7 +407,7 @@ function ViewModel() {
         token = null;
         // The match in progress belonged to the room, so the next one is asked about from
         // scratch (#40).
-        resuming = false;
+        resuming = been_in_match = false;
         remember("room", { id: null });
     }
 
@@ -526,6 +530,9 @@ function ViewModel() {
         // want of a current session, and rebuild a lobby session that replaces the
         // transport's listener -- orphaning the match it was already in.
         game.on_match_start = function () {
+            // Been in it now, whether it was handed this match or asked to be let into it:
+            // walking back to the lobby must not read as a client that never played it.
+            been_in_match = true;
             // A match beginning outranks the last one's frozen frame: the hold must not
             // walk this client out of the match it just started.
             clearTimeout(leaving);
@@ -543,7 +550,34 @@ function ViewModel() {
             go("play");
         };
         self.current_game(game);
+        // Built into a room with a match already running: this is the session that will
+        // hear the answer, so this is where the asking belongs.
+        ask_to_resume();
         return game;
+    }
+
+    // Asks the relay to be let into the match the room is running: the host's snapshot, the
+    // frames since it and the settings block, which arrive as a `start` (#40). Once per
+    // match -- the payload replaces this client's state, and a second one would replace the
+    // state the first just built -- and the relay remembers an ask it cannot answer until
+    // the host's next snapshot.
+    //
+    // Three clients ask: one that followed a link into a room mid-match, one that reloaded,
+    // and one that took a free seat while a match ran. Two do not. A client the relay handed
+    // the match to by `start` is already playing it. And a client that walked back to the
+    // lobby keeps its seats and hands its bunnies to the AI (#37): it left on purpose, and
+    // walking it back into the match it just left is the opposite of what it asked for --
+    // which is what `been_in_match` is for, since the session that knew is gone with it.
+    //
+    // It asks through the current session rather than building one, and a session built into
+    // a room with a match running asks for itself: the ask is a message on the socket, and a
+    // `start` that lands before a Room exists is a `start` nobody hears.
+    function ask_to_resume() {
+        var current = self.current_game();
+        if (resuming || been_in_match || !self.match_running() || !granted().length) return;
+        if (!current || current.in_match) return;
+        resuming = true;
+        current.resume();
     }
 
     // The relay's picture of the room: which seats exist, who is on them, which ones this
@@ -560,7 +594,9 @@ function ViewModel() {
             self.board_reason(null);
         }
         self.match_running(!!msg.started);
-        if (!msg.started) resuming = false;
+        // The match this client was in is over, so the next one is a match it has not been
+        // in and has not asked about.
+        if (!msg.started) resuming = been_in_match = false;
         host = msg.host;
         self.is_host(host);
         granted(msg.held);
@@ -609,25 +645,9 @@ function ViewModel() {
         // The grant is what opens the lobby: the seats are the relay's to give, so the
         // names screen waits for them rather than assuming them (#14).
         if (self.screen() === "names") go("room");
-        // A match already running, and seats on it: this client asks the relay for the
-        // host's snapshot and the frames since it, which is what joins a match in progress
-        // -- a link followed mid-match, a reload, or seats taken while one runs (#40).
-        // Once per match, because the payload replaces this client's state and a second
-        // one would replace the state the first just built; the relay remembers an ask it
-        // has no snapshot to answer yet and answers it with the host's next one.
-        //
         // Last in this function, because a session holds the seats and the control schemes
         // it was built with: one built before the grant above drives nothing at all.
-        if (msg.started && msg.held.length && !resuming) {
-            var current = session();
-            // Unless this client was handed the match by `start`, which is every client in
-            // the room when the host begins one: it is already playing it, and the relay
-            // would answer the ask with the host's first snapshot two seconds in.
-            if (!current.in_match) {
-                resuming = true;
-                current.resume();
-            }
-        }
+        ask_to_resume();
     }
 
     function connect(entry) {

@@ -26,6 +26,12 @@ export function Room(transport, read_input) {
     // history, or it would overwrite the frames the gap is made of (#40).
     var catching_up = false;
     var catch_up_to = 0;
+    // The newest tick anybody has stamped a frame for. A client stamps d ahead of the tick
+    // it is on, so this less d is the tick the room's fastest client is on -- which is where
+    // a client replaying a gap has to land, and it is fresher than the number the relay put
+    // in the payload: fetching a level and unpacking a state takes time the room spends
+    // playing (#40).
+    var newest = 0;
 
     // Set by the relay's `start`, which is where everything the match must agree on rides
     // -- the seed and the settings both, since a differing no_gore desyncs the RNG stream
@@ -88,6 +94,7 @@ export function Room(transport, read_input) {
     });
 
     function schedule_input(t, seats) {
+        if (t > newest) newest = t;
         var frames = (input_at[t] = input_at[t] || {});
         for (var seat in seats) frames[seat] = seats[seat];
     }
@@ -101,10 +108,16 @@ export function Room(transport, read_input) {
         });
     };
 
+    // Where a replay has to end: as far as the relay said, or as far as the frames that have
+    // arrived since say, whichever is further on.
+    function target() {
+        return Math.max(catch_up_to, newest - self.d);
+    }
+
     // How many ticks of history this `start` is asking to be replayed. Zero for one that
     // begins a match at tick 0.
     this.gap = function () {
-        return catch_up_to - tick;
+        return target() - tick;
     };
 
     // Replays the gap, one `step` per tick, up to the tick the relay said the room's
@@ -112,7 +125,7 @@ export function Room(transport, read_input) {
     // from rather than a delay ahead of them (#40).
     this.catch_up = function (step) {
         catching_up = true;
-        while (tick < catch_up_to) step();
+        while (tick < target()) step();
         catching_up = false;
     };
 
