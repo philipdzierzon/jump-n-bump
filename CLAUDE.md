@@ -26,9 +26,9 @@ relative import carries its `.js` extension.
 The browser itself is not in `node_modules`: run `npx playwright install chromium` once. By
 default the suite boots its own server on a free port; with `JNB_BASE_URL` set it walks that
 origin instead, which is how CI points it at the running container, so an asset missing from
-the image fails the build. A failing run leaves `trace-flow.zip` behind --
-`npx playwright show-trace trace-flow.zip` replays the DOM, the console and every action with
-timings. There are no retries: the simulation is seeded, so a flake is a real race worth a bug
+the image fails the build. A failing run leaves a `trace-<context>.zip` behind for each
+browser context it opened -- `npx playwright show-trace trace-flow.zip` replays the DOM, the
+console and every action with timings. There are no retries: the simulation is seeded, so a flake is a real race worth a bug
 rather than a rerun.
 
 Two things a browser gives that jsdom could not, and that the suite now relies on: a click
@@ -38,8 +38,24 @@ the browser took away -- the bundle exports nothing to reach into, so a match th
 itself is driven by fast-forwarding the one-minute time limit rather than by setting a bump
 count from node.
 
-What the suite still does not check is what opening the page checks: whether the sprites look
-right, and whether the sound is audible. Sound assertions and two pages in one room are #66.
+Three more things a browser gives, all of them added in #66. **Two pages in one room**: a
+browser context each, so storage is a player's own and the two never fight over one room
+token, and what is asserted is that they agree -- the same seats and names, the same ready
+flags, one countdown, `play` on both, and one final board row for row. **Sound**: the
+elements really decode and really play, and every `play()` is recorded in order, so a sound
+fired on the wrong event is caught. Chrome takes the **mp3s**, which jsdom's empty
+`canPlayType` meant nothing had ever played. **Phone width**: a short second walk at 390x844,
+landing through to the lobby, asserting the page never runs off the side.
+
+A local room seeds itself from `Date.now() | 0`, so the sound walk pins the clock and plays
+one known match: whether four bunnies bump each other inside a few seconds is the seed's
+business, and a third of all seeds never do it at all.
+
+What the suite still does not check is what listening and looking check: whether the sound is
+audible or at the right volume, whether the sprites look right, and a real autoplay block --
+headless Chrome autoplays with no flag, so there is none here to reproduce. Nor do the two
+pages agree tick by tick: that needs a checksum the client exposes to a test, which it does
+not (#41).
 
 Architecture notes for this port, and for the sibling C original it was translated from,
 live in the workspace-level `CLAUDE.md` one directory up (`sbx/jumpnbump/CLAUDE.md`).
