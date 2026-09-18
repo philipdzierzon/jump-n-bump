@@ -55,9 +55,11 @@ export function WebSocket_Transport(url, entry, on_room, on_error) {
     };
 
     // Nothing is sent before the room answers: the session that does the sending is not
-    // built until `joined` arrives.
+    // built until `joined` arrives. And nothing after it has gone, which the relay's own
+    // `send` has always checked: a match whose socket died goes on stepping until something
+    // stops it, and one console line per tick is not how a client hears about that (#41).
     this.send = function (msg) {
-        socket.send(JSON.stringify(msg));
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
     };
 
     this.close = function () {

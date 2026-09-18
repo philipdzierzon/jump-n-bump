@@ -62,6 +62,15 @@ export function match_result(matrix, names, reason) {
     "use strict";
     if (reason === "lobby") return "The host ended the match.";
     if (reason === "host_left") return "The host left.";
+    // The one match-end only the client it happened to hears about: the relay repaired this
+    // client's simulation as often as it is willing to and it kept falling out of step, so
+    // the match went on without it. It is still in the room and plays the next one, which is
+    // the half of it worth saying out loud (#41).
+    if (reason === "desync")
+        return (
+            "Your game fell out of step with the room and could not catch up, so the " +
+            "match carried on without you. You are still in the room and can play the next one."
+        );
     if (reason !== "bumps" && reason !== "time") return "";
     var bumps = (matrix || []).map(row_sum);
     var most = Math.max.apply(null, bumps.concat([0]));

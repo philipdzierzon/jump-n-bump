@@ -171,6 +171,13 @@ function ViewModel() {
         var game = self.current_game();
         return !!game && game.game_state() === Game_State.Board;
     });
+    // Said over the match rather than instead of it: the simulation is still running, still
+    // drawn and still this client's to steer -- it is just behind the room, and being
+    // repaired (#41, #17).
+    this.reconnecting = ko.computed(function () {
+        var game = self.current_game();
+        return !!game && game.reconnecting();
+    });
 
     // Derived from the relay's deadline and this client's clock, never from a count of
     // frames: a hidden tab stops its game loop but not its clock (#51). The ticker runs
@@ -687,6 +694,12 @@ function ViewModel() {
                     // without a reload. upgrade path: reconnect into the seat (#42).
                     if (transport === socket) leave_room();
                     self.error("The connection dropped.");
+                    // And the match stops with it. Nothing else does: the screen has not
+                    // changed, so `apply_route` never runs, and the session went on pumping
+                    // a simulation whose every seat but its own read as keys released --
+                    // sending each tick's frame into a closed socket. What the player was
+                    // watching was no longer the room's match (#41 found it, #42 owns it).
+                    if (self.screen() === "play" || self.screen() === "room") go("landing", true);
                 } else if (code === "NAME_TAKEN") {
                     self.error("Somebody in this room already has that name.");
                 } else if (code === "BAD_NAME") {

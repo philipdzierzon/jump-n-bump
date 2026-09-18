@@ -16,6 +16,7 @@ import { Renderer } from "../src/interaction/renderer.js";
 import { Room } from "../src/net/room.js";
 import { Loopback_Transport } from "../src/net/loopback_transport.js";
 import {
+    checksum_snapshot,
     decode_snapshot,
     encode_snapshot,
     pack_snapshot,
@@ -341,6 +342,10 @@ for (let tick = 0; tick < HALF * 2; tick++) {
     host.game.step();
 }
 const host_state = checksum(host.objects.objects);
+// Taken here, not at the end of the file: `player` is a module global that building the
+// joiner's Game replaces, so the host's state is only packable while the host's is the
+// array the module holds (#5).
+const host_hash = checksum_snapshot(pack_snapshot(host.rnd, host.objects, HALF * 2));
 assert.equal(host.room.now(), HALF * 2, "the host played the match through");
 
 assert.equal(
@@ -378,10 +383,14 @@ const join_transport = {
 };
 
 const joiner = start(2468, {}, [], join_transport);
+// Hashed by the room every 30 ticks in a networked room, which this transport is standing
+// in for; a local room leaves this null and sends none (#41, #16).
+joiner.room.checksum = (t) => checksum_snapshot(pack_snapshot(joiner.rnd, joiner.objects, t));
 assert.equal(joiner.room.now(), HALF, "a joined match starts on the snapshot's tick, not zero");
 unpack_snapshot(decode_snapshot(body), joiner.rnd, joiner.objects);
 joiner.room.catch_up(joiner.game.step);
 assert.equal(joiner.room.now(), HALF * 2, "and is replayed up to the tick the room is on");
+const joined_hash = checksum_snapshot(pack_snapshot(joiner.rnd, joiner.objects, HALF * 2));
 assert.equal(
     checksum(joiner.objects.objects),
     host_state,
@@ -391,6 +400,11 @@ assert.deepEqual(
     join_transport.sent.filter((msg) => msg.type === "input"),
     [],
     "and sends no frames of its own for ticks that are already history",
+);
+assert.deepEqual(
+    join_transport.sent.filter((msg) => msg.type === "checksum"),
+    [],
+    "nor a hash of one: the host checksummed those ticks seconds ago (#41)",
 );
 
 // Where the replay ends is the newest tick anybody has stamped a frame for, less the delay,
@@ -405,6 +419,29 @@ assert.equal(
     HALF * 2 + 30,
     "a replay lands on the tick the room is on now, not the one it was on when it answered",
 );
+
+// --- checksum desync detection (#41) -------------------------------------------------
+//
+// The hash is FNV-1a over the snapshot serializer's own output, so two clients in the same
+// state hash the same and the check covers exactly what a resync would repair. The joiner
+// above replayed into the host's state, which is what makes it the pair to compare.
+assert.equal(joined_hash, host_hash, "a client in the host's state hashes to the host's");
+assert.notEqual(
+    checksum_snapshot(decode_snapshot(body)),
+    host_hash,
+    "and one 150 ticks behind it does not: a mismatch is the desync",
+);
+
+// Every 30 ticks, on the tick itself, and only once the client is playing rather than
+// replaying: the room is at HALF * 2 + 30 after the catch-up above.
+join_transport.sent.length = 0;
+joiner.room.catch_up(joiner.game.step);
+joiner.game.step();
+const hashed = () => join_transport.sent.filter((msg) => msg.type === "checksum");
+assert.equal(hashed().length, 1, "a playing client hashes its state on a thirtieth tick");
+assert.equal(hashed()[0].t, HALF * 2 + 30, "stamped with the tick it hashed, not the one after");
+for (let tick = 0; tick < 29; tick++) joiner.game.step();
+assert.equal(hashed().length, 1, "and on no tick in between");
 
 console.log(
     "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, and a snapshot plus the input gap lands in the host's state",

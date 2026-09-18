@@ -9,6 +9,7 @@ import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
 import {
     bump_matrix,
+    checksum_snapshot,
     decode_snapshot,
     encode_snapshot,
     pack_snapshot,
@@ -23,6 +24,24 @@ function noop() {}
 // How often the host packs its simulation and hands it to the relay, which caches the
 // latest one for the next client to join the match (#40).
 var SNAPSHOT_MS = 2000;
+
+// How long a repair keeps the message up. Longer than the relay's two-second repair
+// cooldown, and longer than the gaps a real episode showed -- a 6x-throttled client was
+// repaired every two to four and a half seconds -- so a client being repeatedly repaired
+// says so continuously rather than blinking between repairs (#41).
+// ponytail: it therefore lingers up to five seconds after the last repair, saying
+// "reconnecting" about a client that already has. upgrade path: the relay could say when it
+// stops repairing, which is a message for a thing that is over.
+var RECONNECTING_MS = 5000;
+
+// How far behind the room this client has to be before it says so on its own account.
+// `Room.gap()` is its tick against the newest one anybody has stamped a frame for, and it
+// catches the other way a client stops being in step: one whose loop is not running at all.
+// `pump` catches up to the wall clock in a `while` loop, so a client that is merely slow
+// loses drawn frames rather than ticks and its gap stays nothing -- but a backgrounded tab's
+// `setTimeout` is throttled to about once a second, and that one really does fall behind
+// (#51). Half a second, which is well past the tick or two of normal jitter.
+var BEHIND_TICKS = 30;
 
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
@@ -57,6 +76,14 @@ export function Game_Session(get_level, config, muted, transport) {
     var room = new Room(transport, function (nth) {
         return keyboard.input_frame(config.schemes[nth]);
     });
+    // The room hashes this client's state every 30 ticks and the relay compares it against
+    // the host's for the same tick; a mismatch is answered with the resync payload the join
+    // path already has (#41). A local room is a room of one and has nothing to disagree
+    // with, so it hashes nothing (#16). The host hashes too -- its own is the reference.
+    if (!config.local)
+        room.checksum = function (t) {
+            return checksum_snapshot(pack_snapshot(rnd, objects, t));
+        };
 
     var game = null;
     var sfx = null;
@@ -74,6 +101,11 @@ export function Game_Session(get_level, config, muted, transport) {
     // while this client is still fetching the last one's level, and the loser of that race
     // must not build a simulation over the winner's.
     var starting = 0;
+    // When the relay last replaced this client's simulation with the host's. A client that
+    // is late cannot see it from the inside -- its own tick keeps up, its own inputs are its
+    // own, and what went wrong is that its frames reached everybody else after the tick they
+    // were stamped for (#6, #68). The repair landing is the only local evidence there is.
+    var repaired_at = 0;
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
@@ -81,6 +113,11 @@ export function Game_Session(get_level, config, muted, transport) {
     // sampled off the simulation's own tick rather than a clock, and it is chrome: no wire
     // bytes and no canvas pixels (#39).
     this.clock = ko.observable(null);
+    // Whether this client is behind the room, which is the one thing about a desync it can
+    // work out for itself: the relay decides when to repair it, but how far behind it is is
+    // true between repairs and before the first one, and it is what the player is looking at
+    // when the bunnies jump (#41).
+    this.reconnecting = ko.observable(false);
     this.on_match_start = null;
     // Whether a `start` has landed on this session: it is playing a match, or building
     // one, rather than sitting in the lobby waiting for the next (#40).
@@ -112,7 +149,11 @@ export function Game_Session(get_level, config, muted, transport) {
     // A socket answers `start` a round trip later than a loopback does, so the whole
     // simulation is built out of what the relay handed down rather than out of `config`
     // (#12, #34).
-    room.on_start = function () {
+    room.on_start = function (msg) {
+        // A state landing on a client that is already playing: the relay found this one's
+        // checksum disagreeing with the host's and repaired it (#41). A mid-match join
+        // carries a state too, but never onto a match this client was already in.
+        if (self.in_match && msg.snapshot) repaired_at = Date.now();
         // Set before the level is fetched, not after the simulation is built: a client
         // that has been handed this match is in it from the moment `start` lands, and
         // asking to be let into a match it is already playing would replace the state it
@@ -230,6 +271,14 @@ export function Game_Session(get_level, config, muted, transport) {
         board_timer = null;
     }
 
+    // The chrome over the match: the clock and whether this client has fallen behind. Both
+    // are sampled on a wall clock rather than on a tick, because nothing in the loop knows
+    // either of them is there.
+    function sample_chrome() {
+        show_clock();
+        self.reconnecting(Date.now() - repaired_at < RECONNECTING_MS || room.gap() > BEHIND_TICKS);
+    }
+
     // Sampled on a wall clock like the board's refresh is, because nothing in the loop
     // knows the top bar is there -- but what it reads is the simulation's own tick, so the
     // number the bar shows and the tick the match ends on are the same count (#39).
@@ -251,7 +300,7 @@ export function Game_Session(get_level, config, muted, transport) {
         // ponytail: the bar's clock is up to 250ms behind the tick it counts, which nobody
         // can see on a clock that shows seconds. upgrade path: a per-frame callback out of
         // the pump loop if anything ever needs the tick itself.
-        if (!clock_timer) clock_timer = setInterval(show_clock, 250);
+        if (!clock_timer) clock_timer = setInterval(sample_chrome, 250);
         // On a wall clock, so it lands between ticks: the pump steps its whole catch-up
         // batch synchronously, and a state packed halfway through one is a state no tick
         // ever had.

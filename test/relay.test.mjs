@@ -753,6 +753,239 @@ assert.deepEqual(
 );
 early_guest.socket.close();
 
+// --- checksum desync detection (#41) ---------------------------------------------------
+//
+// The relay substitutes a missing frame, so every client in a room plays the same input
+// stream and a divergence is a determinism bug rather than drift (#6, #17). The host's hash
+// is the reference -- there is no vote, because a two-client room splits 1-1 every time --
+// and the repair is the resync payload the join path already sends.
+const chk_host = connect({ type: "create", id: "CHKSM" });
+await lobby(chk_host);
+await chk_host.seats(["Chief"]);
+chk_host.socket.send({ type: "start", seed: 5, settings: {}, held: [] });
+await new Promise((resolve) => setTimeout(resolve, 100));
+chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "REFERENCE-BODY" });
+
+const chk_guest = connect({ type: "join", id: "CHKSM" });
+await lobby(chk_guest);
+await chk_guest.seats(["Guest"]);
+const chk_saw = [];
+chk_guest.socket.receive((msg) => chk_saw.push(msg));
+
+chk_host.socket.send({ type: "checksum", t: 30, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 30, h: 111 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "two clients that agree on a tick hear nothing about it",
+);
+
+// Eight of the host's are kept, which at one every 30 ticks is four seconds -- long enough
+// for a client's hash for the same tick to arrive either side of it, and no longer.
+for (let t = 180; t <= 180 + 7 * 30; t += 30) chk_host.socket.send({ type: "checksum", t, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 30, h: 999 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "and a hash for a tick the window has aged out has nothing to disagree with",
+);
+
+// A repair is rate-limited rather than counted: the host snapshots every two seconds, so a
+// second one before then repairs from the same state twice and costs a client that is
+// already slow the replay for nothing. Shortened here, because the knob exists so a test
+// need not wait the real interval out.
+process.env.REPAIR_COOLDOWN_MS = "60";
+// And the allowance is for one run of repairs, not for the match: a client that goes this
+// long without needing one came back from the run that led to it.
+process.env.REPAIR_RESET_MS = "400";
+const cooled = () => new Promise((resolve) => setTimeout(resolve, 90));
+const recovered = () => new Promise((resolve) => setTimeout(resolve, 500));
+
+// The host's first, then the client's: the mismatch is the desync, and the answer is the
+// same payload a mid-match joiner gets. The frame is what puts a tick on the room, which is
+// the tick the repair below is measured from.
+chk_host.socket.send({ type: "input", t: 500, seats: {} });
+chk_host.socket.send({ type: "checksum", t: 600, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 600, h: 222 });
+const repaired = await awaited(chk_saw, "start");
+assert.equal(repaired.snapshot, "REFERENCE-BODY", "a mismatch is answered with the host's state");
+assert.equal(repaired.t, 0, "on the tick the host took it, which is the resync path exactly");
+
+// Thirty ticks later and still wrong: the repair has had no fresh snapshot to have worked
+// from, so this is the same unrepaired desync rather than a second one to be spent.
+chk_saw.length = 0;
+chk_host.socket.send({ type: "checksum", t: 610, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 610, h: 222 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a mismatch inside the cooldown is not a second repair",
+);
+
+// A hash the client had already sent when the repair was decided on: it belongs to the
+// state being replaced, and counting it would spend a repair on the desync being repaired.
+chk_saw.length = 0;
+chk_guest.socket.send({ type: "checksum", t: 450, h: 222 });
+chk_host.socket.send({ type: "checksum", t: 450, h: 111 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a hash stamped before the repair is not a second desync",
+);
+
+// Repairs two to five, each a cooldown apart. The client's hash first on one of them, since
+// clients run at their own pace and either order has to reach the same comparison.
+for (const t of [630, 660, 690, 720]) {
+    await cooled();
+    chk_saw.length = 0;
+    if (t === 660) {
+        chk_guest.socket.send({ type: "checksum", t, h: 222 });
+        chk_host.socket.send({ type: "checksum", t, h: 111 });
+    } else {
+        chk_host.socket.send({ type: "checksum", t, h: 111 });
+        chk_guest.socket.send({ type: "checksum", t, h: 222 });
+    }
+    assert.ok(await awaited(chk_saw, "start"), "repaired again rather than given up on");
+}
+
+// The sixth is a client that is not hiccupping. It leaves the match -- not the room: the
+// seat stays its own, the board says why nobody is driving it, and the next match in this
+// room is one it plays like any other.
+await cooled();
+chk_saw.length = 0;
+// Drained, so the room update awaited below is the one the drop broadcast and not an older
+// one still in the queue from the seat being taken.
+chk_guest.events.length = 0;
+chk_host.socket.send({ type: "checksum", t: 750, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 750, h: 222 });
+const dropped = await awaited(chk_saw, "match_end");
+assert.equal(dropped.reason, "desync", "the match ends for that client, and says why");
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "with no sixth repair behind it",
+);
+const after_drop = await chk_guest.until((msg) => msg.type === "room");
+assert.deepEqual(after_drop.held, [1], "the seat is still the dropped client's to play next match");
+assert.equal(
+    after_drop.labels[1],
+    "Guest (out of sync)",
+    "and the board says why nobody is driving it, beside `(left)` and `(AI)` (#13)",
+);
+
+// Dropped is dropped for the rest of this match: an ask still in flight, or another hash,
+// must not hand the match back.
+chk_saw.length = 0;
+chk_guest.socket.send({ type: "resync" });
+await cooled();
+chk_host.socket.send({ type: "checksum", t: 780, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 780, h: 222 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a client the relay gave up repairing is not let back into the match it was dropped from",
+);
+
+// Out of the match, never out of the room: the next match in it is one the dropped client
+// plays like any other, with its seat and its name back (#41).
+chk_saw.length = 0;
+chk_guest.events.length = 0;
+// Readied after the match ends, not before: walking back to the lobby resets the room's
+// ready flags, which is what the countdown is there to collect again (#37).
+chk_host.socket.send({ type: "match_end", reason: "lobby", matrix: null });
+await new Promise((resolve) => setTimeout(resolve, 100));
+chk_guest.socket.send({ type: "ready", ready: true });
+await new Promise((resolve) => setTimeout(resolve, 50));
+chk_host.socket.send({ type: "start", seed: 8, settings: {}, held: [] });
+const next_match = await awaited(chk_saw, "start");
+assert.equal(next_match.t, 0, "the next match begins at tick zero for it like everybody else");
+assert.deepEqual(next_match.held, [1], "on the seat it kept");
+const relabelled = await chk_guest.until((msg) => msg.type === "room" && msg.labels[1] === "Guest");
+assert.equal(relabelled.labels[1], "Guest", "and the board stops saying it was out of step");
+
+chk_host.socket.close();
+chk_guest.socket.close();
+
+// Five is five in a row, not five in a match. A client that recovers -- repaired, then
+// quiet -- starts the next run with the whole allowance, so an evening of occasional
+// hiccups never adds up to being dropped out of a match (#41).
+const reset_host = connect({ type: "create", id: "RSETX" });
+await lobby(reset_host);
+await reset_host.seats(["Chief"]);
+reset_host.socket.send({ type: "start", seed: 9, settings: {}, held: [] });
+await new Promise((resolve) => setTimeout(resolve, 100));
+reset_host.socket.send({ type: "snapshot", t: 0, matrix, body: "RESET-BODY" });
+const reset_guest = connect({ type: "join", id: "RSETX" });
+await lobby(reset_guest);
+await reset_guest.seats(["Hiccup"]);
+const reset_saw = [];
+reset_guest.socket.receive((msg) => reset_saw.push(msg));
+
+// A run of three, which is most of the allowance.
+for (const t of [30, 60, 90]) {
+    await cooled();
+    reset_saw.length = 0;
+    reset_host.socket.send({ type: "checksum", t, h: 111 });
+    reset_guest.socket.send({ type: "checksum", t, h: 222 });
+    assert.ok(await awaited(reset_saw, "start"), "repaired, three of five");
+}
+
+// Then it comes back, and stays back for longer than the reset.
+await recovered();
+
+// Five more, which is the whole allowance over again: without the reset the second of these
+// would have been the sixth in the match and dropped it.
+for (const t of [300, 330, 360, 390, 420]) {
+    await cooled();
+    reset_saw.length = 0;
+    reset_host.socket.send({ type: "checksum", t, h: 111 });
+    reset_guest.socket.send({ type: "checksum", t, h: 222 });
+    assert.ok(await awaited(reset_saw, "start"), "a run after a quiet stretch starts at one");
+    assert.equal(
+        reset_saw.find((msg) => msg.type === "match_end"),
+        undefined,
+        "and is repaired rather than dropped",
+    );
+}
+reset_host.socket.close();
+reset_guest.socket.close();
+
+// A mismatch the relay has nothing to answer with yet: the host's first snapshot is two
+// seconds into a match and the first hashes half a second in, so four of them can land
+// before a single repair could be sent. Marked and answered by that snapshot, not counted.
+const early_chk_host = connect({ type: "create", id: "CHKZR" });
+await lobby(early_chk_host);
+await early_chk_host.seats(["Chief"]);
+early_chk_host.socket.send({ type: "start", seed: 6, settings: {}, held: [] });
+const early_chk = connect({ type: "join", id: "CHKZR" });
+await lobby(early_chk);
+await early_chk.seats(["Early"]);
+const early_chk_saw = [];
+early_chk.socket.receive((msg) => early_chk_saw.push(msg));
+for (const t of [30, 60, 90, 120]) {
+    early_chk_host.socket.send({ type: "checksum", t, h: 111 });
+    early_chk.socket.send({ type: "checksum", t, h: 222 });
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    early_chk.events.find((msg) => msg.type === "error"),
+    undefined,
+    "a desync the relay cannot repair yet does not spend the room's three repairs",
+);
+early_chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "LATE-BODY" });
+assert.equal(
+    (await awaited(early_chk_saw, "start")).snapshot,
+    "LATE-BODY",
+    "the host's first snapshot repairs it, exactly as it answers a joiner that asked early",
+);
+early_chk_host.socket.close();
+early_chk.socket.close();
+
 // Two builds of the simulation in one lockstep room is two different matches: the same seed
 // drawn through different code diverges, and no amount of agreeing on input fixes it. The
 // relay cannot tell one build from another by watching a room play, so it is told on the way
