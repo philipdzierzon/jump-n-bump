@@ -94,11 +94,12 @@ function ViewModel() {
     var transport = new Loopback_Transport();
     var host = true;
     // Whether this client has already asked to be let into the match that is running, and
-    // whether it has been in that match at all. Both are the room's match rather than this
-    // session's, because a session is rebuilt every time this client walks between the
-    // lobby and the match, and neither question is answered by the one it happens to hold.
+    // which seats it was in that match with -- empty for a match it has not been in. Both
+    // are the room's match rather than this session's, because a session is rebuilt every
+    // time this client walks between the lobby and the match, and neither question is
+    // answered by the one it happens to hold.
     var resuming = false;
-    var been_in_match = false;
+    var in_match_with = "";
     // The room id this client has already spent its no-password attempt on, so Back onto
     // the same link does not open a second socket to be refused by the same room.
     var attempted_id = null;
@@ -106,6 +107,15 @@ function ViewModel() {
     // holds them, which is the order its control schemes bind in (#7).
     var granted = ko.observableArray([]);
     var token = null;
+    // The reconnect (#42). A socket that dies under a live room does not end the match: the
+    // seats stay reserved for this client's token, so the page freezes what it was playing
+    // and spends that window asking for them back. `reserve` is how long the relay says the
+    // window is, which arrives on the handshake -- guessing at it would either give up on a
+    // seat still being held or retry into one somebody else already has.
+    var reserve = 60000;
+    var reconnect_timer = null;
+    var reconnect_attempt = 0;
+    var reconnect_until = 0;
 
     this.screen = ko.observable("landing");
     this.code = ko.observable("");
@@ -177,6 +187,16 @@ function ViewModel() {
     this.reconnecting = ko.computed(function () {
         var game = self.current_game();
         return !!game && game.reconnecting();
+    });
+    // The socket is gone and the seat is being asked for back (#42). Louder than the line
+    // above, and said over the lobby as well as over the match, because the room a client
+    // cannot reach is a room it cannot do anything in either.
+    this.disconnected = ko.observable(false);
+    // One line for both, because there is one place to put it: a client being repaired is
+    // still playing the room's match, and one whose socket died is not.
+    this.connection_text = ko.computed(function () {
+        if (self.disconnected()) return "Connection lost. Reconnecting\u2026";
+        return self.reconnecting() ? "Reconnecting\u2026" : "";
     });
 
     // Derived from the relay's deadline and this client's clock, never from a count of
@@ -313,10 +333,15 @@ function ViewModel() {
         return BUNNY_NAMES.map(function (bunny, seat) {
             var mine = self.participants()[granted().indexOf(seat)];
             return {
+                seat: seat,
                 name: self.seat_names()[seat] || "AI",
                 bunny: bunny,
                 scheme: mine ? SCHEME_NAMES[mine.scheme] : "",
                 ready: self.seat_ready()[seat] !== false,
+                // A seat nobody holds is the AI's, and an AI bunny is not a participant:
+                // anybody already in the room can sit down on it, in either phase (#42).
+                // A local room has no relay to ask, and its seats are the couch's.
+                takeable: !!self.room_id() && !self.seat_names()[seat],
             };
         });
     });
@@ -369,6 +394,10 @@ function ViewModel() {
     }
 
     function leave_room() {
+        // Whatever this client was trying to get back into, it is not this room any more.
+        clearTimeout(reconnect_timer);
+        reconnect_timer = null;
+        self.disconnected(false);
         // The last match's frozen frame is held for two seconds before the lobby replaces
         // it, and leaving outranks that hold exactly as starting the next match does: the
         // room is gone, so a `go("room")` two seconds late would route a client that has
@@ -414,7 +443,8 @@ function ViewModel() {
         token = null;
         // The match in progress belonged to the room, so the next one is asked about from
         // scratch (#40).
-        resuming = been_in_match = false;
+        resuming = false;
+        in_match_with = "";
         remember("room", { id: null });
     }
 
@@ -487,7 +517,6 @@ function ViewModel() {
 
     function session() {
         if (self.current_game()) return self.current_game();
-        var participants = self.participants();
         var game = new Game_Session(
             get_level,
             {
@@ -503,9 +532,13 @@ function ViewModel() {
                 // Real pause survives in a local room only: there is nothing to desync
                 // from, and nobody to keep waiting (#16, #37).
                 local: !self.room_id(),
-                schemes: participants.map(function (participant) {
-                    return participant.scheme;
-                }),
+                // A function, not the list: taking a seat mid-match grows this client's
+                // seats, and the session outlives the growth (#42).
+                schemes: function () {
+                    return self.participants().map(function (participant) {
+                        return participant.scheme;
+                    });
+                },
             },
             false,
             transport,
@@ -537,9 +570,13 @@ function ViewModel() {
         // want of a current session, and rebuild a lobby session that replaces the
         // transport's listener -- orphaning the match it was already in.
         game.on_match_start = function () {
-            // Been in it now, whether it was handed this match or asked to be let into it:
-            // walking back to the lobby must not read as a client that never played it.
-            been_in_match = true;
+            // In it now, and with these seats, whether it was handed this match or asked to
+            // be let into it: walking back to the lobby must not read as a client that
+            // never played it, and taking another seat must (#42).
+            in_match_with = granted().join(",");
+            // Asked and answered: the next ask is a seat this client did not have when the
+            // match was handed to it (#42).
+            resuming = false;
             // A match beginning outranks the last one's frozen frame: the hold must not
             // walk this client out of the match it just started.
             clearTimeout(leaving);
@@ -569,20 +606,23 @@ function ViewModel() {
     // state the first just built -- and the relay remembers an ask it cannot answer until
     // the host's next snapshot.
     //
-    // Three clients ask: one that followed a link into a room mid-match, one that reloaded,
-    // and one that took a free seat while a match ran. Two do not. A client the relay handed
-    // the match to by `start` is already playing it. And a client that walked back to the
-    // lobby keeps its seats and hands its bunnies to the AI (#37): it left on purpose, and
-    // walking it back into the match it just left is the opposite of what it asked for --
-    // which is what `been_in_match` is for, since the session that knew is gone with it.
+    // Four clients ask: one that followed a link into a room mid-match, one that reloaded,
+    // one whose socket died under the match (#42), and one that took a free seat while a
+    // match ran -- including one already playing it, because the seat it just took is the
+    // AI's until the relay hands it the match with that seat in it. A client that walked
+    // back to the lobby does not: it keeps its seats and hands its bunnies to the AI (#37),
+    // it left on purpose, and walking it back in is the opposite of what it asked for. The
+    // two are told apart by the seats it was last in the match with, since the session that
+    // knew is gone with it.
     //
     // It asks through the current session rather than building one, and a session built into
     // a room with a match running asks for itself: the ask is a message on the socket, and a
     // `start` that lands before a Room exists is a `start` nobody hears.
     function ask_to_resume() {
         var current = self.current_game();
-        if (resuming || been_in_match || !self.match_running() || !granted().length) return;
-        if (!current || current.in_match) return;
+        if (resuming || !self.match_running() || !granted().length) return;
+        if (granted().join(",") === in_match_with) return;
+        if (!current) return;
         resuming = true;
         current.resume();
     }
@@ -603,7 +643,10 @@ function ViewModel() {
         self.match_running(!!msg.started);
         // The match this client was in is over, so the next one is a match it has not been
         // in and has not asked about.
-        if (!msg.started) resuming = been_in_match = false;
+        if (!msg.started) {
+            resuming = false;
+            in_match_with = "";
+        }
         host = msg.host;
         self.is_host(host);
         granted(msg.held);
@@ -633,9 +676,26 @@ function ViewModel() {
         }
         if (self.participants().length) {
             // The name everyone sees is the relay's, not the one that was typed.
+            var grew = false;
             msg.held.forEach(function (seat, nth) {
-                self.participants()[nth].name(msg.seats[seat]);
+                // A seat taken since the names screen: a participant this couch did not
+                // have, on the first control scheme nobody here is already using (#42).
+                if (!self.participants()[nth]) {
+                    grew = true;
+                    self.participants.push({
+                        scheme: free_scheme(),
+                        name: ko.observable(msg.seats[seat]),
+                    });
+                } else self.participants()[nth].name(msg.seats[seat]);
             });
+            // So a reload binds the grown couch's keyboards back in the order the relay
+            // hands the seats down in (#7).
+            if (grew)
+                remember(self.room_id(), {
+                    schemes: self.participants().map(function (participant) {
+                        return participant.scheme;
+                    }),
+                });
         } else {
             // A reload comes back with the seats but not with the keyboards: schemes are
             // client-local and bind to held seats in join order (#7).
@@ -669,12 +729,20 @@ function ViewModel() {
             relay_url(),
             entry,
             function (msg) {
+                var reconnected = false;
                 if (msg.type === "joined") {
                     // Only once the new room is in: a refused join leaves this client in the
                     // room it already had, rather than in neither.
                     if (leaving.close) leaving.close();
                     transport = socket;
                     token = msg.token;
+                    // The relay's own reservation window: how long a retry is worth making,
+                    // and it is a dial on the relay rather than a constant here (#42).
+                    if (msg.reserve) reserve = msg.reserve;
+                    reconnected = self.disconnected();
+                    self.disconnected(false);
+                    clearTimeout(reconnect_timer);
+                    reconnect_timer = null;
                     self.room_id(msg.id);
                     self.pending_id(msg.id);
                     remember(msg.id, { token: token });
@@ -683,22 +751,31 @@ function ViewModel() {
                     remember("room", { id: msg.id });
                 } else if (transport !== socket) return;
                 apply_room(msg);
+                if (msg.type !== "joined") return;
+                // Back in the seat, and in the match it froze in: the session is rebuilt on
+                // the new socket and asks to be let back into the match, which is the ask a
+                // client joining one mid-match already makes (#40, #42).
+                if (reconnected && self.screen() === "play" && msg.started && msg.held.length)
+                    return void session();
                 // A reload lands back in the lobby, because the token brought the seats
                 // back with it; a first arrival goes to the names screen to ask for some.
-                if (msg.type === "joined") go(msg.held.length ? "room" : "names", true);
+                go(msg.held.length ? "room" : "names", true);
             },
             function (code) {
+                // A retry that did not get in -- the socket died again, or the room would
+                // not have it yet -- is answered by the next retry and by nothing on
+                // screen: the overlay is already up, and the window is what ends this.
+                if (self.disconnected() && transport !== socket) return retry();
                 if (code === "DISCONNECTED") {
-                    // A socket that died under a live room leaves this client with no
-                    // transport at all: falling back to a local one keeps the game playable
-                    // without a reload. upgrade path: reconnect into the seat (#42).
+                    // A live room this client still holds a seat in: the seat is reserved
+                    // for its token, so the match freezes and the page spends that window
+                    // getting back into it (#42).
+                    if (transport === socket && self.room_id()) return lost_connection();
+                    // A socket that died with no room behind it -- refused on the way in,
+                    // or already left -- has nothing to reconnect into: there is no seat
+                    // reserved anywhere and the landing screen is where that ends.
                     if (transport === socket) leave_room();
                     self.error("The connection dropped.");
-                    // And the match stops with it. Nothing else does: the screen has not
-                    // changed, so `apply_route` never runs, and the session went on pumping
-                    // a simulation whose every seat but its own read as keys released --
-                    // sending each tick's frame into a closed socket. What the player was
-                    // watching was no longer the room's match (#41 found it, #42 owns it).
                     if (self.screen() === "play" || self.screen() === "room") go("landing", true);
                 } else if (code === "NAME_TAKEN") {
                     self.error("Somebody in this room already has that name.");
@@ -709,6 +786,10 @@ function ViewModel() {
                         "That room is running a different version of the game. Reload this " +
                             "page; if it still will not join, the room's host has the old one.",
                     );
+                } else if (code === "SEAT_TAKEN") {
+                    // Somebody else sat down first, or its holder is on the way back: a
+                    // reservation belongs to one token until it expires (#42).
+                    self.error("That seat is not free.");
                 } else if (code === "ROOM_FULL") {
                     self.error("Not enough free seats in that room for everyone here.");
                 } else if (entry.type === "create") {
@@ -726,6 +807,47 @@ function ViewModel() {
                 }
             },
         );
+    }
+
+    // 1, 2, 4 and then 5 seconds apart, and it gives up when the reservation window the
+    // relay named runs out: past that the seats are free to anyone, so there is nothing
+    // left to come back to (#42).
+    function retry() {
+        clearTimeout(reconnect_timer);
+        if (Date.now() >= reconnect_until) return give_up();
+        var wait = Math.min(5000, 1000 * Math.pow(2, reconnect_attempt++));
+        reconnect_timer = setTimeout(function () {
+            connect({
+                type: "join",
+                id: self.room_id(),
+                password: self.password(),
+                token: recall(self.room_id()).token,
+            });
+        }, wait);
+    }
+
+    function give_up() {
+        leave_room();
+        self.error("The connection dropped.");
+        go("landing", true);
+    }
+
+    // The socket under a live room died. The match freezes where it is rather than
+    // simulating into divergence -- every other seat would read as keys released and every
+    // frame would go into a closed socket, which is not the room's match any more (#41
+    // found it, #42 owns it) -- and the page says so and starts asking for the seat back.
+    function lost_connection() {
+        self.disconnected(true);
+        reconnect_attempt = 0;
+        reconnect_until = Date.now() + reserve;
+        var game = self.current_game();
+        if (game) game.stop();
+        self.current_game(null);
+        // The match is the room's, and this client is being let back into it rather than
+        // one it remembers having played and must not be walked back into (#40).
+        resuming = false;
+        in_match_with = "";
+        retry();
     }
 
     function enter(id) {
@@ -759,7 +881,9 @@ function ViewModel() {
             }
         // A session from the lobby on, so the host's `start` lands on a client that is
         // already listening for it.
-        if (route.screen === "room") session();
+        // Never on a socket that has gone: the session built here would hold the dead
+        // transport, and the one the reconnect builds would never replace it (#42).
+        if (route.screen === "room" && !self.disconnected()) session();
         if (route.screen === "play") {
             if (!self.current_game()) return go("room", true);
             self.current_game().start();
@@ -873,6 +997,36 @@ function ViewModel() {
             }),
         });
         transport.send({ type: "seats", names: names });
+    };
+
+    // The first control scheme nobody on this couch is already using, for a seat taken
+    // after the names screen fixed the rest (#42).
+    function free_scheme() {
+        var used = self.participants().map(function (participant) {
+            return participant.scheme;
+        });
+        for (var scheme = 0; scheme < SCHEME_NAMES.length; scheme++)
+            if (used.indexOf(scheme) < 0) return scheme;
+        return 0;
+    }
+
+    // Names are room-unique, so a seat taken from the AI is named after the first bunny
+    // nobody in the room is called (#7).
+    function free_name() {
+        var taken = self.seat_names().map(function (name) {
+            return (name || "").toLowerCase();
+        });
+        return BUNNY_NAMES.find(function (bunny) {
+            return taken.indexOf(bunny.toLowerCase()) < 0;
+        });
+    }
+
+    // The other way into a seat: one the AI is driving, taken by somebody already in the
+    // room. It works in the lobby and in a running match alike, and it can grow this client
+    // past the seat count it fixed at the names screen (#42).
+    this.take_seat = function (row) {
+        self.error("");
+        transport.send({ type: "take", seat: row.seat, name: free_name() });
     };
 
     // The keyboard is the form: a couch player is added by pressing that control scheme's

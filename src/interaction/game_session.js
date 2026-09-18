@@ -74,7 +74,9 @@ export function Game_Session(get_level, config, muted, transport) {
     // nth of them is the one that participant pressed the jump key of, which is not the
     // same number (#32, #35).
     var room = new Room(transport, function (nth) {
-        return keyboard.input_frame(config.schemes[nth]);
+        // Read live rather than held: a client can take a seat while the match is running,
+        // which grows the seats it drives and the schemes bound to them (#42).
+        return keyboard.input_frame(config.schemes()[nth]);
     });
     // The room hashes this client's state every 30 ticks and the relay compares it against
     // the host's for the same tick; a mismatch is answered with the resync payload the join

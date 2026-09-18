@@ -49,6 +49,13 @@ const room_b = generate_room_id({ [room_a]: true });
 const room_c = generate_room_id({ [room_a]: true, [room_b]: true });
 const room_d = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true });
 const room_e = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true, [room_d]: true });
+const room_f = generate_room_id({
+    [room_a]: true,
+    [room_b]: true,
+    [room_c]: true,
+    [room_d]: true,
+    [room_e]: true,
+});
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -1309,12 +1316,122 @@ async function phone() {
     assert.deepEqual(errors, [], "and the page threw nothing at phone width");
 }
 
+// --- the socket dies under a live match (#42) ------------------------------------------
+// Its own context, because the drop is done by closing the page's real socket: every
+// `WebSocket` the page opens is kept, and the last one is the transport the room is on. That
+// is a real close, seen by the relay as a real disconnect -- which is the whole point, since
+// what is under test is the seat being held and handed back.
+
+async function reconnect() {
+    const context = await make_context("reconnect");
+    await context.addInitScript(() => {
+        const Native = window.WebSocket;
+        window.__sockets = [];
+        window.WebSocket = function (...args) {
+            const socket = new Native(...args);
+            window.__sockets.push(socket);
+            return socket;
+        };
+        window.WebSocket.prototype = Native.prototype;
+        Object.assign(window.WebSocket, Native);
+    });
+    const dropped = await context.newPage();
+    const errors = [];
+    dropped.on("pageerror", (error) => errors.push(error.message));
+
+    // Somebody else hosts, so the match this page drops out of goes on being played: a host
+    // that leaves takes the match with it, and there would be nothing to come back to.
+    const host_saw = [];
+    const host = relay_client({ type: "create", id: room_f }, host_saw);
+    await until("the room", () => host_saw.some((msg) => msg.type === "joined"));
+    host.send({ type: "seats", names: ["Host"] });
+    await until("the host to sit down", () =>
+        host_saw.some((msg) => msg.type === "room" && msg.host),
+    );
+
+    await dropped.goto(origin + "/");
+    await click("Join with a room code", dropped);
+    await on("join", dropped);
+    await screen("join", dropped).locator("input").fill(room_f);
+    await click("Continue", dropped);
+    await on("names", dropped);
+    await dropped.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(dropped).count()) === 1);
+    await click("Take the seats", dropped);
+    await on("room", dropped);
+    await click("Ready", dropped);
+    host.send({ type: "start", seed: 4321, settings: {}, held: [] });
+    await on("play", dropped);
+    // The state the relay hands back on the way in, which is what a client rejoining a match
+    // in progress is given (#40): without one there is a seat to reclaim but no match to
+    // play from. The relay never decodes a body, so an empty simulation of the right size is
+    // as good as a played one.
+    host.send({
+        type: "snapshot",
+        t: 0,
+        matrix: new Array(16).fill(0),
+        body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
+    });
+
+    await dropped.evaluate(() => window.__sockets[window.__sockets.length - 1].close());
+    await until("the page to say the connection went", async () =>
+        (await text(dropped.locator(".reconnecting"))).includes("Connection lost"),
+    );
+    assert.equal(
+        await dropped.evaluate(() => window.location.hash),
+        "#play",
+        "the match freezes where it was rather than walking the player out of the room (#42)",
+    );
+
+    // The first retry is a second away, and the seat was reserved for this page's token for
+    // the whole of it: it comes back to the same seat, in the same match, by asking to be
+    // let into it exactly as a mid-match joiner does (#40).
+    await until("the page to get back in", async () => {
+        const said = await text(dropped.locator(".reconnecting"));
+        return !said.includes("Connection lost");
+    });
+    await on("play", dropped);
+    assert.deepEqual(
+        host_saw.filter((msg) => msg.type === "room").pop().seats,
+        ["Host", "Dott", null, null],
+        "and the room never lost the seat it was holding for it",
+    );
+    // Take seat, from the page rather than from the protocol: this one walks back to the
+    // lobby with the match still running, and sits down on a bunny the AI is driving. That
+    // grows the couch past the one participant it named at the names screen, on a control
+    // scheme nobody here is using -- and hands it the match back with both seats in it,
+    // because the seat it just took is the AI's until the relay says otherwise (#42).
+    await click("Back to the lobby", dropped);
+    await on("room", dropped);
+    await click("Take seat", dropped);
+    await until("the room to seat it twice", () => {
+        const room = host_saw.filter((msg) => msg.type === "room").pop();
+        return room && room.seats[2] === "Jiffy";
+    });
+    await on("play", dropped);
+    await click("Back to the lobby", dropped);
+    await on("room", dropped);
+    assert.deepEqual(
+        await room_view(dropped),
+        [
+            ["Host", "ready", "Dott"],
+            ["Dott", "not ready", "Jiffy"],
+            ["Jiffy", "not ready", "Fizz"],
+            ["AI", "ready", "Miji"],
+        ],
+        "one client, two seats, named after the first two bunnies nobody in the room was",
+    );
+    assert.deepEqual(errors, [], "and the page threw nothing while it was away");
+    host.close();
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
     await walk();
     await self_ending_match();
     await two_pages();
+    await reconnect();
     await sound();
     await phone();
     console.log(

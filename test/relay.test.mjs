@@ -1012,6 +1012,249 @@ for (const level of LEVELS.slice(1))
         level + " is offered in the level picker, so the relay has to be serving it",
     );
 
+// --- disconnect, substitution, AI takeover and take seat (#42) -------------------------
+
+// Waits on a message the relay sends of its own accord rather than on an answer to
+// something: the frame the room's clock substitutes has nobody to reply to.
+function until_seen(seen, matches, what) {
+    return new Promise((resolve, reject) => {
+        const since = Date.now();
+        const wait = setInterval(() => {
+            const msg = seen.find(matches);
+            if (msg) {
+                clearInterval(wait);
+                resolve(msg);
+            } else if (Date.now() - since > 2000) {
+                clearInterval(wait);
+                reject(new Error("waited for " + what + ", saw " + JSON.stringify(seen)));
+            }
+        }, 10);
+    });
+}
+
+// Two seated clients and a match running. The relay never echoes a client its own frames,
+// so a frame a client sees for its own seat is one the relay invented -- which is what
+// every assertion below turns on.
+async function two_seats(id) {
+    const host = connect({ type: "create", id });
+    await lobby(host);
+    await host.seats(["Steady"]);
+    const guest = connect({ type: "join", id });
+    await lobby(guest);
+    await guest.seats(["Quiet"]);
+    const host_saw = [];
+    const guest_saw = [];
+    host.socket.receive((msg) => host_saw.push(msg));
+    guest.socket.receive((msg) => guest_saw.push(msg));
+    // Ready, so the match begins on the host's word rather than on a countdown (#37).
+    guest.socket.send({ type: "ready", ready: true });
+    host.socket.send({ type: "start", seed: 42, settings: {} });
+    await awaited(host_saw, "start");
+    return { host, guest, host_saw, guest_saw };
+}
+
+const pressed_key = { left: false, right: true, up: false };
+const no_key = { left: false, right: false, up: false };
+
+// A seat whose client went quiet is covered for by the relay, tick by tick, and handed to
+// the AI once thirty of them have gone by. The deadline is the room's own 60 Hz clock, and
+// the host's own frames are what move it on: a frame is due for a tick the fastest client
+// has already stepped.
+const gap = await two_seats("GAPXZ");
+// One frame and then nothing, because that is what a drop looks like: a client that has not
+// sent anything at all is still arriving -- fetching the room's level, most likely -- and
+// the relay covers its seat without ever taking it away.
+gap.guest.socket.send({ type: "input", t: 0, seats: { 1: pressed_key } });
+await until_seen(
+    gap.host_saw,
+    (msg) => msg.type === "input" && msg.t === 0,
+    "the quiet client's one frame",
+);
+for (let t = 0; t <= 34; t++) gap.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+const covered = await until_seen(
+    gap.host_saw,
+    (msg) => msg.type === "input" && msg.t > 0 && msg.seats["1"],
+    "the relay to cover the quiet seat",
+);
+assert.deepEqual(covered.seats, { 1: no_key }, "the relay puts released keys in, and nothing else");
+assert.deepEqual(
+    await until_seen(
+        gap.guest_saw,
+        (msg) => msg.type === "input" && msg.t > 0 && msg.seats["1"],
+        "the substitute to reach the seat's own holder",
+    ),
+    covered,
+    "and rings it to everybody, that seat's own holder included: one input stream, or none",
+);
+assert.equal(
+    (
+        await until_seen(
+            gap.host_saw,
+            (msg) => msg.type === "driver" && msg.seat === 1,
+            "the quiet seat to go to the AI",
+        )
+    ).driver,
+    "ai",
+    "and thirty missing ticks later the seat is the AI's (#17)",
+);
+assert.ok(
+    !gap.host_saw.some((msg) => msg.type === "input" && msg.seats["0"]),
+    "the client that kept sending is substituted for by nobody",
+);
+
+// A frame that turns up after its tick was covered for is dropped where it lands: the room
+// stepped that tick, and handing it on now is input for a tick that never comes round
+// again. Counted per room, and the match's log line is where that count is read.
+gap.guest.socket.send({ type: "input", t: 1, seats: { 1: pressed_key } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    !gap.host_saw.some(
+        (msg) => msg.type === "input" && msg.t === 1 && msg.seats["1"] && msg.seats["1"].right,
+    ),
+    "a frame past its deadline is dropped silently, and the released one stands",
+);
+gap.host.socket.close();
+gap.guest.socket.close();
+
+// A client that has sent nothing at all is not one that went away: it is still arriving --
+// fetching the room's level, most likely -- so its seat is covered for and never taken off
+// it. A socket that closed is the other half of that rule, and does lose the seat.
+const arriving = await two_seats("ARRVE");
+for (let t = 0; t <= 40; t++)
+    arriving.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+await until_seen(
+    arriving.host_saw,
+    (msg) => msg.type === "input" && msg.seats["1"],
+    "the arriving client's seat to be covered for",
+);
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    !arriving.host_saw.some((msg) => msg.type === "driver"),
+    "a seat whose client has not sent a first frame yet is covered for, never converted",
+);
+arriving.host.socket.close();
+arriving.guest.socket.close();
+
+// A motionless player is pressing nothing and still sending a frame every tick, so it is
+// never taken for one that went away: a drop is a missing frame, never a missing keypress
+// (#17). This is what the unconditional per-tick send is for (#12).
+// A round trip per tick, because two clients firing fifty frames each into two sockets
+// arrive in whatever order the kernel hands them over -- and a burst of one client's whole
+// match before the other's first frame is a gap in the wire, not one in the room.
+const idle = await two_seats("STLLQ");
+for (let t = 0; t <= 40; t++) {
+    idle.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+    await until_seen(
+        idle.guest_saw,
+        (msg) => msg.type === "input" && msg.t === t && msg.seats["0"],
+        "the busy client's frame for tick " + t,
+    );
+    idle.guest.socket.send({ type: "input", t, seats: { 1: no_key } });
+    await until_seen(
+        idle.host_saw,
+        (msg) => msg.type === "input" && msg.t === t && msg.seats["1"],
+        "the still client's frame for tick " + t,
+    );
+}
+assert.ok(
+    !idle.guest_saw.some((msg) => msg.type === "input" && msg.seats["1"]),
+    "a player who presses nothing for a second is covered for by nobody",
+);
+assert.ok(
+    !idle.guest_saw.some((msg) => msg.type === "driver"),
+    "and is still driving its own bunny at the end of it",
+);
+idle.host.socket.close();
+idle.guest.socket.close();
+
+// Take seat, in the lobby: one seat at a time, and it grows a client past the count it
+// fixed at the names screen -- which `seats` cannot do, being all-or-nothing (#14).
+const grow = connect({ type: "create", id: "TAKES" });
+await lobby(grow);
+await grow.seats(["Solo"]);
+grow.socket.send({ type: "take", seat: 2, name: "Extra" });
+const grown = await grow.until((msg) => msg.type === "room" && msg.held.length === 2);
+assert.deepEqual(grown.held, [0, 2], "a seated client takes a second seat, the one it named");
+assert.deepEqual(grown.seats, ["Solo", null, "Extra", null], "and the room's table says so");
+grow.socket.send({ type: "take", seat: 3, name: "Solo" });
+assert.equal(
+    (await grow.until((msg) => msg.type === "error")).code,
+    "NAME_TAKEN",
+    "names stay room-unique, whichever way a seat is taken (#7)",
+);
+grow.socket.close();
+
+// And in a running match: a seat the AI is driving is taken by a newcomer, who is handed
+// the match the way any mid-match joiner is (#40) -- with the seat stamped back to a client
+// on a tick the whole room agrees on.
+const mid = connect({ type: "create", id: "MDMCH" });
+await lobby(mid);
+await mid.seats(["Boss"]);
+const mid_saw = [];
+mid.socket.receive((msg) => mid_saw.push(msg));
+mid.socket.send({ type: "start", seed: 7, settings: {} });
+await awaited(mid_saw, "start");
+mid.socket.send({ type: "snapshot", t: 0, matrix: new Array(16).fill(0), body: "MID-BODY" });
+const newcomer = connect({ type: "join", id: "MDMCH" });
+await lobby(newcomer);
+const newcomer_saw = [];
+newcomer.socket.receive((msg) => newcomer_saw.push(msg));
+newcomer.socket.send({ type: "take", seat: 1, name: "Newcomer" });
+assert.deepEqual(
+    (await newcomer.until((msg) => msg.type === "room" && msg.held.length)).held,
+    [1],
+    "a seat the AI is driving is free to anybody in the room, match or no match",
+);
+newcomer.socket.send({ type: "resync" });
+const handed = await awaited(newcomer_saw, "start");
+assert.equal(handed.snapshot, "MID-BODY", "and the match arrives with the host's state (#40)");
+assert.equal(handed.drivers[1], "ai", "the AI's as of the tick the replay starts from");
+assert.ok(
+    handed.changes.some((change) => change.seat === 1 && change.driver === "local"),
+    "and handed back on an agreed tick, which is the moment there is a state to drive from",
+);
+assert.equal(
+    (await until_seen(mid_saw, (msg) => msg.type === "driver", "the room to hear it")).driver,
+    "local",
+    "the rest of the room hears the same change on the same tick",
+);
+mid.socket.close();
+newcomer.socket.close();
+
+// A reservation is exclusive to the token that dropped it, and every seat a client held
+// drops and comes back together: one tab is one socket, so a partial reclaim does not
+// exist. On expiry the seat is free to anyone.
+process.env.RESERVE_MS = "400";
+const party = connect({ type: "create", id: "PARTY" });
+const party_joined = await lobby(party);
+assert.equal(party_joined.reserve, 400, "the handshake says how long a dropped seat is held");
+await party.seats(["Couch", "Mate"]);
+const bystander = connect({ type: "join", id: "PARTY" });
+await lobby(bystander);
+party.socket.close();
+bystander.socket.send({ type: "take", seat: 0, name: "Cuckoo" });
+assert.equal(
+    (await bystander.until((msg) => msg.type === "error")).code,
+    "SEAT_TAKEN",
+    "a reserved seat belongs to the token that dropped it, and to nobody else",
+);
+const rejoined = connect({ type: "join", id: "PARTY", token: party_joined.token });
+assert.deepEqual(
+    (await lobby(rejoined)).held,
+    [0, 1],
+    "and the token brings back every seat that client held, together",
+);
+rejoined.socket.close();
+await bystander.until((msg) => msg.type === "room" && !msg.seats[0]);
+bystander.socket.send({ type: "take", seat: 0, name: "Cuckoo" });
+assert.deepEqual(
+    (await bystander.until((msg) => msg.type === "room" && msg.held.length)).held,
+    [0],
+    "and an expired reservation is a seat free to anyone",
+);
+delete process.env.RESERVE_MS;
+bystander.socket.close();
+
 // The relay runs no simulation of its own, and the cheapest way to keep it that way is to
 // notice when it starts importing one (#6).
 const source = fs.readFileSync(new URL("../server/index.js", import.meta.url), "utf8");
