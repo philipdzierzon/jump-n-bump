@@ -21,9 +21,32 @@ jobs:
       - run: npm ci
         working-directory: server
       - run: npm run format:check
-      - run: npm test
+      # The flow suite drives a real browser (#65). Playwright pins its own browser
+      # build, so the version in the lockfile is the cache key: 600-odd MB is worth
+      # keeping, and a version bump invalidates it by itself.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+      - run: npx playwright install --with-deps chromium
       # Builds the client and runs it exactly as production does, so one
       # assertion run covers webpack, static serving and the WebSocket.
       - run: docker build -t jnb .
       - run: docker run -d -p 8080:8080 jnb
+      # Two seconds, and it says whether the container is broken at all before the
+      # browser spends longer finding out. It needs no browser, which is also why it
+      # can be pointed at a deployed instance.
       - run: node server/smoke.mjs http://localhost:8080
+      # The one browser walk, against the shipping image rather than the working tree:
+      # an asset missing from the container fails here. Same command as locally; only
+      # the environment differs.
+      - run: npm test
+        env:
+          JNB_BASE_URL: http://localhost:8080
+      # A two-page timing failure is unreadable from an assertion message alone.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: trace-*.zip
+          if-no-files-found: ignore

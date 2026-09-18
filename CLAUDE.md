@@ -9,20 +9,37 @@ Online play needs the relay in `server/`, which has dependencies of its own: `np
 WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
 `Dockerfile` is how it actually ships.
 
-`npm test` runs four files. `test/replay.test.mjs` replays the simulation twice from one seed
-and one input log, with no DOM, hashed to an FNV-1a checksum: anything that makes the
-simulation depend on wall-clock time, the environment or unseeded randomness fails it.
-`test/relay.test.mjs` boots the real relay on a real socket and drives the protocol through
-it. `test/router.test.mjs` covers the two pure pieces of the room flow -- which screen a
-hash names, and which control scheme a jump key belongs to. `test/dom.test.mjs` walks the
-rest of that flow in jsdom: it loads `src/jnb.html`, imports `viewmodels.js` so Knockout
-binds for real, and clicks and types its way from the landing screen through the couch,
-the lobby, a match and the board, then does it again through a relay on a real socket.
-Node runs `src/` directly, which is why every relative import carries its `.js` extension.
+`npm test` runs four files, and builds the client first because one of them opens a browser.
+`test/replay.test.mjs` replays the simulation twice from one seed and one input log, with no
+DOM, hashed to an FNV-1a checksum: anything that makes the simulation depend on wall-clock
+time, the environment or unseeded randomness fails it. It is also where the match-end limits
+are proved -- endless stays endless, and a bump or minute limit stops the match on the tick
+the condition falls. `test/relay.test.mjs` boots the real relay on a real socket and drives
+the protocol through it, several clients to a room. `test/router.test.mjs` covers the pure
+pieces of the room flow -- which screen a hash names, which control scheme a jump key belongs
+to, and the wording of the line above the board. `test/browser.test.mjs` walks the rest of
+that flow in a real Chromium through Playwright: it opens the built page and clicks and types
+its way from the landing screen through the couch, the lobby, a match and the board, then does
+it again through a relay on a real socket. Node runs `src/` directly, which is why every
+relative import carries its `.js` extension.
 
-What the DOM test cannot see is what is still verified by opening the page: jsdom has no
-2d context (stubbed with a no-op, so the renderer runs but paints nothing) and no media
-playback, so pixels and sound stay manual.
+The browser itself is not in `node_modules`: run `npx playwright install chromium` once. By
+default the suite boots its own server on a free port; with `JNB_BASE_URL` set it walks that
+origin instead, which is how CI points it at the running container, so an asset missing from
+the image fails the build. A failing run leaves `trace-flow.zip` behind --
+`npx playwright show-trace trace-flow.zip` replays the DOM, the console and every action with
+timings. There are no retries: the simulation is seeded, so a flake is a real race worth a bug
+rather than a rerun.
+
+Two things a browser gives that jsdom could not, and that the suite now relies on: a click
+refuses an element that is invisible, zero-sized, covered or still moving, and a `<details>`
+panel really is closed until its summary is clicked. A fake clock stands in for the one thing
+the browser took away -- the bundle exports nothing to reach into, so a match that ends by
+itself is driven by fast-forwarding the one-minute time limit rather than by setting a bump
+count from node.
+
+What the suite still does not check is what opening the page checks: whether the sprites look
+right, and whether the sound is audible. Sound assertions and two pages in one room are #66.
 
 Architecture notes for this port, and for the sibling C original it was translated from,
 live in the workspace-level `CLAUDE.md` one directory up (`sbx/jumpnbump/CLAUDE.md`).
@@ -73,6 +90,12 @@ cd .claude/worktrees/<issue>
 ln -s ../../../node_modules node_modules          # deps are not copied into a worktree
 ln -s ../../../../server/node_modules server/node_modules # `npm test` boots the real relay
 ```
+
+Those two symlinks share one `node_modules` with `master`, which is the wrong thing for a
+branch that changes dependencies or builds the image: `npm install` there prunes what
+`master` still needs, and Docker's context walker follows the `server/node_modules` symlink
+into a loop and refuses to build. Install into the worktree itself in that case -- delete
+both links, then `npm install` and `npm ci --prefix server`.
 
 `.claude/worktrees/` is git-ignored and Prettier-ignored, so a sibling worktree is never
 committed and never formatted: the pre-commit hook checks the whole of the tree it runs

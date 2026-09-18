@@ -352,6 +352,13 @@ function ViewModel() {
     }
 
     function leave_room() {
+        // The last match's frozen frame is held for two seconds before the lobby replaces
+        // it, and leaving outranks that hold exactly as starting the next match does: the
+        // room is gone, so a `go("room")` two seconds late would route a client that has
+        // already walked away -- onto the names screen, because this clears the couch and
+        // the remembered room id on the way out (#39).
+        clearTimeout(leaving);
+        leaving = null;
         // A deliberate Leave frees the seats now; only a dropped connection reserves them
         // for a reload (#17). The relay cannot tell the two apart without being told.
         if (self.room_id() && transport.send) transport.send({ type: "leave" });

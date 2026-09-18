@@ -2,6 +2,10 @@
 FROM node:22-alpine AS client
 WORKDIR /build
 COPY package.json package-lock.json ./
+# Webpack is a dev dependency, so the build stage needs them all -- but `playwright` pulls a
+# browser down on install and nothing in this image ever opens one: the browser suite runs on
+# the host, or in CI, against the container this builds (#65).
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm ci
 COPY .babelrc webpack.config.js ./
 COPY src ./src
