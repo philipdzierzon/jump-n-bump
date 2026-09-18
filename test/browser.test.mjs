@@ -759,6 +759,16 @@ async function walk() {
     // snapshot. That had the host resyncing itself two seconds into every match: the
     // simulation rebuilt under the player, and a second copy of the looping music started
     // over the first (#28, #40).
+    // The build stamped into the bundle travels on every handshake, which is what lets the
+    // relay refuse a page left open across a rebuild (#40). "dev" would mean the stamp never
+    // reached the bundle, which is the failure worth catching here.
+    const handshakes = frames.filter((frame) => frame.includes('"build":'));
+    assert.ok(handshakes.length, "every handshake says which build this page is");
+    assert.ok(
+        !handshakes.some((frame) => frame.includes('"build":"dev"')),
+        "and it is the one webpack stamped in, not the source running from node",
+    );
+
     // Over the whole walk, not just this match: every room this page has been in either had
     // no match running or handed it one, and neither is a room to ask about.
     assert.deepEqual(

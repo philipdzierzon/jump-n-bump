@@ -76,6 +76,10 @@ function recall(id) {
     }
 }
 
+// Stamped into the bundle by webpack at build time, and "dev" when `src/` is run straight
+// from node -- which no relay is ever handed, because nothing there opens a socket.
+var BUILD = (typeof process !== "undefined" && process.env && process.env.JNB_BUILD) || "dev";
+
 function ViewModel() {
     "use strict";
     var self = this;
@@ -628,6 +632,11 @@ function ViewModel() {
 
     function connect(entry) {
         self.error("");
+        // Which build of the simulation this page is running. Two builds in one lockstep
+        // room desync -- the same seed drawn through different code is a different match --
+        // and a page nobody reloaded goes on running the build it was loaded with (#40).
+        entry.build = BUILD;
+
         var leaving = transport;
         var socket = new WebSocket_Transport(
             relay_url(),
@@ -662,6 +671,11 @@ function ViewModel() {
                     self.error("Somebody in this room already has that name.");
                 } else if (code === "BAD_NAME") {
                     self.error("Every name needs 1 to 16 characters.");
+                } else if (code === "OUT_OF_DATE") {
+                    self.error(
+                        "That room is running a different version of the game. Reload this " +
+                            "page; if it still will not join, the room's host has the old one.",
+                    );
                 } else if (code === "ROOM_FULL") {
                     self.error("Not enough free seats in that room for everyone here.");
                 } else if (entry.type === "create") {

@@ -753,6 +753,24 @@ assert.deepEqual(
 );
 early_guest.socket.close();
 
+// Two builds of the simulation in one lockstep room is two different matches: the same seed
+// drawn through different code diverges, and no amount of agreeing on input fixes it. The
+// relay cannot tell one build from another by watching a room play, so it is told on the way
+// in and refuses the mismatch (#40).
+const built = connect({ type: "create", id: "BLDXZ", build: "one" });
+await lobby(built);
+const stale = connect({ type: "join", id: "BLDXZ", build: "two" });
+assert.equal((await lobby(stale)).code, "OUT_OF_DATE", "a client on another build is refused");
+const current = connect({ type: "join", id: "BLDXZ", build: "one" });
+assert.equal((await lobby(current)).type, "joined", "and one on the room's build is not");
+// The headless suites and `smoke.mjs` are clients too, and this guards against a tab left
+// open across a rebuild rather than against a client that lies about what it is (#29).
+const unversioned = connect({ type: "join", id: "BLDXZ" });
+assert.equal((await lobby(unversioned)).type, "joined", "as is one that declares no build");
+built.socket.close();
+current.socket.close();
+unversioned.socket.close();
+
 // A level name is resolved by fetching `levels/<name>/<name>.dat` beside the page, so the
 // list is only an allowlist while every name in it is really there (#38).
 for (const level of LEVELS.slice(1))

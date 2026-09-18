@@ -65,6 +65,10 @@ function create(client, msg) {
     rooms[id] = {
         id,
         password: msg.password || null,
+        // The build of the client that opened it. Every client in a lockstep room has to be
+        // running the same simulation, and the relay cannot tell one build from another by
+        // watching it play -- so it is told, and refuses the mismatch on the way in (#40).
+        build: msg.build || null,
         clients: new Set(),
         // Four seats, global to the room, one participant each. A seat is
         // { token, name } or null; the token is the client holding it, which is what makes
@@ -117,6 +121,14 @@ function join(client, msg) {
     // profanity blocklist, and no second failure code to leak the difference.
     if (!room || room.password !== (msg.password || null))
         return send(client, { type: "error", code: "ROOM_UNAVAILABLE" });
+    // After the password, so a refusal still says nothing about a room the client could not
+    // have joined anyway (#8). A client that declares no build is not checked: the headless
+    // suites and `smoke.mjs` are clients too, and this catches a tab left open across a
+    // rebuild rather than a client that lies about what it is running (#29 owns that).
+    if (msg.build && room.build && msg.build !== room.build) {
+        console.log("room %s refused build %s, running %s", room.id, msg.build, room.build);
+        return send(client, { type: "error", code: "OUT_OF_DATE" });
+    }
     admit(client, room, msg);
 }
 
