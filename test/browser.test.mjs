@@ -734,6 +734,28 @@ async function self_ending_match() {
         "and the clock goes with the match it was counting",
     );
 
+    // Leaving during the hold, which is the bug this suite found on its first run: the hold
+    // is a two-second `go("room")`, and nothing used to cancel it on the way out of a room.
+    // A player who left in those two seconds was routed back by a match that was already
+    // over -- and onto the names screen, because leaving clears the couch and forgets the
+    // room id, which is what the lobby route falls back from. Deterministic here because a
+    // fake clock decides when the two seconds pass (#39).
+    await click("Start the match", clock_page);
+    await on("play", clock_page);
+    await clock_page.clock.fastForward("01:00");
+    await click("Back to the lobby", clock_page);
+    await on("room", clock_page);
+    await click("Leave", clock_page);
+    await on("landing", clock_page);
+    await clock_page.clock.fastForward(3000);
+    await settle();
+    assert.equal(
+        await clock_page.evaluate(() => window.location.hash),
+        "#landing",
+        "a hold from the match just left does not route a client that has walked away",
+    );
+    assert.ok(await screen("landing", clock_page).isVisible(), "the landing screen stays up");
+
     assert.deepEqual(errors, [], "with nothing thrown on the way");
     await clock_page.close();
 }
@@ -762,7 +784,8 @@ try {
                 .length,
         }))
         .catch(() => null);
-    console.error("page was at:", JSON.stringify(where));
+    // The main page, which is not the failing one when the fake-clock section is what broke.
+    console.error("main page was at:", JSON.stringify(where));
     const routes = await page.evaluate(() => window.__routes || []).catch(() => []);
     console.error("routes the page took (last 20):");
     for (const route of routes.slice(-20)) console.error("  " + route);
