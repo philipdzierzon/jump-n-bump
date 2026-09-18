@@ -204,7 +204,7 @@ const delayed_transport = {
             seed: 1,
             settings: {},
             held: [0],
-            drivers: ["local"],
+            drivers: ["local", "local"],
         });
     },
 };
@@ -214,6 +214,22 @@ assert.deepEqual(
     [0, 1, 2, 3].map(() => delayed_room.step()[0].right),
     [false, false, true, true],
     "a held seat is released for the first d ticks, then driven -- never handed to the AI",
+);
+// Seat 1 is somebody else's and no frame for it ever arrives, so every tick substitutes for
+// it -- but only the ticks from d on are counted, since before that there is nothing to be
+// late (#70). Seat 0 is this client's own and is never short a frame.
+assert.deepEqual(
+    delayed_room.stats(),
+    { substituted: 2, arrived: 0, late: 0, worst_margin: 2, late_by: {} },
+    "a missing frame is counted, and the first d ticks are not counted against it",
+);
+// A frame for a tick this room stepped three ticks ago: it arrived, it was too late to be
+// used, and the slack it landed with is the measurement (#70).
+delayed_transport.to_client({ type: "input", t: 1, seats: { 1: { left: true } } });
+assert.deepEqual(
+    delayed_room.stats(),
+    { substituted: 2, arrived: 1, late: 1, worst_margin: -3, late_by: { "-3": 1 } },
+    "a frame arriving after the tick it was stamped for is counted, with its slack",
 );
 
 let ended = null;

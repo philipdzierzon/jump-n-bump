@@ -106,6 +106,10 @@ export function Game_Session(get_level, config, muted, transport) {
     // own, and what went wrong is that its frames reached everybody else after the tick they
     // were stamped for (#6, #68). The repair landing is the only local evidence there is.
     var repaired_at = 0;
+    // Whether the state about to be unpacked is replacing one this client was playing, or
+    // filling one it has not got: the same payload, two triggers (#40), and two different
+    // things to have measured.
+    var repairing = false;
 
     this.scores = ko.observable([[]]);
     this.game_state = ko.observable(Game_State.Not_Started);
@@ -153,7 +157,8 @@ export function Game_Session(get_level, config, muted, transport) {
         // A state landing on a client that is already playing: the relay found this one's
         // checksum disagreeing with the host's and repaired it (#41). A mid-match join
         // carries a state too, but never onto a match this client was already in.
-        if (self.in_match && msg.snapshot) repaired_at = Date.now();
+        repairing = self.in_match && !!msg.snapshot;
+        if (repairing) repaired_at = Date.now();
         // Set before the level is fetched, not after the simulation is built: a client
         // that has been handed this match is in it from the moment `start` lands, and
         // asking to be let into a match it is already playing would replace the state it
@@ -184,13 +189,64 @@ export function Game_Session(get_level, config, muted, transport) {
         }, noop);
     };
 
+    // What a repair costs the machine least able to pay it, split three ways: building the
+    // object graph, unpacking the state into it, and replaying the gap between that state
+    // and now -- all of it synchronous, on a client that is already short of CPU (#70).
+    function report_repair(gap, decoded, built, unpacked, caught_up) {
+        console.log(
+            "%s at tick %d: gap %d ticks, decode %dms, graph %dms, unpack %dms, catch-up %dms",
+            repairing ? "repair" : "joined",
+            room.now(),
+            gap,
+            Math.round(decoded),
+            Math.round(built),
+            Math.round(unpacked),
+            Math.round(caught_up),
+        );
+    }
+
+    // The one number a client can put on its own lateness, at the moment the match it
+    // belongs to ends (#70). A client that is late cannot see it from the inside, so this
+    // reads nothing like a problem on the machine that has one -- it is the room's other
+    // clients whose counts go up.
+    //
+    // ponytail: it goes to the console and nowhere else, so a desync is diagnosed by asking
+    // a player to paste a line. upgrade path: hand it to the relay, which is the only thing
+    // that sees every client's, if a room ever needs a verdict nobody was watching for.
+    function report_match() {
+        var stats = room.stats();
+        console.log(
+            "match over at tick %d: %d frames substituted, %d of %d arrived late, " +
+                "worst margin %d ticks (d %d), late by %s",
+            room.now(),
+            stats.substituted,
+            stats.late,
+            stats.arrived,
+            stats.worst_margin,
+            room.d,
+            // Every late frame, by how many ticks: the distribution a bigger d would have
+            // to cover, which one worst case cannot say (#70, #71).
+            Object.keys(stats.late_by)
+                .sort(function (a, b) {
+                    return b - a;
+                })
+                .map(function (margin) {
+                    return margin + ":" + stats.late_by[margin];
+                })
+                .join(" ") || "nothing",
+        );
+    }
+
     function build(level) {
         // Two ways a match already running cannot be joined: a body that does not decode,
         // and a gap too big to replay. Either one means this client would be playing a
         // state it knows is wrong, so it stays in the lobby and plays the next match
         // instead of half-joining this one (#40).
+        var t0 = performance.now();
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
-        if (room.resume && (!resumed || room.gap() > MAX_CATCH_UP)) return;
+        var gap = room.gap();
+        if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return;
+        var t1 = performance.now();
         rnd = make_rnd(room.seed);
         var settings = room.settings;
 
@@ -217,11 +273,14 @@ export function Game_Session(get_level, config, muted, transport) {
         // The host's state, and every input frame the relay rang since it, replace the
         // tick-0 simulation just built, and the gap between the two is replayed at once.
         if (resumed) {
+            var t2 = performance.now();
             unpack_snapshot(resumed, rnd, objects);
             // Hundreds of ticks of history must not replay as a burst of deaths and
             // splashes, so the catch-up is silent and `play` is what un-mutes it (#28).
             sound_player.set_muted(true);
+            var t3 = performance.now();
             room.catch_up(game.step);
+            report_repair(gap, t1 - t0, t2 - t1, t3 - t2, performance.now() - t3);
         }
 
         // Every client in the room holds a session from the moment it reaches the lobby,
@@ -340,7 +399,10 @@ export function Game_Session(get_level, config, muted, transport) {
         // the overlay's own refresh is the only other thing that ever fills it: leaving a
         // match nobody pressed P on handed the lobby the empty matrix this starts life as,
         // which draws two rows of one cell instead of the grid (#13, #37).
-        if (game) snapshot();
+        if (game) {
+            snapshot();
+            report_match();
+        }
         // The match is over for this client, so its music is over with it: muting used to
         // ride along with the board, and the board stopped pausing anything (#37).
         if (sound_player) sound_player.set_muted(true);
