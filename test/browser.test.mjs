@@ -822,6 +822,13 @@ async function walk() {
 
     boss.send({ type: "start", seed: 4321, settings: {}, held: [] });
     await on("play");
+    // Said only to a client that has fallen behind the room, which this one has not: the
+    // page stamps its own frames, so the newest tick anybody has stamped is its own and the
+    // gap it measures itself by is nothing (#41).
+    assert.ok(
+        !(await page.locator(".reconnecting").isVisible()),
+        "a client keeping up with the room is told nothing over the match",
+    );
     // A snapshot for the relay to answer with, because the thing under test is what this
     // page does when there *is* one to be handed: a room whose host never snapshots cannot
     // walk anybody back into anything. The relay never decodes a body, so an empty

@@ -58,6 +58,9 @@
         /* The one banner that is not news but a fault: this client was dropped out of the
            match for falling out of step with the room (#41). */
         .banner.alarm { color: #e4572e; border-left-color: #e4572e; }
+        /* Over the match, not instead of it: a client being repaired is still playing, and
+           covering the canvas would hide the jump the message is there to explain (#41). */
+        .reconnecting { position: absolute; top: 10px; left: 0; right: 0; text-align: center; pointer-events: none; font-family: ui-monospace, monospace; font-size: 15px; letter-spacing: 0.08em; color: #e4572e; text-shadow: 0 0 6px #100f0d, 0 0 6px #100f0d, 0 0 6px #100f0d; }
         details summary { cursor: pointer; font-size: 13px; }
         /* `disabled` on the fieldset is what greys the whole panel out for everyone who is
            not the host: the browser disables every control inside it, so there is nothing
@@ -122,6 +125,7 @@
 
     <div data-bind="visible: screen() === 'play'" class="canvas-container">
         <canvas id="screen" width="1200" height="768"></canvas>
+        <div data-bind="visible: reconnecting" class="reconnecting">Reconnecting&hellip;</div>
         <div data-bind="visible: board_up" class="overlay kiosk wide">
             <div class="eyebrow">scores</div>
             <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->

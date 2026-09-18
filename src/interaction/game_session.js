@@ -25,6 +25,12 @@ function noop() {}
 // latest one for the next client to join the match (#40).
 var SNAPSHOT_MS = 2000;
 
+// How far behind the room this client has to be before it says so. `Room.gap()` is its own
+// tick against the newest one anybody in the room has stamped a frame for, which is a tick
+// or two in normal play; half a second of it is a client that has fallen behind and is
+// being repaired, or about to be (#41, #17).
+var BEHIND_TICKS = 30;
+
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
 }
@@ -90,6 +96,11 @@ export function Game_Session(get_level, config, muted, transport) {
     // sampled off the simulation's own tick rather than a clock, and it is chrome: no wire
     // bytes and no canvas pixels (#39).
     this.clock = ko.observable(null);
+    // Whether this client is behind the room, which is the one thing about a desync it can
+    // work out for itself: the relay decides when to repair it, but how far behind it is is
+    // true between repairs and before the first one, and it is what the player is looking at
+    // when the bunnies jump (#41).
+    this.reconnecting = ko.observable(false);
     this.on_match_start = null;
     // Whether a `start` has landed on this session: it is playing a match, or building
     // one, rather than sitting in the lobby waiting for the next (#40).
@@ -239,6 +250,14 @@ export function Game_Session(get_level, config, muted, transport) {
         board_timer = null;
     }
 
+    // The chrome over the match: the clock and whether this client has fallen behind. Both
+    // are sampled on a wall clock rather than on a tick, because nothing in the loop knows
+    // either of them is there.
+    function sample_chrome() {
+        show_clock();
+        self.reconnecting(room.gap() > BEHIND_TICKS);
+    }
+
     // Sampled on a wall clock like the board's refresh is, because nothing in the loop
     // knows the top bar is there -- but what it reads is the simulation's own tick, so the
     // number the bar shows and the tick the match ends on are the same count (#39).
@@ -260,7 +279,7 @@ export function Game_Session(get_level, config, muted, transport) {
         // ponytail: the bar's clock is up to 250ms behind the tick it counts, which nobody
         // can see on a clock that shows seconds. upgrade path: a per-frame callback out of
         // the pump loop if anything ever needs the tick itself.
-        if (!clock_timer) clock_timer = setInterval(show_clock, 250);
+        if (!clock_timer) clock_timer = setInterval(sample_chrome, 250);
         // On a wall clock, so it lands between ticks: the pump steps its whole catch-up
         // batch synchronously, and a state packed halfway through one is a state no tick
         // ever had.

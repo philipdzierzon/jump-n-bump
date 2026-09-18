@@ -171,6 +171,13 @@ function ViewModel() {
         var game = self.current_game();
         return !!game && game.game_state() === Game_State.Board;
     });
+    // Said over the match rather than instead of it: the simulation is still running, still
+    // drawn and still this client's to steer -- it is just behind the room, and being
+    // repaired (#41, #17).
+    this.reconnecting = ko.computed(function () {
+        var game = self.current_game();
+        return !!game && game.reconnecting();
+    });
 
     // Derived from the relay's deadline and this client's clock, never from a count of
     // frames: a hidden tab stops its game loop but not its clock (#51). The ticker runs
