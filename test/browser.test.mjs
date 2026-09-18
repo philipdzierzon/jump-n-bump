@@ -22,6 +22,11 @@
 //     reaches a limit at all is `replay.test.mjs`'s, and the wording of the line above the
 //     board is `router.test.mjs`'s.
 //
+// And three things a browser gives that only a person could check before (#66): two pages
+// in one room, agreeing on it; the sound, decoded and played and recorded event by event,
+// on the mp3 path jsdom's empty `canPlayType` could never take; and the page at phone
+// width, with nothing running off the side of it.
+//
 // Run by `npm test`, which builds the client first because a browser needs the built one.
 // With `JNB_BASE_URL` set the walk runs against that origin instead of booting a server,
 // which is how CI points it at the running container. A failure leaves a trace behind.
@@ -43,12 +48,47 @@ const room_a = generate_room_id({});
 const room_b = generate_room_id({ [room_a]: true });
 const room_c = generate_room_id({ [room_a]: true, [room_b]: true });
 const room_d = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true });
+const room_e = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true, [room_d]: true });
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
 const browser = await chromium.launch();
-const context = await browser.newContext();
-await context.tracing.start({ screenshots: true, snapshots: true });
+
+// Every <audio> the page plays, in the order it played them, and whether it is still
+// playing. Sound_Player creates them and keeps them to itself -- they are never in the
+// document -- so patching the prototype is the only way to see them from out here. A match
+// builds one Sound_Player, so a match being played sounds one looping track and a match
+// that is over sounds none; two loops at once was a session left running behind the one on
+// screen, which is how it was heard (#28, #40). The ordered list is the other half: a set
+// says a sound was played at some point, and an order says which event played it (#66).
+function record_audio() {
+    window.__audio = new Set();
+    window.__sounds = [];
+    window.__sounding = () =>
+        [...window.__audio]
+            .filter((audio) => !audio.paused)
+            .map((audio) => audio.src.split("/").pop() + (audio.loop ? " (loop)" : ""));
+    const play = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+        window.__audio.add(this);
+        window.__sounds.push(this.src.split("/").pop());
+        return play.apply(this, arguments);
+    };
+}
+
+// A context is a browser of its own, storage included, which is what makes two of them two
+// players rather than two tabs of one (#66). Each one is traced, and a failure writes out
+// every trace there is: the page that broke is not always the page being walked.
+const contexts = [];
+async function make_context(name, options) {
+    const made = await browser.newContext(options);
+    await made.tracing.start({ screenshots: true, snapshots: true });
+    await made.addInitScript(record_audio);
+    contexts.push([name, made]);
+    return made;
+}
+
+const context = await make_context("flow");
 const page = await context.newPage();
 const page_errors = [];
 page.on("pageerror", (error) => page_errors.push(error.message));
@@ -78,24 +118,6 @@ await page.addInitScript(() => {
         ),
     );
 });
-// Every <audio> the page plays, and whether it is still playing. Sound_Player creates them
-// and keeps them to itself -- they are never in the document -- so patching the prototype is
-// the only way to see them from out here. A match builds one Sound_Player, so a match being
-// played sounds one looping track and a match that is over sounds none; two loops at once
-// was a session left running behind the one on screen, which is how it was heard (#28, #40).
-await page.addInitScript(() => {
-    window.__audio = new Set();
-    window.__sounding = () =>
-        [...window.__audio]
-            .filter((audio) => !audio.paused)
-            .map((audio) => audio.src.split("/").pop() + (audio.loop ? " (loop)" : ""));
-    const play = HTMLMediaElement.prototype.play;
-    HTMLMediaElement.prototype.play = function () {
-        window.__audio.add(this);
-        return play.apply(this, arguments);
-    };
-});
-
 let sockets = 0;
 page.on("websocket", (ws) => {
     const n = ++sockets;
@@ -144,6 +166,42 @@ async function on(name, root = page) {
 }
 
 const sounding = (root = page) => root.evaluate(() => window.__sounding());
+// Every sound played since the list was last forgotten, in the order it was played (#66).
+const sounds = (root = page) => root.evaluate(() => window.__sounds);
+const forget_sounds = (root = page) => root.evaluate(() => (window.__sounds.length = 0));
+// The music as the element itself. Playing a file is one thing; decoding 54.8 seconds of
+// mp3 and moving through them is the thing a recorder cannot see (#66).
+const music = (root = page) =>
+    root.evaluate(() => {
+        const audio = [...window.__audio].find((a) => /bump\.\w+$/.test(a.src));
+        // An empty object rather than nothing for a track that has never played: every
+        // caller reads a field off this, and a `TypeError` thrown out of a poll would
+        // replace the timeout that says which wait it was.
+        return audio
+            ? {
+                  paused: audio.paused,
+                  loop: audio.loop,
+                  t: audio.currentTime,
+                  seconds: audio.duration,
+              }
+            : {};
+    });
+
+// On a fake clock, waiting means winding the simulation on rather than sitting through it:
+// a sound the AI causes lands on the tick it lands on, and which tick that is belongs to
+// the seed (#66).
+// ponytail: an event no seed produces inside the ceiling fails as a timeout rather than as
+// itself. upgrade path: a seeded offline room, if the client is ever given one.
+async function wind_until(root, what, ready, ms = 1000, limit = 90) {
+    for (let i = 0; i < limit; i++) {
+        if (await ready()) return;
+        await root.clock.fastForward(ms);
+    }
+    // The last wind is worth a look of its own, or an event landing inside it is reported
+    // as never having landed at all.
+    if (await ready()) return;
+    assert.fail("timed out winding for " + what);
+}
 
 const seats = (root = page) => screen("names", root).locator("li");
 const overlay = (root = page) => root.locator("div.overlay");
@@ -166,6 +224,21 @@ const lobby_rows = (root = page) =>
                     .map((el) => el.textContent.replace(/\s+/g, " ").trim())
                     .join(" "),
             ),
+        );
+
+// What every client in a room can see of it: who is on which bunny, and whether they are
+// ready. The scheme column is left out on purpose -- it is the one cell that is local,
+// since a client is shown the keys for the seats it drives and for nobody else's (#66).
+const room_view = (root = page) =>
+    screen("room", root)
+        .locator("li")
+        .evaluateAll((rows) =>
+            rows.map((row) => [
+                row.querySelector("span.grow").textContent.trim(),
+                ...[...row.querySelectorAll("small")]
+                    .slice(0, 2)
+                    .map((el) => el.textContent.trim()),
+            ]),
         );
 
 const grid = (root) =>
@@ -875,7 +948,10 @@ async function walk() {
 // time at all; that the simulation stops on the tick the limit falls is `replay.test.mjs`'s.
 
 async function self_ending_match() {
-    const clock_page = await context.newPage();
+    // A context of its own, because `clock.install` is the *context's*: installed on a page
+    // of the walk's context it would freeze the walk's own page along with it, and leave it
+    // frozen for whatever came next.
+    const clock_page = await (await make_context("clock")).newPage();
     const errors = [];
     clock_page.on("pageerror", (error) => errors.push(error.message));
     await clock_page.clock.install();
@@ -947,13 +1023,303 @@ async function self_ending_match() {
     await clock_page.close();
 }
 
+// --- two real pages in one room (#66) --------------------------------------------------
+// jsdom bound Knockout once per module import, so one process was one page: every second
+// client in the walk above is a raw socket with no page of its own. Two browser contexts
+// are two players -- storage is per context, so the two pages never fight over one room
+// token -- and what is asserted is that they *agree*. The room is one thing, seen twice.
+//
+// Tick-by-tick agreement of the two simulations is not here. That needs a checksum the
+// client does not expose, which is #41; building a feature in order to test it is the wrong
+// order round.
+
+async function two_pages() {
+    const host = await (await make_context("host")).newPage();
+    const guest = await (await make_context("guest")).newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input").fill(room_e);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+
+    await guest.goto(origin + "/");
+    await click("Join with a room code", guest);
+    await on("join", guest);
+    await screen("join", guest).locator("input").fill(room_e);
+    await click("Continue", guest);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    // Renamed, because both couches name their own first bunny Dott and two rows reading
+    // the same thing is not an agreement worth asserting.
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+
+    await until(
+        "the guest's seat to reach the host",
+        async () => (await room_view(host))[1][0] === "Zip",
+    );
+    assert.deepEqual(
+        await room_view(host),
+        [
+            ["Dott", "not ready", "Dott"],
+            ["Zip", "not ready", "Jiffy"],
+            ["AI", "ready", "Fizz"],
+            ["AI", "ready", "Miji"],
+        ],
+        "the relay seats the second page beside the first, and AI-fills what is left (#36)",
+    );
+    assert.deepEqual(
+        await room_view(guest),
+        await room_view(host),
+        "and the two pages read one room: the same seats, the same names, the same ready flags",
+    );
+
+    // The host readies by starting and the guest has not readied at all, so what Start runs
+    // into is the countdown -- on both pages, since the deadline is the relay's (#21, #37).
+    const countdown = (root) => screen("room", root).locator('p[data-bind*="visible: countdown"]');
+    await click("Start the match", host);
+    await until("the countdown on the host", () => countdown(host).isVisible());
+    await until("the countdown on the guest", () => countdown(guest).isVisible());
+    assert.match(
+        await text(countdown(guest)),
+        /^Starting in \d+s\./,
+        "a client that never asked for the match is told it is coming anyway",
+    );
+    assert.ok(!(await screen("play", guest).isVisible()), "and nothing starts while it runs");
+
+    // Readying the last straggler collapses the countdown to an instant start, so both
+    // pages are handed the same `start` and walk themselves into the match.
+    await click("Ready", guest);
+    await on("play", host);
+    await on("play", guest);
+    assert.ok(!(await screen("room", host).isVisible()), "the lobby goes on both");
+    assert.ok(!(await screen("room", guest).isVisible()));
+    // Long enough for both simulations to have stepped a good many ticks of one match.
+    await settle();
+    await settle();
+
+    await click("Back to the lobby", host);
+    await on("room", host);
+    // The guest is not leaving: it is being told the match is over, and it walks itself back
+    // after the moment the last frame is held for (#39).
+    await on("room", guest);
+    await until("the guest's board", () => board_panel(guest).isVisible());
+
+    // A seat's label picks up "(AI)" the moment the client on it hands its bunny back, and
+    // the two pages hear that a broadcast apart -- so the labels are read without it. The
+    // counts under them are the match, and they are what has to agree.
+    const named = (rows) => rows.map((row) => row.map((cell) => cell.replace(" (AI)", "")));
+    // The host's board is anchored first, or two empty panels would agree with each other
+    // and the comparison below would pass by saying nothing at all.
+    const host_board = named(await grid(board_panel(host)));
+    assert.deepEqual(
+        host_board.slice(1).map((row) => row[0]),
+        ["Dott", "Zip", "Fizz", "Miji", "Total deaths"],
+        "a row per seat, named by the username on it, and the totals under them (#13)",
+    );
+    assert.deepEqual(
+        named(await grid(board_panel(guest))),
+        host_board,
+        "the host counted the board and it travelled with the announcement, so the two " +
+            "pages end on one board, row for row (#19, #22)",
+    );
+    for (const [who, root] of [
+        ["host", host],
+        ["guest", guest],
+    ])
+        assert.equal(
+            await text(board_panel(root).locator("p.banner")),
+            "The host ended the match.",
+            "and on one account of how it ended, the " + who + "'s included",
+        );
+    assert.deepEqual(await room_view(guest), await room_view(host), "in one lobby, still");
+    assert.deepEqual(errors, [], "and neither page threw on the way through");
+}
+
+// --- sound (#66) -----------------------------------------------------------------------
+// jsdom has no media playback, so this was always a hand check -- and worse than absent:
+// its `canPlayType` returns empty, so the only path it ever took was the ogg one. Chrome
+// takes the mp3s, which until now nothing but a person had ever played.
+//
+// On a fake clock, so a sound the AI causes is waited for by winding the simulation on
+// rather than by sitting through it. Media is not on that clock: the element really is
+// decoding the file and really is moving through it, which is the half no recorder can show.
+//
+// Still not covered, and cannot be: whether any of it is audible, or at the right volume,
+// and a real autoplay block -- headless Chrome autoplays with no flag asked for, so there
+// is no block here to reproduce one with.
+
+async function sound() {
+    const sound_page = await (await make_context("sound")).newPage();
+    const errors = [];
+    sound_page.on("pageerror", (error) => errors.push(error.message));
+    // A local room seeds itself from `Date.now() | 0`, so a pinned clock is a pinned match.
+    // It has to be pinned: whether four bunnies bump each other inside a few seconds is the
+    // seed's business, and a third of all seeds never do it at all. `1748051689473 | 0` is
+    // 1, a seed that kills ten times over the first few seconds -- and it being the same
+    // match every run is what makes a failure here a bug rather than a rerun.
+    //
+    // `install` alone leaves the clock ticking along with the real one, so it is `pauseAt`
+    // that pins the time -- and from there only a `fastForward` moves it. It is installed a
+    // minute early because `pauseAt` winds forward and refuses to wind back: installing at
+    // the target and pausing at it is a race with however long the two calls take, which on
+    // a loaded machine is not zero. There is no page yet, so the minute wound through here
+    // has no timers in it to run.
+    const SEEDED = 1748051689473;
+    await sound_page.clock.install({ time: SEEDED - 60000 });
+    await sound_page.clock.pauseAt(SEEDED);
+    await sound_page.goto(origin + "/");
+
+    await click("Play offline", sound_page);
+    await on("names", sound_page);
+    await sound_page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(sound_page).count()) === 1);
+    await click("Take the seats", sound_page);
+    await on("room", sound_page);
+    await click("Start the match", sound_page);
+    await on("play", sound_page);
+
+    await until("the music", async () => (await sounds(sound_page)).length > 0);
+    assert.equal(
+        (await sounds(sound_page))[0],
+        "bump.mp3",
+        "a match opens on its music -- and on the mp3, which is the file a browser picks " +
+            "and the one jsdom's empty `canPlayType` could never reach",
+    );
+    // Playing and decoded, which arrive separately: `duration` is NaN until the metadata
+    // lands, and a one-shot read of it is a race with the network rather than an assertion.
+    await until("the music to start", async () => {
+        const track = await music(sound_page);
+        return track.paused === false && isFinite(track.seconds);
+    });
+    const started = await music(sound_page);
+    assert.ok(started.loop, "played as a loop, because a match outlasts the track");
+    assert.ok(
+        Math.abs(started.seconds - 54.8) < 0.5,
+        "decoded rather than merely fetched: " + started.seconds + "s of it",
+    );
+    // In real milliseconds: the page's clock is fake, and the media pipeline is not on it.
+    await until(
+        "the music to move through the file",
+        async () => (await music(sound_page)).t > started.t,
+    );
+
+    // A bump, which is one bunny landing on another: the AI's to cause, and the reason the
+    // seed above is pinned rather than left to the clock.
+    await forget_sounds(sound_page);
+    await wind_until(sound_page, "a death", async () =>
+        (await sounds(sound_page)).includes("death.mp3"),
+    );
+
+    // --- and the same match with the room to itself ----------------------------------
+    // `sfx.jump()` is played for whichever bunny jumped and says nothing about which, so
+    // with three AI bunnies bouncing about, a jump sound proves only that somebody jumped
+    // -- the key held below could be doing nothing at all and it would still land. Emptying
+    // the seats leaves one bunny that can make a sound, so both halves below are about it:
+    // the jump is this client's key reaching the simulation, and the silence after it is
+    // silence rather than a lull.
+    await click("Back to the lobby", sound_page);
+    await on("room", sound_page);
+    await open_settings(sound_page);
+    await tick("AI on the empty seats", false, sound_page);
+    await click("Apply to the next match", sound_page);
+    await click("Start the match", sound_page);
+    await on("play", sound_page);
+
+    // Held down rather than pressed: no tick passes between a keydown and the keyup that
+    // follows it on a fake clock, so a press is a key the simulation never sees.
+    await forget_sounds(sound_page);
+    await sound_page.keyboard.down("ArrowUp");
+    await wind_until(
+        sound_page,
+        "a jump",
+        async () => (await sounds(sound_page)).includes("jump.mp3"),
+        500,
+        20,
+    );
+
+    // M, which is a keyup in this game. The key stays down over it, so what is being
+    // silenced is a bunny that was sounding a moment ago and goes on jumping throughout.
+    await sound_page.keyboard.press("m");
+    await until("the music to stop", async () => (await music(sound_page)).paused === true);
+    await forget_sounds(sound_page);
+    await sound_page.clock.fastForward(5000);
+    await sound_page.keyboard.up("ArrowUp");
+    assert.deepEqual(
+        await sounds(sound_page),
+        [],
+        "muted is silent, not quiet: five seconds of held jump, and not one element played",
+    );
+
+    await click("Back to the lobby", sound_page);
+    await on("room", sound_page);
+    assert.deepEqual(await sounding(sound_page), [], "a match that is over sounds nothing");
+    assert.deepEqual(errors, [], "with nothing thrown on the way");
+    await sound_page.close();
+}
+
+// --- a phone (#66) ---------------------------------------------------------------------
+// 390x844, which is a phone held upright. The walk is short on purpose: the landing screen
+// through to the lobby, where every click along the way is already a layout assertion --
+// visible, non-zero, not covered, not moving. What a click cannot say is whether the page
+// fits, so that is what is asserted here, rather than geometry numbers that would need
+// revisiting every time the design shifts. Touch controls are #45, and this is the viewport
+// they will be walked at.
+
+async function phone() {
+    const phone_context = await make_context("phone", { viewport: { width: 390, height: 844 } });
+    const phone_page = await phone_context.newPage();
+    const errors = [];
+    phone_page.on("pageerror", (error) => errors.push(error.message));
+    const fits = async (where) =>
+        assert.ok(
+            await phone_page.evaluate(
+                () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+            ),
+            "nothing runs off the side of " + where,
+        );
+
+    await phone_page.goto(origin + "/");
+    await fits("the landing screen");
+
+    await click("Play offline", phone_page);
+    await on("names", phone_page);
+    await phone_page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(phone_page).count()) === 1);
+    await fits("the couch");
+
+    await click("Take the seats", phone_page);
+    await on("room", phone_page);
+    await fits("the lobby");
+    await open_settings(phone_page);
+    await fits("the lobby with the room settings open");
+
+    assert.deepEqual(errors, [], "and the page threw nothing at phone width");
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
     await walk();
     await self_ending_match();
+    await two_pages();
+    await sound();
+    await phone();
     console.log(
-        "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it",
+        "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
+            "two pages agree on one room, the mp3s really play, and the page fits a phone",
     );
 } catch (error) {
     // Where the page actually was, which a locator timeout never says: "not visible" reads
@@ -980,9 +1346,15 @@ try {
     for (const frame of frames.slice(-25)) console.error("  " + frame);
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
     // nothing to read.
-    await context.tracing.stop({ path: "trace-flow.zip" });
+    // Every context, not just the one being walked: the failure may be a second page's.
+    for (const [name, made] of contexts)
+        await made.tracing.stop({ path: "trace-" + name + ".zip" }).catch(() => {});
     if (page_errors.length) console.error("page errors:", page_errors);
-    console.error("trace written to trace-flow.zip -- npx playwright show-trace trace-flow.zip");
+    console.error(
+        "traces written: " +
+            contexts.map(([name]) => "trace-" + name + ".zip").join(", ") +
+            " -- npx playwright show-trace <file>",
+    );
     throw error;
 } finally {
     await browser.close();
