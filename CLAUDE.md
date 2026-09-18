@@ -47,9 +47,12 @@ fired on the wrong event is caught. Chrome takes the **mp3s**, which jsdom's emp
 `canPlayType` meant nothing had ever played. **Phone width**: a short second walk at 390x844,
 landing through to the lobby, asserting the page never runs off the side.
 
-A local room seeds itself from `Date.now() | 0`, so the sound walk pins the clock and plays
-one known match: whether four bunnies bump each other inside a few seconds is the seed's
-business, and a third of all seeds never do it at all.
+A local room seeds itself from `Date.now() | 0`, so the sound walk pins the clock and plays a
+known match: whether four bunnies bump each other inside a few seconds is the seed's
+business, and a third of all seeds never do it at all. It then plays a second one with the
+empty seats left empty, because `sfx.jump()` says a bunny jumped and not which -- alone in
+the room, the only thing that can make a sound is the key this client is holding down, and
+the silence after `M` is silence rather than a lull.
 
 What the suite still does not check is what listening and looking check: whether the sound is
 audible or at the right volume, whether the sprites look right, and a real autoplay block --

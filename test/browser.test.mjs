@@ -174,14 +174,17 @@ const forget_sounds = (root = page) => root.evaluate(() => (window.__sounds.leng
 const music = (root = page) =>
     root.evaluate(() => {
         const audio = [...window.__audio].find((a) => /bump\.\w+$/.test(a.src));
-        return (
-            audio && {
-                paused: audio.paused,
-                loop: audio.loop,
-                t: audio.currentTime,
-                seconds: audio.duration,
-            }
-        );
+        // An empty object rather than nothing for a track that has never played: every
+        // caller reads a field off this, and a `TypeError` thrown out of a poll would
+        // replace the timeout that says which wait it was.
+        return audio
+            ? {
+                  paused: audio.paused,
+                  loop: audio.loop,
+                  t: audio.currentTime,
+                  seconds: audio.duration,
+              }
+            : {};
     });
 
 // On a fake clock, waiting means winding the simulation on rather than sitting through it:
@@ -194,6 +197,9 @@ async function wind_until(root, what, ready, ms = 1000, limit = 90) {
         if (await ready()) return;
         await root.clock.fastForward(ms);
     }
+    // The last wind is worth a look of its own, or an event landing inside it is reported
+    // as never having landed at all.
+    if (await ready()) return;
     assert.fail("timed out winding for " + what);
 }
 
@@ -942,7 +948,10 @@ async function walk() {
 // time at all; that the simulation stops on the tick the limit falls is `replay.test.mjs`'s.
 
 async function self_ending_match() {
-    const clock_page = await context.newPage();
+    // A context of its own, because `clock.install` is the *context's*: installed on a page
+    // of the walk's context it would freeze the walk's own page along with it, and leave it
+    // frozen for whatever came next.
+    const clock_page = await (await make_context("clock")).newPage();
     const errors = [];
     clock_page.on("pageerror", (error) => errors.push(error.message));
     await clock_page.clock.install();
@@ -1108,9 +1117,21 @@ async function two_pages() {
     await on("room", guest);
     await until("the guest's board", () => board_panel(guest).isVisible());
 
+    // A seat's label picks up "(AI)" the moment the client on it hands its bunny back, and
+    // the two pages hear that a broadcast apart -- so the labels are read without it. The
+    // counts under them are the match, and they are what has to agree.
+    const named = (rows) => rows.map((row) => row.map((cell) => cell.replace(" (AI)", "")));
+    // The host's board is anchored first, or two empty panels would agree with each other
+    // and the comparison below would pass by saying nothing at all.
+    const host_board = named(await grid(board_panel(host)));
     assert.deepEqual(
-        await grid(board_panel(guest)),
-        await grid(board_panel(host)),
+        host_board.slice(1).map((row) => row[0]),
+        ["Dott", "Zip", "Fizz", "Miji", "Total deaths"],
+        "a row per seat, named by the username on it, and the totals under them (#13)",
+    );
+    assert.deepEqual(
+        named(await grid(board_panel(guest))),
+        host_board,
         "the host counted the board and it travelled with the announcement, so the two " +
             "pages end on one board, row for row (#19, #22)",
     );
@@ -1141,7 +1162,7 @@ async function two_pages() {
 // is no block here to reproduce one with.
 
 async function sound() {
-    const sound_page = await context.newPage();
+    const sound_page = await (await make_context("sound")).newPage();
     const errors = [];
     sound_page.on("pageerror", (error) => errors.push(error.message));
     // A local room seeds itself from `Date.now() | 0`, so a pinned clock is a pinned match.
@@ -1195,6 +1216,28 @@ async function sound() {
         async () => (await music(sound_page)).t > started.t,
     );
 
+    // A bump, which is one bunny landing on another: the AI's to cause, and the reason the
+    // seed above is pinned rather than left to the clock.
+    await forget_sounds(sound_page);
+    await wind_until(sound_page, "a death", async () =>
+        (await sounds(sound_page)).includes("death.mp3"),
+    );
+
+    // --- and the same match with the room to itself ----------------------------------
+    // `sfx.jump()` is played for whichever bunny jumped and says nothing about which, so
+    // with three AI bunnies bouncing about, a jump sound proves only that somebody jumped
+    // -- the key held below could be doing nothing at all and it would still land. Emptying
+    // the seats leaves one bunny that can make a sound, so both halves below are about it:
+    // the jump is this client's key reaching the simulation, and the silence after it is
+    // silence rather than a lull.
+    await click("Back to the lobby", sound_page);
+    await on("room", sound_page);
+    await open_settings(sound_page);
+    await tick("AI on the empty seats", false, sound_page);
+    await click("Apply to the next match", sound_page);
+    await click("Start the match", sound_page);
+    await on("play", sound_page);
+
     // Held down rather than pressed: no tick passes between a keydown and the keyup that
     // follows it on a fake clock, so a press is a key the simulation never sees.
     await forget_sounds(sound_page);
@@ -1206,27 +1249,18 @@ async function sound() {
         500,
         20,
     );
-    await sound_page.keyboard.up("ArrowUp");
 
-    // A bump, which is one bunny landing on another: the AI's to cause, and the reason the
-    // seed above is pinned rather than left to the clock.
-    await forget_sounds(sound_page);
-    await wind_until(sound_page, "a death", async () =>
-        (await sounds(sound_page)).includes("death.mp3"),
-    );
-
-    // M, which is a keyup in this game.
+    // M, which is a keyup in this game. The key stays down over it, so what is being
+    // silenced is a bunny that was sounding a moment ago and goes on jumping throughout.
     await sound_page.keyboard.press("m");
     await until("the music to stop", async () => (await music(sound_page)).paused === true);
     await forget_sounds(sound_page);
-    await sound_page.keyboard.down("ArrowUp");
     await sound_page.clock.fastForward(5000);
     await sound_page.keyboard.up("ArrowUp");
     assert.deepEqual(
         await sounds(sound_page),
         [],
-        "muted is silent, not quiet: five seconds of held jump and whatever the AI did in " +
-            "them, and not one element was played",
+        "muted is silent, not quiet: five seconds of held jump, and not one element played",
     );
 
     await click("Back to the lobby", sound_page);
