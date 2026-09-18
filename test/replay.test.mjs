@@ -232,6 +232,46 @@ assert.deepEqual(
     "a frame arriving after the tick it was stamped for is counted, with its slack",
 );
 
+// The pump keeps up with the room, not with its own clock (#42). A client resumed into a
+// match already running replays to the tick the room was on when the relay built the
+// payload, and decoding that state, building the object graph and replaying the gap all
+// take time the room spends playing -- so it lands behind. Pacing the ticks that follow off
+// a 60 Hz budget of its own never closes that gap, because the room runs at 60 Hz too: the
+// client stays exactly as far behind as the rebuild took, and every frame it sends is
+// stamped for a tick the room has already passed and dropped by the relay. Its bunny then
+// stops answering the keyboard, which is what this is here to stop (#40, #70).
+const behind_transport = (ahead) => ({
+    deliver: null,
+    receive(fn) {
+        this.deliver = fn;
+    },
+    send(msg) {
+        if (msg.type !== "start") return;
+        this.deliver({
+            type: "start",
+            t: 0,
+            d: 2,
+            seed: msg.seed,
+            settings: msg.settings,
+            held: msg.held,
+            drivers: ["local", "ai", "ai", "ai"],
+        });
+        // What the room played while this client was being built: frames stamped for ticks
+        // it has not reached, which are ticks whose input has already arrived.
+        for (let t = 0; t <= ahead; t++) this.deliver({ type: "input", t, seats: {} });
+    },
+});
+const behind = start(9, {}, [0], behind_transport(40));
+assert.equal(behind.room.gap(), 38, "the room is 38 ticks past the tick this client landed on");
+behind.game.start();
+assert.equal(
+    behind.room.now(),
+    38,
+    "and the pump steps the backlog out before it paces itself, rather than one tick a frame",
+);
+assert.equal(behind.room.gap(), 0, "so the next frame it sends is for a tick nobody has passed");
+behind.game.pause();
+
 let ended = null;
 local.room.on_match_end = (msg) => (ended = msg);
 local.room.end_match("host", [[7]]);

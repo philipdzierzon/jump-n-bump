@@ -47,6 +47,17 @@ fired on the wrong event is caught. Chrome takes the **mp3s**, which jsdom's emp
 `canPlayType` meant nothing had ever played. **Phone width**: a short second walk at 390x844,
 landing through to the lobby, asserting the page never runs off the side.
 
+A fourth walk, added in #42, **drops the socket under a live match**. Every `WebSocket` the
+page opens is kept by an init script, so closing the last one is a real close the relay sees
+as a real disconnect -- which is the point, since what is under test is the seat being held
+and handed back. The page freezes under a `Connection lost` overlay, stays on `#play`, comes
+back on the first retry a second later and is walked into the match it froze in. It then
+walks to the lobby and presses **Take seat** on a bunny the AI is driving, which grows the
+couch past the one participant it named at the names screen and hands it the match again.
+The relay's own half of that -- the released frame it substitutes on its deadline, the seat
+it gives the AI after thirty missing ticks, the frames it drops for being late or forged,
+and a reservation that is exclusive to one token until it expires -- is `relay.test.mjs`'s.
+
 A local room seeds itself from `Date.now() | 0`, so the sound walk pins the clock and plays a
 known match: whether four bunnies bump each other inside a few seconds is the seed's
 business, and a third of all seeds never do it at all. It then plays a second one with the

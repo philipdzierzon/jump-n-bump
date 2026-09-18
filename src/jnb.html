@@ -125,7 +125,7 @@
 
     <div data-bind="visible: screen() === 'play'" class="canvas-container">
         <canvas id="screen" width="1200" height="768"></canvas>
-        <div data-bind="visible: reconnecting" class="reconnecting">Reconnecting&hellip;</div>
+        <div data-bind="visible: connection_text, text: connection_text" class="reconnecting"></div>
         <div data-bind="visible: board_up" class="overlay kiosk wide">
             <div class="eyebrow">scores</div>
             <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->
@@ -194,6 +194,8 @@
     <div data-bind="visible: screen() === 'room'" class="kiosk wide">
         <div class="eyebrow">lobby</div>
         <h2 data-bind="text: room_id() || 'offline'"></h2>
+        <p data-bind="visible: disconnected" class="banner alarm"><b>Connection lost. Reconnecting&hellip;</b><br />
+            Your seats are held for you while this tries.</p>
         <div data-bind="visible: room_id">
             <p class="muted">Share this link:</p>
             <p class="link" data-bind="text: join_link"></p>
@@ -209,10 +211,12 @@
                 <small data-bind="text: ready ? 'ready' : 'not ready', visible: $parent.room_id"></small>
                 <small data-bind="text: bunny"></small>
                 <small data-bind="text: scheme, visible: scheme"></small>
+                <button class="sm" data-bind="visible: takeable, click: $parent.take_seat, text: take_label"></button>
             </li>
         </ul>
         <p class="muted">Every seat in the room. The ones nobody takes are played by the AI.</p>
-        <p class="muted" data-bind="visible: match_running">A match is in progress; you are in for the next one.</p>
+        <p class="muted" data-bind="visible: match_running() &amp;&amp; !seated()">A match is in progress; you are in for the next one.</p>
+        <button class="pri" data-bind="visible: can_rejoin, click: rejoin_match">Rejoin the match</button>
         <button class="sm" data-bind="visible: room_id() &amp;&amp; seated(), click: toggle_ready, text: ready() ? 'Not ready' : 'Ready'"></button>
         <p class="muted" data-bind="visible: countdown">Starting in <span data-bind="text: countdown"></span>s. Anyone not ready by then gives up their seats.</p>
         <button class="pri" data-bind="visible: is_host, click: start_match, enable: !loading_level() &amp;&amp; !countdown()">Start the match</button>

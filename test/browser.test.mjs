@@ -49,6 +49,13 @@ const room_b = generate_room_id({ [room_a]: true });
 const room_c = generate_room_id({ [room_a]: true, [room_b]: true });
 const room_d = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true });
 const room_e = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true, [room_d]: true });
+const room_f = generate_room_id({
+    [room_a]: true,
+    [room_b]: true,
+    [room_c]: true,
+    [room_d]: true,
+    [room_e]: true,
+});
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -1110,6 +1117,56 @@ async function two_pages() {
     await settle();
     await settle();
 
+    // --- leaving the match and taking an AI seat back into it (#42) --------------------
+    // One host, one client, two AI bunnies, and the client walks out and sits back down --
+    // first on the seat it already held, then on one of the bunnies nobody was driving. Two
+    // real pages, because a second simulation on its own 60 Hz clock is what makes the seats
+    // change hands at all: a seatless socket never moves the room's tick on.
+    //
+    // What is asserted is that the relay hands each seat back to the client, which it does
+    // on the `resume` and before the client has even landed. That a client which lands
+    // *behind* then closes the gap rather than playing every frame late is not asserted
+    // here: making that happen needs the page throttled, and how far behind an 8x-throttled
+    // rebuild lands is the runner's business rather than the code's -- a slow enough machine
+    // really does lose the seat to the AI, which is what #42 asks for. `replay.test.mjs`
+    // proves the loop instead, by landing a client 38 ticks behind and counting.
+    const watcher_saw = [];
+    const watcher = relay_client({ type: "join", id: room_e }, watcher_saw);
+    await until("the watcher in the room", () => watcher_saw.some((msg) => msg.type === "joined"));
+
+    // Out of the match and straight back into the seat it already holds. A client that
+    // walks out keeps its seats and hands its bunnies to the AI, and this is what it says
+    // to take them back -- leaving the room and following the link again was the only way
+    // in before, which is no way at all (#42).
+    await click("Back to the lobby", guest);
+    await on("room", guest);
+    await click("Rejoin the match", guest);
+    await on("play", guest);
+    await until("the seat to come back off the AI", () => {
+        const room = watcher_saw.filter((msg) => msg.type === "room").pop();
+        return room && room.labels[1] === "Zip";
+    });
+
+    // And out again, onto a bunny the AI is driving: the seat grows this client past the one
+    // participant it named at the names screen, and it is handed the match with both seats
+    // in it.
+    await click("Back to the lobby", guest);
+    await on("room", guest);
+    await click("Take seat (A D W)", guest);
+    // Up to a couple of seconds: the relay can only hand back a match it has a state for,
+    // and the host snapshots every two (#40).
+    await on("play", guest);
+    await until("both seats to be the client's", () => {
+        const room = watcher_saw.filter((msg) => msg.type === "room").pop();
+        return room && room.labels[1] === "Zip" && room.labels[2] === "Jiffy";
+    });
+    assert.equal(
+        await guest.evaluate(() => window.location.hash),
+        "#play",
+        "and it is still in the match it took the seat to get back into",
+    );
+    watcher.close();
+
     await click("Back to the lobby", host);
     await on("room", host);
     // The guest is not leaving: it is being told the match is over, and it walks itself back
@@ -1126,7 +1183,7 @@ async function two_pages() {
     const host_board = named(await grid(board_panel(host)));
     assert.deepEqual(
         host_board.slice(1).map((row) => row[0]),
-        ["Dott", "Zip", "Fizz", "Miji", "Total deaths"],
+        ["Dott", "Zip", "Jiffy", "Miji", "Total deaths"],
         "a row per seat, named by the username on it, and the totals under them (#13)",
     );
     assert.deepEqual(
@@ -1309,12 +1366,122 @@ async function phone() {
     assert.deepEqual(errors, [], "and the page threw nothing at phone width");
 }
 
+// --- the socket dies under a live match (#42) ------------------------------------------
+// Its own context, because the drop is done by closing the page's real socket: every
+// `WebSocket` the page opens is kept, and the last one is the transport the room is on. That
+// is a real close, seen by the relay as a real disconnect -- which is the whole point, since
+// what is under test is the seat being held and handed back.
+
+async function reconnect() {
+    const context = await make_context("reconnect");
+    await context.addInitScript(() => {
+        const Native = window.WebSocket;
+        window.__sockets = [];
+        window.WebSocket = function (...args) {
+            const socket = new Native(...args);
+            window.__sockets.push(socket);
+            return socket;
+        };
+        window.WebSocket.prototype = Native.prototype;
+        Object.assign(window.WebSocket, Native);
+    });
+    const dropped = await context.newPage();
+    const errors = [];
+    dropped.on("pageerror", (error) => errors.push(error.message));
+
+    // Somebody else hosts, so the match this page drops out of goes on being played: a host
+    // that leaves takes the match with it, and there would be nothing to come back to.
+    const host_saw = [];
+    const host = relay_client({ type: "create", id: room_f }, host_saw);
+    await until("the room", () => host_saw.some((msg) => msg.type === "joined"));
+    host.send({ type: "seats", names: ["Host"] });
+    await until("the host to sit down", () =>
+        host_saw.some((msg) => msg.type === "room" && msg.host),
+    );
+
+    await dropped.goto(origin + "/");
+    await click("Join with a room code", dropped);
+    await on("join", dropped);
+    await screen("join", dropped).locator("input").fill(room_f);
+    await click("Continue", dropped);
+    await on("names", dropped);
+    await dropped.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(dropped).count()) === 1);
+    await click("Take the seats", dropped);
+    await on("room", dropped);
+    await click("Ready", dropped);
+    host.send({ type: "start", seed: 4321, settings: {}, held: [] });
+    await on("play", dropped);
+    // The state the relay hands back on the way in, which is what a client rejoining a match
+    // in progress is given (#40): without one there is a seat to reclaim but no match to
+    // play from. The relay never decodes a body, so an empty simulation of the right size is
+    // as good as a played one.
+    host.send({
+        type: "snapshot",
+        t: 0,
+        matrix: new Array(16).fill(0),
+        body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
+    });
+
+    await dropped.evaluate(() => window.__sockets[window.__sockets.length - 1].close());
+    await until("the page to say the connection went", async () =>
+        (await text(dropped.locator(".reconnecting"))).includes("Connection lost"),
+    );
+    assert.equal(
+        await dropped.evaluate(() => window.location.hash),
+        "#play",
+        "the match freezes where it was rather than walking the player out of the room (#42)",
+    );
+
+    // The first retry is a second away, and the seat was reserved for this page's token for
+    // the whole of it: it comes back to the same seat, in the same match, by asking to be
+    // let into it exactly as a mid-match joiner does (#40).
+    await until("the page to get back in", async () => {
+        const said = await text(dropped.locator(".reconnecting"));
+        return !said.includes("Connection lost");
+    });
+    await on("play", dropped);
+    assert.deepEqual(
+        host_saw.filter((msg) => msg.type === "room").pop().seats,
+        ["Host", "Dott", null, null],
+        "and the room never lost the seat it was holding for it",
+    );
+    // Take seat, from the page rather than from the protocol: this one walks back to the
+    // lobby with the match still running, and sits down on a bunny the AI is driving. That
+    // grows the couch past the one participant it named at the names screen, on a control
+    // scheme nobody here is using -- and hands it the match back with both seats in it,
+    // because the seat it just took is the AI's until the relay says otherwise (#42).
+    await click("Back to the lobby", dropped);
+    await on("room", dropped);
+    await click("Take seat (A D W)", dropped);
+    await until("the room to seat it twice", () => {
+        const room = host_saw.filter((msg) => msg.type === "room").pop();
+        return room && room.seats[2] === "Jiffy";
+    });
+    await on("play", dropped);
+    await click("Back to the lobby", dropped);
+    await on("room", dropped);
+    assert.deepEqual(
+        await room_view(dropped),
+        [
+            ["Host", "ready", "Dott"],
+            ["Dott", "not ready", "Jiffy"],
+            ["Jiffy", "not ready", "Fizz"],
+            ["AI", "ready", "Miji"],
+        ],
+        "one client, two seats, named after the first two bunnies nobody in the room was",
+    );
+    assert.deepEqual(errors, [], "and the page threw nothing while it was away");
+    host.close();
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
     await walk();
     await self_ending_match();
     await two_pages();
+    await reconnect();
     await sound();
     await phone();
     console.log(

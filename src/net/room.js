@@ -37,12 +37,12 @@ export function Room(transport, read_input) {
     // in the payload: fetching a level and unpacking a state takes time the room spends
     // playing (#40).
     var newest = 0;
-    // What a late frame cost this client, counted per match (#70). The substitution below
-    // *is* the divergence: the relay rings a frame on to everybody whenever it arrives, but
-    // each client steps the tick it was stamped for at its own moment, so a frame that
-    // crosses late is used by whoever had not reached that tick yet and substituted for by
-    // whoever had (#17, #42). Nothing counted it, so a desync was an inference; this makes
-    // it a number. `margin` is the ticks of slack a frame landed with -- d when it crossed
+    // What a late frame cost this client, counted per match (#70). A frame that crossed
+    // late used to *be* the divergence -- it was used by whoever had not reached its tick
+    // yet and substituted for by whoever had -- until the relay took the substitution over
+    // and started dropping the frames that miss its deadline, so the room reads one input
+    // stream whatever the wire does (#42). What is left here is the cost: how often this
+    // client was the one being covered for. `margin` is the ticks of slack a frame landed with -- d when it crossed
     // instantly, zero in the nick of time, negative for a tick already stepped -- so the
     // worst of them starts at d, the best any frame can do, and falls from there. `late_by`
     // is how the late ones were distributed, which is the number a d has to cover and the
@@ -256,6 +256,13 @@ export function Room(transport, read_input) {
         // A seat somebody drives but no frame arrived for is all keys released, never the
         // AI -- a missing frame is a missing frame (#6). The first d ticks of every match
         // are exactly this, since the earliest frame anyone stamps is for tick d.
+        //
+        // It is a floor and not the substitution: the relay rings a released frame to the
+        // whole room on its own deadline, so every client uses the same input for a tick
+        // whose frame never came, and a client that put its own in would be playing a
+        // different match from that tick on (#42 corrects #6). What is left here is the
+        // ticks before anybody has stamped a frame at all, and a relay frame that has not
+        // landed yet -- which is the same value, so it cannot manufacture a divergence.
         drivers.forEach(function (driver, seat) {
             if (driver !== "local" || frames[seat]) return;
             frames[seat] = RELEASED;
