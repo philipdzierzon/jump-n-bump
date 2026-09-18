@@ -56,24 +56,22 @@ const CHECKSUM_WINDOW = 8;
 // Read per repair rather than once, so a test can shorten it without a second knob -- the
 // same deployment-level dial `reserve_ms` and `countdown_ms` are, and never room config.
 const repair_cooldown_ms = () => Number(process.env.REPAIR_COOLDOWN_MS || 2000);
-// How long repairs are remembered, and how many inside it stop being a hiccup. A few
-// seconds of one costs one or two; a client needing five inside two minutes is not catching
-// up, and the relay stops trying rather than repairing it forever (#41).
-//
-// The window is wide because it is the slow client, not the fast one, that decides how far
-// apart repairs land: a client at a sixth of the tick rate reaches a 30-tick checksum every
-// three seconds, so five repairs span fifteen -- and one slower still spans more. Too narrow
-// a window expires them between repairs and the count never arrives.
-// ponytail: a client whose checksums are further apart than a fifth of the window is
-// repaired indefinitely -- at two minutes that is one every 24s, which is a client at a
-// bunny a second and beyond helping anyway. upgrade path: a total cap for the match if one
-// ever turns up.
+// How long a client has to go without needing a repair before the ones it has had stop
+// counting. A quiet period rather than a sliding window, because the allowance is for one
+// run of repairs and not for the match: a client that has been fine for half a minute came
+// back from the run that led to it, and whatever it does next is a new episode with its own
+// five rather than the tail of one it has already recovered from. Five with no let-up
+// between them is a client that is not coming back (#41).
 //
 // The premise #41 was written on -- that the relay substitutes a missing frame, so every
 // client plays the same input stream and a desync can only be a determinism bug -- is not
 // true yet: #17's substitution is #42's to build. Until it is, a client whose frames arrive
 // later than `d` diverges continuously, and no number of repairs fixes that (#68).
-const repair_window_ms = () => Number(process.env.REPAIR_WINDOW_MS || 120000);
+//
+// ponytail: a client that needs a repair just less often than this is repaired for as long
+// as it cares to play, teleporting every half minute for everybody else. upgrade path: a
+// cap on repairs for the whole match if one ever turns up in a log.
+const repair_reset_ms = () => Number(process.env.REPAIR_RESET_MS || 30000);
 const MAX_REPAIRS = 5;
 
 const rooms = {};
@@ -591,15 +589,17 @@ function desync(client, t) {
     // snapshot exactly as a mid-match joiner's ask is (#40).
     if (!room.snapshot) return void (client.waiting = true);
     const now = Date.now();
-    const repairs = (client.repairs || []).filter((at) => at > now - repair_window_ms());
-    client.repairs = repairs;
+    const since = now - (client.repaired_at || 0);
+    // Quiet for long enough: the run this client was in is over, and the repair that ended
+    // it worked. What is starting now gets the whole allowance.
+    if (since > repair_reset_ms()) client.repairs = 0;
     // Still the same unrepaired desync, seen again 30 ticks later: the last repair has not
     // had a fresh snapshot to have worked from yet, so this is not a second one.
-    if (repairs.length && now - repairs[repairs.length - 1] < repair_cooldown_ms()) return;
+    else if (since < repair_cooldown_ms()) return;
     room.desyncs++;
-    if (repairs.length >= MAX_REPAIRS) {
+    if (client.repairs >= MAX_REPAIRS) {
         console.log(
-            "room %s desync %d at tick %d, dropped after %d repairs",
+            "room %s desync %d at tick %d, dropped after %d repairs with no let-up",
             room.id,
             room.desyncs,
             t,
@@ -612,10 +612,11 @@ function desync(client, t) {
         room.id,
         room.desyncs,
         t,
-        repairs.length + 1,
+        client.repairs + 1,
         MAX_REPAIRS,
     );
-    repairs.push(now);
+    client.repairs++;
+    client.repaired_at = now;
     client.waiting = true;
     resume(client);
 }
@@ -667,7 +668,8 @@ function begin(room, msg) {
         // A client dropped out of the last match plays this one: being out of step is the
         // match's state, never the room's (#41).
         other.dropped = false;
-        other.repairs = [];
+        other.repairs = 0;
+        other.repaired_at = 0;
     }
     // The driver table rides on `start` rather than as four changes stamped for tick 0: a
     // client steps tick 0 the instant `start` lands, and the browser delivers each frame

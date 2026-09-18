@@ -797,7 +797,11 @@ assert.equal(
 // already slow the replay for nothing. Shortened here, because the knob exists so a test
 // need not wait the real interval out.
 process.env.REPAIR_COOLDOWN_MS = "60";
+// And the allowance is for one run of repairs, not for the match: a client that goes this
+// long without needing one came back from the run that led to it.
+process.env.REPAIR_RESET_MS = "400";
 const cooled = () => new Promise((resolve) => setTimeout(resolve, 90));
+const recovered = () => new Promise((resolve) => setTimeout(resolve, 500));
 
 // The host's first, then the client's: the mismatch is the desync, and the answer is the
 // same payload a mid-match joiner gets. The frame is what puts a tick on the room, which is
@@ -906,6 +910,50 @@ assert.equal(relabelled.labels[1], "Guest", "and the board stops saying it was o
 
 chk_host.socket.close();
 chk_guest.socket.close();
+
+// Five is five in a row, not five in a match. A client that recovers -- repaired, then
+// quiet -- starts the next run with the whole allowance, so an evening of occasional
+// hiccups never adds up to being dropped out of a match (#41).
+const reset_host = connect({ type: "create", id: "RSETX" });
+await lobby(reset_host);
+await reset_host.seats(["Chief"]);
+reset_host.socket.send({ type: "start", seed: 9, settings: {}, held: [] });
+await new Promise((resolve) => setTimeout(resolve, 100));
+reset_host.socket.send({ type: "snapshot", t: 0, matrix, body: "RESET-BODY" });
+const reset_guest = connect({ type: "join", id: "RSETX" });
+await lobby(reset_guest);
+await reset_guest.seats(["Hiccup"]);
+const reset_saw = [];
+reset_guest.socket.receive((msg) => reset_saw.push(msg));
+
+// A run of three, which is most of the allowance.
+for (const t of [30, 60, 90]) {
+    await cooled();
+    reset_saw.length = 0;
+    reset_host.socket.send({ type: "checksum", t, h: 111 });
+    reset_guest.socket.send({ type: "checksum", t, h: 222 });
+    assert.ok(await awaited(reset_saw, "start"), "repaired, three of five");
+}
+
+// Then it comes back, and stays back for longer than the reset.
+await recovered();
+
+// Five more, which is the whole allowance over again: without the reset the second of these
+// would have been the sixth in the match and dropped it.
+for (const t of [300, 330, 360, 390, 420]) {
+    await cooled();
+    reset_saw.length = 0;
+    reset_host.socket.send({ type: "checksum", t, h: 111 });
+    reset_guest.socket.send({ type: "checksum", t, h: 222 });
+    assert.ok(await awaited(reset_saw, "start"), "a run after a quiet stretch starts at one");
+    assert.equal(
+        reset_saw.find((msg) => msg.type === "match_end"),
+        undefined,
+        "and is repaired rather than dropped",
+    );
+}
+reset_host.socket.close();
+reset_guest.socket.close();
 
 // A mismatch the relay has nothing to answer with yet: the host's first snapshot is two
 // seconds into a match and the first hashes half a second in, so four of them can land
