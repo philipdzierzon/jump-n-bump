@@ -49,6 +49,13 @@ await context.tracing.start({ screenshots: true, snapshots: true });
 const page = await context.newPage();
 const page_errors = [];
 page.on("pageerror", (error) => page_errors.push(error.message));
+// What the relay told this page, kept for a failure to print. A flow driven by a socket is
+// unreadable from the DOM alone: the screen it ended on says what happened, and this says
+// which message did it.
+const frames = [];
+page.on("websocket", (ws) =>
+    ws.on("framereceived", ({ payload }) => frames.push(String(payload).slice(0, 220))),
+);
 
 // --- helpers ---------------------------------------------------------------------------
 
@@ -724,6 +731,8 @@ try {
         }))
         .catch(() => null);
     console.error("page was at:", JSON.stringify(where));
+    console.error("last frames the page was sent:");
+    for (const frame of frames.slice(-12)) console.error("  " + frame);
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
     // nothing to read.
     await context.tracing.stop({ path: "trace-flow.zip" });
