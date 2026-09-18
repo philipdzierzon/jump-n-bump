@@ -57,14 +57,23 @@ const CHECKSUM_WINDOW = 8;
 // same deployment-level dial `reserve_ms` and `countdown_ms` are, and never room config.
 const repair_cooldown_ms = () => Number(process.env.REPAIR_COOLDOWN_MS || 2000);
 // How long repairs are remembered, and how many inside it stop being a hiccup. A few
-// seconds of one costs one or two; a client needing five over thirty seconds is not
-// catching up, and the relay stops trying rather than repairing it forever (#41).
+// seconds of one costs one or two; a client needing five inside two minutes is not catching
+// up, and the relay stops trying rather than repairing it forever (#41).
+//
+// The window is wide because it is the slow client, not the fast one, that decides how far
+// apart repairs land: a client at a sixth of the tick rate reaches a 30-tick checksum every
+// three seconds, so five repairs span fifteen -- and one slower still spans more. Too narrow
+// a window expires them between repairs and the count never arrives.
+// ponytail: a client whose checksums are further apart than a fifth of the window is
+// repaired indefinitely -- at two minutes that is one every 24s, which is a client at a
+// bunny a second and beyond helping anyway. upgrade path: a total cap for the match if one
+// ever turns up.
 //
 // The premise #41 was written on -- that the relay substitutes a missing frame, so every
 // client plays the same input stream and a desync can only be a determinism bug -- is not
 // true yet: #17's substitution is #42's to build. Until it is, a client whose frames arrive
 // later than `d` diverges continuously, and no number of repairs fixes that (#68).
-const repair_window_ms = () => Number(process.env.REPAIR_WINDOW_MS || 30000);
+const repair_window_ms = () => Number(process.env.REPAIR_WINDOW_MS || 120000);
 const MAX_REPAIRS = 5;
 
 const rooms = {};
