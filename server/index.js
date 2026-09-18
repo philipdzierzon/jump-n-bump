@@ -49,13 +49,23 @@ const MAX_SNAPSHOT = 64 * 1024;
 // client more than four seconds behind the host is never checked. upgrade path: widen the
 // window if that is ever a client worth checking rather than one already unplayable (#6).
 const CHECKSUM_WINDOW = 8;
-// Repairs a room gets in one match before the relay gives up on the client that earned the
-// fourth. A desync is a determinism bug, not drift: it never heals on its own, so a room
-// that keeps needing repairs is not one more resync away from being fine (#41).
-// ponytail: the budget is the room's, not each client's, so three clients disagreeing once
-// each closes the fourth on its first. upgrade path: count per client if a room ever loses
-// somebody who had been in sync all match.
-const MAX_DESYNCS = 3;
+// A repair is the host's whole state plus every frame since it, replayed synchronously the
+// moment it lands. Sending a second one before the host has snapshotted again repairs from
+// the same state twice and costs the client the replay for nothing -- and a client that is
+// behind because it is slow least of all, which is the spiral this interval exists to stop.
+// Read per repair rather than once, so a test can shorten it without a second knob -- the
+// same deployment-level dial `reserve_ms` and `countdown_ms` are, and never room config.
+const repair_cooldown_ms = () => Number(process.env.REPAIR_COOLDOWN_MS || 2000);
+// How long repairs are remembered, and how many inside it stop being a hiccup. A few
+// seconds of one costs one or two; a client needing five over thirty seconds is not
+// catching up, and the relay stops trying rather than repairing it forever (#41).
+//
+// The premise #41 was written on -- that the relay substitutes a missing frame, so every
+// client plays the same input stream and a desync can only be a determinism bug -- is not
+// true yet: #17's substitution is #42's to build. Until it is, a client whose frames arrive
+// later than `d` diverges continuously, and no number of repairs fixes that (#68).
+const repair_window_ms = () => Number(process.env.REPAIR_WINDOW_MS || 30000);
+const MAX_REPAIRS = 5;
 
 const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
@@ -204,21 +214,26 @@ function all_ready(room) {
     return true;
 }
 
-// What the board calls each seat. The three states are all the room's own knowledge: a
-// seat held by a connected client is that participant, a seat whose holder is not connected
-// is played by the AI, and a seat nobody holds any more keeps the name of whoever last did.
-// A seat nobody ever took has no name here at all, and the client falls back to the bunny's
-// (#13, #39).
+// What the board calls each seat. Every state is the room's own knowledge: a seat held by a
+// connected client is that participant, a seat whose holder was dropped out of this match
+// says why, a seat whose holder is not connected is played by the AI, and a seat nobody
+// holds any more keeps the name of whoever last did. A seat nobody ever took has no name
+// here at all, and the client falls back to the bunny's (#13, #39, #41).
 function seat_labels(room) {
     const online = online_seats(room);
+    const dropped = new Set();
+    for (const client of room.clients)
+        if (client.dropped) for (const seat of client.seats) dropped.add(seat);
     return room.last_names.map((name, seat) =>
         !name
             ? null
             : !room.seats[seat]
               ? name + " (left)"
-              : online.has(seat) && room.drivers[seat] !== "ai"
-                ? name
-                : name + " (AI)",
+              : dropped.has(seat)
+                ? name + " (out of sync)"
+                : online.has(seat) && room.drivers[seat] !== "ai"
+                  ? name
+                  : name + " (AI)",
     );
 }
 
@@ -479,6 +494,9 @@ function keep_snapshot(client, msg) {
 function resume(client) {
     const room = client.room;
     if (!room.started || !room.snapshot) return;
+    // Out of this match for good: a client the relay gave up repairing must not be handed
+    // the match back by an ask still in flight, or by the next snapshot answering it (#41).
+    if (client.dropped) return void (client.waiting = false);
     client.waiting = false;
     // Every hash this client stamped for a tick at or before now belongs to the state being
     // replaced, and some of it is still in flight: counting it would spend a second of the
@@ -530,7 +548,7 @@ function keep_checksum(client, msg) {
     if (!room.started) return;
     if (!Number.isInteger(msg.t) || !Number.isInteger(msg.h)) return;
     if (!client.host) {
-        if (msg.t <= (client.resync_t || 0)) return;
+        if (client.dropped || msg.t <= (client.resync_t || 0)) return;
         const reference = room.checksums.find((one) => one.t === msg.t);
         // Held one deep rather than queued: a client has one tick in flight at a time, and
         // a hash it sent for a tick the host has not reached yet is the newer question.
@@ -555,24 +573,59 @@ function keep_checksum(client, msg) {
 // a desync correction and a lag correction look alike from the inside.
 function desync(client, t) {
     const room = client.room;
-    // A hash held for a host hash that arrived after its sender went is nobody's disagreement
-    // any more, and must not spend one of the room's three repairs.
-    if (!room.clients.has(client)) return;
+    // A hash held for a host hash that arrived after its sender went is nobody's
+    // disagreement any more, and must not spend a repair.
+    if (!room.clients.has(client) || client.dropped) return;
     // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
-    // and the first hashes are half a second in, so the budget would be spent three times
-    // over before a single repair could be sent. Marked instead, and answered by that first
+    // and the first hashes are half a second in, so the whole allowance would be spent
+    // before a single repair could be sent. Marked instead, and answered by that first
     // snapshot exactly as a mid-match joiner's ask is (#40).
     if (!room.snapshot) return void (client.waiting = true);
+    const now = Date.now();
+    const repairs = (client.repairs || []).filter((at) => at > now - repair_window_ms());
+    client.repairs = repairs;
+    // Still the same unrepaired desync, seen again 30 ticks later: the last repair has not
+    // had a fresh snapshot to have worked from yet, so this is not a second one.
+    if (repairs.length && now - repairs[repairs.length - 1] < repair_cooldown_ms()) return;
     room.desyncs++;
-    console.log("room %s desync %d at tick %d", room.id, room.desyncs, t);
-    if (room.desyncs > MAX_DESYNCS) {
-        // A server-observed failure, not a kick: three repairs did not take, so this client
-        // is told why its socket is closing rather than left playing a match of its own.
-        send(client, { type: "error", code: "DESYNC" });
-        return client.close();
+    if (repairs.length >= MAX_REPAIRS) {
+        console.log(
+            "room %s desync %d at tick %d, dropped after %d repairs",
+            room.id,
+            room.desyncs,
+            t,
+            MAX_REPAIRS,
+        );
+        return drop_from_match(client);
     }
+    console.log(
+        "room %s desync %d at tick %d, repair %d of %d",
+        room.id,
+        room.desyncs,
+        t,
+        repairs.length + 1,
+        MAX_REPAIRS,
+    );
+    repairs.push(now);
     client.waiting = true;
     resume(client);
+}
+
+// Out of the match, not out of the room (#41). The seat stays this client's, the board says
+// why nobody is driving it, and the next match in this room is one it plays like any other
+// -- which is the difference between a client the relay cannot carry and one it threw away.
+//
+// It is the message the host's own walk back to the lobby sends, to one client instead of
+// the room: the client already ends its match on it, hands its seats to the AI on the way
+// out and lands in the lobby with the board, so there is no second way out of a match (#22,
+// #39).
+function drop_from_match(client) {
+    const room = client.room;
+    client.dropped = true;
+    client.waiting = false;
+    send(client, { type: "match_end", reason: "desync", matrix: last_board(room) });
+    // The seat reads `(out of sync)` from here on, which is a change to the room.
+    broadcast_state(room);
 }
 
 // The match itself begins here whichever way the host got to it -- every client ready, or
@@ -602,6 +655,10 @@ function begin(room, msg) {
         other.waiting = false;
         other.resync_t = 0;
         other.pending = null;
+        // A client dropped out of the last match plays this one: being out of step is the
+        // match's state, never the room's (#41).
+        other.dropped = false;
+        other.repairs = [];
     }
     // The driver table rides on `start` rather than as four changes stamped for tick 0: a
     // client steps tick 0 the instant `start` lands, and the browser delivers each frame

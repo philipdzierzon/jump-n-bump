@@ -55,6 +55,9 @@
         /* A staged change names the diff and what it did to everyone's ready, because the
            cleared checkboxes on their own read as a bug (#10, #38). */
         .banner { padding: 10px 12px; font-size: 13px; background: #252019; border-left: 3px solid var(--amber); border-radius: 3px; }
+        /* The one banner that is not news but a fault: this client was dropped out of the
+           match for falling out of step with the room (#41). */
+        .banner.alarm { color: #e4572e; border-left-color: #e4572e; }
         details summary { cursor: pointer; font-size: 13px; }
         /* `disabled` on the fieldset is what greys the whole panel out for everyone who is
            not the host: the browser disables every control inside it, so there is nothing
@@ -246,7 +249,7 @@
         <p class="err" data-bind="text: error"></p>
         <div data-bind="visible: board">
             <div class="eyebrow">last match</div>
-            <p class="banner" data-bind="text: result_text, visible: result_text"></p>
+            <p class="banner" data-bind="text: result_text, visible: result_text, css: { alarm: board_reason() === 'desync' }"></p>
             <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->
         </div>
         <button class="sm" data-bind="click: go_landing">Leave</button>

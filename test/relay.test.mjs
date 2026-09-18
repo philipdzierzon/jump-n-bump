@@ -792,6 +792,13 @@ assert.equal(
     "and a hash for a tick the window has aged out has nothing to disagree with",
 );
 
+// A repair is rate-limited rather than counted: the host snapshots every two seconds, so a
+// second one before then repairs from the same state twice and costs a client that is
+// already slow the replay for nothing. Shortened here, because the knob exists so a test
+// need not wait the real interval out.
+process.env.REPAIR_COOLDOWN_MS = "60";
+const cooled = () => new Promise((resolve) => setTimeout(resolve, 90));
+
 // The host's first, then the client's: the mismatch is the desync, and the answer is the
 // same payload a mid-match joiner gets. The frame is what puts a tick on the room, which is
 // the tick the repair below is measured from.
@@ -802,9 +809,20 @@ const repaired = await awaited(chk_saw, "start");
 assert.equal(repaired.snapshot, "REFERENCE-BODY", "a mismatch is answered with the host's state");
 assert.equal(repaired.t, 0, "on the tick the host took it, which is the resync path exactly");
 
+// Thirty ticks later and still wrong: the repair has had no fresh snapshot to have worked
+// from, so this is the same unrepaired desync rather than a second one to be spent.
+chk_saw.length = 0;
+chk_host.socket.send({ type: "checksum", t: 610, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 610, h: 222 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a mismatch inside the cooldown is not a second repair",
+);
+
 // A hash the client had already sent when the repair was decided on: it belongs to the
-// state being replaced, and counting it would spend a second of the room's three repairs on
-// the desync already being repaired.
+// state being replaced, and counting it would spend a repair on the desync being repaired.
 chk_saw.length = 0;
 chk_guest.socket.send({ type: "checksum", t: 450, h: 222 });
 chk_host.socket.send({ type: "checksum", t: 450, h: 111 });
@@ -815,36 +833,77 @@ assert.equal(
     "a hash stamped before the repair is not a second desync",
 );
 
-// The client's first this time. Clients run at their own pace, so either order happens; a
-// hash with no host hash yet is held and compared when one arrives.
-chk_saw.length = 0;
-chk_guest.socket.send({ type: "checksum", t: 630, h: 222 });
-chk_host.socket.send({ type: "checksum", t: 630, h: 111 });
-assert.ok(
-    await awaited(chk_saw, "start"),
-    "a hash that arrives before the host's is still compared",
-);
+// Repairs two to five, each a cooldown apart. The client's hash first on one of them, since
+// clients run at their own pace and either order has to reach the same comparison.
+for (const t of [630, 660, 690, 720]) {
+    await cooled();
+    chk_saw.length = 0;
+    if (t === 660) {
+        chk_guest.socket.send({ type: "checksum", t, h: 222 });
+        chk_host.socket.send({ type: "checksum", t, h: 111 });
+    } else {
+        chk_host.socket.send({ type: "checksum", t, h: 111 });
+        chk_guest.socket.send({ type: "checksum", t, h: 222 });
+    }
+    assert.ok(await awaited(chk_saw, "start"), "repaired again rather than given up on");
+}
 
+// The sixth is a client that is not hiccupping. It leaves the match -- not the room: the
+// seat stays its own, the board says why nobody is driving it, and the next match in this
+// room is one it plays like any other.
+await cooled();
 chk_saw.length = 0;
-chk_host.socket.send({ type: "checksum", t: 660, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 660, h: 222 });
-assert.ok(await awaited(chk_saw, "start"), "three repairs in a match, and the room counts them");
-
-// The fourth is a client the room cannot carry: a desync never heals on its own, so three
-// repairs that did not take is a server-observed failure rather than a kick.
-chk_saw.length = 0;
-chk_host.socket.send({ type: "checksum", t: 690, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 690, h: 222 });
-assert.equal(
-    (await chk_guest.until((msg) => msg.type === "error")).code,
-    "DESYNC",
-    "the fourth desync in a match closes the connection instead of repairing it",
-);
+// Drained, so the room update awaited below is the one the drop broadcast and not an older
+// one still in the queue from the seat being taken.
+chk_guest.events.length = 0;
+chk_host.socket.send({ type: "checksum", t: 750, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 750, h: 222 });
+const dropped = await awaited(chk_saw, "match_end");
+assert.equal(dropped.reason, "desync", "the match ends for that client, and says why");
 assert.equal(
     chk_saw.find((msg) => msg.type === "start"),
     undefined,
-    "with no fourth payload behind it",
+    "with no sixth repair behind it",
 );
+const after_drop = await chk_guest.until((msg) => msg.type === "room");
+assert.deepEqual(after_drop.held, [1], "the seat is still the dropped client's to play next match");
+assert.equal(
+    after_drop.labels[1],
+    "Guest (out of sync)",
+    "and the board says why nobody is driving it, beside `(left)` and `(AI)` (#13)",
+);
+
+// Dropped is dropped for the rest of this match: an ask still in flight, or another hash,
+// must not hand the match back.
+chk_saw.length = 0;
+chk_guest.socket.send({ type: "resync" });
+await cooled();
+chk_host.socket.send({ type: "checksum", t: 780, h: 111 });
+chk_guest.socket.send({ type: "checksum", t: 780, h: 222 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    chk_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a client the relay gave up repairing is not let back into the match it was dropped from",
+);
+
+// Out of the match, never out of the room: the next match in it is one the dropped client
+// plays like any other, with its seat and its name back (#41).
+chk_saw.length = 0;
+chk_guest.events.length = 0;
+// Readied after the match ends, not before: walking back to the lobby resets the room's
+// ready flags, which is what the countdown is there to collect again (#37).
+chk_host.socket.send({ type: "match_end", reason: "lobby", matrix: null });
+await new Promise((resolve) => setTimeout(resolve, 100));
+chk_guest.socket.send({ type: "ready", ready: true });
+await new Promise((resolve) => setTimeout(resolve, 50));
+chk_host.socket.send({ type: "start", seed: 8, settings: {}, held: [] });
+const next_match = await awaited(chk_saw, "start");
+assert.equal(next_match.t, 0, "the next match begins at tick zero for it like everybody else");
+assert.deepEqual(next_match.held, [1], "on the seat it kept");
+const relabelled = await chk_guest.until((msg) => msg.type === "room" && msg.labels[1] === "Guest");
+assert.equal(relabelled.labels[1], "Guest", "and the board stops saying it was out of step");
+
 chk_host.socket.close();
 chk_guest.socket.close();
 
