@@ -597,6 +597,180 @@ walk_in.socket.close();
 second.socket.close();
 chief.socket.close();
 
+// --- snapshot, mid-match join and resync (#40) ---------------------------------------
+//
+// The relay stores the host's snapshot without decoding it -- the tick and the 16-entry
+// board are plaintext beside the body for exactly that reason -- and rings the frames since
+// it, so the payload that joins a match in progress is that pair plus the settings block.
+const snap_host = connect({ type: "create", id: "SNAPX" });
+await lobby(snap_host);
+await snap_host.seats(["Chief"]);
+const snap_saw = [];
+snap_host.socket.receive((msg) => snap_saw.push(msg));
+snap_host.socket.send({ type: "start", seed: 99, settings: {}, held: [] });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const snap_start = snap_saw.find((msg) => msg.type === "start");
+assert.ok(snap_start, "the host starts the match it will be the reference state for");
+
+const matrix = new Array(16).fill(0);
+// A frame the snapshot already accounts for, then the snapshot, then two it does not: the
+// ring is the gap between that state and now, so the first one is dropped by the second.
+snap_host.socket.send({ type: "input", t: 1, seats: { 0: pressed } });
+snap_host.socket.send({ type: "snapshot", t: 3, matrix, body: "SNAPSHOT-BODY" });
+snap_host.socket.send({ type: "input", t: 5, seats: { 0: pressed } });
+snap_host.socket.send({ type: "input", t: 6, seats: { 0: pressed } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+
+const late_joiner = connect({ type: "join", id: "SNAPX" });
+assert.equal((await lobby(late_joiner)).started, true, "the room says a match is running");
+const late_saw = [];
+late_joiner.socket.receive((msg) => late_saw.push(msg));
+// Seats taken while a match runs: the seat was the AI's when it began, so the room is told
+// on an agreed tick that somebody is driving it now (#7).
+assert.deepEqual((await late_joiner.seats(["Late"])).held, [1], "a seat is free mid-match");
+// A non-host's snapshot is not the room's reference state and is dropped: there is no
+// stagger, and a desynced client must not seed the next joiner (#19).
+late_joiner.socket.send({ type: "snapshot", t: 99, matrix, body: "NOT-THE-HOSTS" });
+late_joiner.socket.send({ type: "resync" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const payload = late_saw.find((msg) => msg.type === "start");
+assert.ok(payload, "a client that asks is handed the match in progress");
+assert.equal(payload.t, 3, "on the tick the host's snapshot was taken");
+assert.equal(payload.snapshot, "SNAPSHOT-BODY", "with the host's body, opaque and unread");
+assert.deepEqual(
+    payload.inputs.map((frame) => frame.t),
+    [5, 6],
+    "and the frames since it, the ones it already accounts for pruned",
+);
+assert.deepEqual(payload.settings, default_config(), "the settings block rides with it (#22)");
+assert.deepEqual(payload.held, [1], "the seats the joiner holds");
+// The table the relay keeps is updated the moment a change is stamped, because that is
+// what the board reads -- but the tick it takes effect on is later than the one this
+// client lands on. So the payload undoes it and hands the change down instead: a joiner
+// that drove a seat the rest of the room still has the AI on is a desync (#7).
+assert.deepEqual(
+    payload.drivers,
+    ["local", "ai", "ai", "ai"],
+    "the driver table as it will be on the tick this client lands on",
+);
+assert.deepEqual(
+    payload.changes,
+    [{ t: 7 + 2 * payload.d, seat: 1, driver: "local" }],
+    "with the changes stamped for a later tick, on the tick every other client applies them",
+);
+assert.ok(payload.changes[0].t > payload.until, "which is a tick the replayed gap does not reach");
+assert.equal(
+    payload.until,
+    7 - payload.d - 1,
+    "replayed up to the tick the fastest client is about to step, not the one it stamps for",
+);
+// A change stamped inside the gap, rather than after the tick the replay ends on: the
+// replay starts at the snapshot, so it has to be handed down as a change too. Baking it
+// into the table would apply it from the snapshot's tick on, which is 30-odd ticks before
+// every other client applied it.
+for (let t = 10; t <= 40; t++) snap_host.socket.send({ type: "input", t, seats: { 0: pressed } });
+const third = connect({ type: "join", id: "SNAPX" });
+await lobby(third);
+const third_saw = [];
+third.socket.receive((msg) => third_saw.push(msg));
+third.socket.send({ type: "resync" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+const later = third_saw.find((msg) => msg.type === "start");
+assert.ok(later.until > later.changes[0].t, "the stamped tick is inside the gap now");
+assert.deepEqual(
+    later.drivers,
+    ["local", "ai", "ai", "ai"],
+    "and the table is still the one the snapshot's tick had",
+);
+assert.deepEqual(
+    later.changes,
+    [{ t: 7 + 2 * later.d, seat: 1, driver: "local" }],
+    "with the change applied where it belongs, part-way through the replay",
+);
+third.socket.close();
+snap_host.socket.close();
+late_joiner.socket.close();
+
+// An ask the relay has nothing to answer with yet is remembered, not dropped: the first
+// two seconds of a match are exactly when a seat is taken, and nobody asks twice (#40).
+const early_host = connect({ type: "create", id: "SNPZX" });
+await lobby(early_host);
+await early_host.seats(["Chief"]);
+early_host.socket.send({ type: "start", seed: 7, settings: {}, held: [] });
+const early_guest = connect({ type: "join", id: "SNPZX" });
+await lobby(early_guest);
+const early_saw = [];
+early_guest.socket.receive((msg) => early_saw.push(msg));
+await early_guest.seats(["Early"]);
+early_guest.socket.send({ type: "resync" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    early_saw.find((msg) => msg.type === "start"),
+    undefined,
+    "a room whose host has not snapshotted yet has nothing to hand over",
+);
+const early_matrix = new Array(16).fill(0);
+early_matrix[1] = 2;
+early_host.socket.send({ type: "snapshot", t: 0, matrix: early_matrix, body: "FIRST-BODY" });
+// Answered by the snapshot rather than by a reply to anything, so this waits on the
+// message and gives up rather than hanging a suite that has no test runner under it.
+function awaited(seen, type) {
+    return new Promise((resolve, reject) => {
+        const since = Date.now();
+        const wait = setInterval(() => {
+            const msg = seen.find((one) => one.type === type);
+            if (msg) {
+                clearInterval(wait);
+                resolve(msg);
+            } else if (Date.now() - since > 2000) {
+                clearInterval(wait);
+                reject(new Error("no " + type + " ever arrived"));
+            }
+        }, 10);
+    });
+}
+const answered = await awaited(early_saw, "start");
+assert.equal(answered.snapshot, "FIRST-BODY", "so the host's first snapshot answers the ask");
+
+// The relay runs no simulation, so a host that leaves without announcing an end used to
+// take the board with it. The matrix rides plaintext on the snapshot, which is what lets
+// the relay hand one over anyway (#13, #19). The seat goes first, because a room with a
+// seat-holder left in it migrates the host instead of ending the match (#14).
+early_guest.socket.send({ type: "leave" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+early_host.socket.close();
+const orphaned = await awaited(early_saw, "match_end");
+assert.equal(orphaned.reason, "host_left");
+assert.deepEqual(
+    orphaned.matrix,
+    [
+        [0, 2, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+    ],
+    "the host's last board, four by four, from the 16 entries beside the body it never read",
+);
+early_guest.socket.close();
+
+// Two builds of the simulation in one lockstep room is two different matches: the same seed
+// drawn through different code diverges, and no amount of agreeing on input fixes it. The
+// relay cannot tell one build from another by watching a room play, so it is told on the way
+// in and refuses the mismatch (#40).
+const built = connect({ type: "create", id: "BLDXZ", build: "one" });
+await lobby(built);
+const stale = connect({ type: "join", id: "BLDXZ", build: "two" });
+assert.equal((await lobby(stale)).code, "OUT_OF_DATE", "a client on another build is refused");
+const current = connect({ type: "join", id: "BLDXZ", build: "one" });
+assert.equal((await lobby(current)).type, "joined", "and one on the room's build is not");
+// The headless suites and `smoke.mjs` are clients too, and this guards against a tab left
+// open across a rebuild rather than against a client that lies about what it is (#29).
+const unversioned = connect({ type: "join", id: "BLDXZ" });
+assert.equal((await lobby(unversioned)).type, "joined", "as is one that declares no build");
+built.socket.close();
+current.socket.close();
+unversioned.socket.close();
+
 // A level name is resolved by fetching `levels/<name>/<name>.dat` beside the page, so the
 // list is only an allowlist while every name in it is really there (#38).
 for (const level of LEVELS.slice(1))

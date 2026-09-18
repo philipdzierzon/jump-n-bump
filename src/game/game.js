@@ -144,7 +144,13 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
         // and every way into the match calls this. A match that reached its limit is over
         // for good -- restarting it would step past the tick the room ended on (#39).
         if (playing || ended) return;
-        next_time = timeGetTime() + 1000;
+        // One tick, not one second. A second of nothing before the first tick is the port's
+        // own -- the C original paces on its timer interrupt and has no such pause -- and it
+        // cost every client the same 60 ticks at match start, so it never showed. A client
+        // resumed into a match already running is the one it shows on: it lands on the tick
+        // the room is on and then hands the room a one-second head start, which is 60 ticks
+        // of a delay budget worth two (#40).
+        next_time = timeGetTime() + 1000 / 60;
         playing = true;
         pump();
     };

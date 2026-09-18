@@ -7,11 +7,22 @@ import { Sound_Player } from "../resource_loading/sound_player.js";
 import { Sfx } from "../game/sfx.js";
 import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
+import {
+    bump_matrix,
+    decode_snapshot,
+    encode_snapshot,
+    pack_snapshot,
+    unpack_snapshot,
+} from "../game/snapshot.js";
 import { make_rnd } from "../game/rnd.js";
-import { Room } from "../net/room.js";
+import { MAX_CATCH_UP, Room } from "../net/room.js";
 import ko from "knockout";
 
 function noop() {}
+
+// How often the host packs its simulation and hands it to the relay, which caches the
+// latest one for the next client to join the match (#40).
+var SNAPSHOT_MS = 2000;
 
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
@@ -22,7 +33,9 @@ function Enum(obj) {
 export var Game_State = Enum({ Not_Started: 0, Playing: 1, Board: 2 });
 
 // `config` is this client's half of the match: the seed and the settings it proposes if it
-// is the host, and nothing at all if it is not. What the match actually runs on arrives on
+// is the host, and nothing at all if it is not. `config.host` is read live rather than held
+// -- host migrates, and the reference state the room resyncs from migrates with it (#40,
+// #14). What the match actually runs on arrives on
 // `start`, from the relay -- settings are never read from a client's own environment, since
 // a differing no_gore desyncs the RNG stream on the first kill (#5). `muted` is not in it:
 // it is this client's preference and nobody else's business.
@@ -48,6 +61,12 @@ export function Game_Session(get_level, config, muted, transport) {
     var game = null;
     var sfx = null;
     var sound_player = null;
+    // The two halves of the simulation a snapshot is packed from and unpacked into: the
+    // objects and the RNG's own state. The players are the `player` array, which is the
+    // module's rather than this session's (#5).
+    var objects = null;
+    var rnd = null;
+    var snapshot_timer = null;
     var start_when_ready = false;
     var board_timer = null;
     var clock_timer = null;
@@ -63,6 +82,9 @@ export function Game_Session(get_level, config, muted, transport) {
     // bytes and no canvas pixels (#39).
     this.clock = ko.observable(null);
     this.on_match_start = null;
+    // Whether a `start` has landed on this session: it is playing a match, or building
+    // one, rather than sitting in the lobby waiting for the next (#40).
+    this.in_match = false;
     this.on_match_end = null;
     // A limit the simulation reached. Every client reaches it on the same tick and stops
     // there; only the host announces it, which is what the others leave the match on (#22).
@@ -91,10 +113,26 @@ export function Game_Session(get_level, config, muted, transport) {
     // simulation is built out of what the relay handed down rather than out of `config`
     // (#12, #34).
     room.on_start = function () {
+        // Set before the level is fetched, not after the simulation is built: a client
+        // that has been handed this match is in it from the moment `start` lands, and
+        // asking to be let into a match it is already playing would replace the state it
+        // is playing with the host's, for nothing (#40).
+        self.in_match = true;
         // A host can start another match while this client is playing one: the outgoing
         // pump loop would go on stepping the `player` array the new one replaces, and its
         // music would go on playing.
         if (game) game.pause();
+        // Which it really did: `build` makes a Sound_Player per match, so the outgoing
+        // one's looping music has to be stopped here rather than on the way to the lobby.
+        // Leaving the match muted the old one by accident; a resync never passes through
+        // the lobby at all, and doubled the music instead (#28, #40).
+        if (sound_player) sound_player.set_muted(true);
+        // With it goes its snapshot timer: the tick counter belongs to the match that is
+        // starting and the simulation still in these variables belongs to the last one, so
+        // a snapshot taken between here and `build` would be the old match's state under
+        // the new match's tick. `play` arms it again (#40).
+        clearInterval(snapshot_timer);
+        snapshot_timer = null;
         var mine = ++starting;
         // The level is the room's, named in the settings the relay handed down, and a
         // `.dat` has to be fetched and decoded before anything can be built on it (#38).
@@ -106,7 +144,13 @@ export function Game_Session(get_level, config, muted, transport) {
     };
 
     function build(level) {
-        var rnd = make_rnd(room.seed);
+        // Two ways a match already running cannot be joined: a body that does not decode,
+        // and a gap too big to replay. Either one means this client would be playing a
+        // state it knows is wrong, so it stays in the lobby and plays the next match
+        // instead of half-joining this one (#40).
+        var resumed = room.resume ? decode_snapshot(room.resume) : null;
+        if (room.resume && (!resumed || room.gap() > MAX_CATCH_UP)) return;
+        rnd = make_rnd(room.seed);
         var settings = room.settings;
 
         var canvas = document.getElementById("screen");
@@ -117,7 +161,7 @@ export function Game_Session(get_level, config, muted, transport) {
         };
 
         var renderer = new Renderer(canvas, img, level);
-        var objects = new Objects(rnd);
+        objects = new Objects(rnd);
         var ai = new AI();
         var animation = new Animation(renderer, img, objects, rnd);
         sound_player = new Sound_Player(muted);
@@ -128,6 +172,16 @@ export function Game_Session(get_level, config, muted, transport) {
             show_clock();
             if (self.on_limit) self.on_limit(reason);
         };
+
+        // The host's state, and every input frame the relay rang since it, replace the
+        // tick-0 simulation just built, and the gap between the two is replayed at once.
+        if (resumed) {
+            unpack_snapshot(resumed, rnd, objects);
+            // Hundreds of ticks of history must not replay as a burst of deaths and
+            // splashes, so the catch-up is silent and `play` is what un-mutes it (#28).
+            sound_player.set_muted(true);
+            room.catch_up(game.step);
+        }
 
         // Every client in the room holds a session from the moment it reaches the lobby,
         // so the host's `start` never lands on a client that is not listening yet (#35).
@@ -145,6 +199,22 @@ export function Game_Session(get_level, config, muted, transport) {
     // inside it (#38). A networked room's relay ignores what is proposed here anyway.
     this.propose = function () {
         room.start({ seed: config.seed, settings: config.settings(), held: config.held });
+    };
+
+    // The host's simulation, packed and handed to the relay every two seconds: it is the
+    // reference state by definition, so this is read live and a migrated host starts
+    // sending them the moment it holds the room (#40, #19). A local room has nobody to
+    // join it and nothing to resync, so it sends none (#16).
+    function push_snapshot() {
+        if (!game || config.local || !config.host()) return;
+        var t = room.now();
+        room.send_snapshot(t, bump_matrix(), encode_snapshot(pack_snapshot(rnd, objects, t)));
+    }
+
+    // Asks the relay for the match in progress: the host's snapshot, the frames since it
+    // and the settings block, which arrive as a `start` like any other (#40).
+    this.resume = function () {
+        room.request_resume();
     };
 
     function snapshot() {
@@ -182,6 +252,10 @@ export function Game_Session(get_level, config, muted, transport) {
         // can see on a clock that shows seconds. upgrade path: a per-frame callback out of
         // the pump loop if anything ever needs the tick itself.
         if (!clock_timer) clock_timer = setInterval(show_clock, 250);
+        // On a wall clock, so it lands between ticks: the pump steps its whole catch-up
+        // batch synchronously, and a state packed halfway through one is a state no tick
+        // ever had.
+        if (!snapshot_timer) snapshot_timer = setInterval(push_snapshot, SNAPSHOT_MS);
     }
 
     // The board, over a simulation that carries on scoring behind it. Its refresh is on a
@@ -210,6 +284,8 @@ export function Game_Session(get_level, config, muted, transport) {
         forget_board();
         clearInterval(clock_timer);
         clock_timer = null;
+        clearInterval(snapshot_timer);
+        snapshot_timer = null;
         self.clock(null);
         // Counted here, because the lobby reads this board the moment the match is left and
         // the overlay's own refresh is the only other thing that ever fills it: leaving a

@@ -15,6 +15,12 @@ import { default_ban_map } from "../src/asset_data/default_levelmap.js";
 import { Renderer } from "../src/interaction/renderer.js";
 import { Room } from "../src/net/room.js";
 import { Loopback_Transport } from "../src/net/loopback_transport.js";
+import {
+    decode_snapshot,
+    encode_snapshot,
+    pack_snapshot,
+    unpack_snapshot,
+} from "../src/game/snapshot.js";
 
 const TICKS = 3600; // one minute at 60 Hz -- long enough that bunnies collide
 
@@ -97,7 +103,7 @@ function start(seed, settings, held, transport = new Loopback_Transport()) {
         true,
         rnd,
     );
-    return { game, keyboard, objects, room };
+    return { game, keyboard, objects, room, rnd };
 }
 
 // Three seats on the keyboard and a fourth left to the AI, so the replay covers both
@@ -301,6 +307,105 @@ to_a_minute.game.step();
 assert.deepEqual(time_ends, ["time"], "the last tick of the time limit ends the match");
 assert.equal(to_a_minute.game.ticks_left(), 0);
 
+// --- snapshot, mid-match join and resync (#40) ---------------------------------------
+//
+// The claim under test is the whole of the feature: a client handed the host's packed
+// state and the input frames since it reaches, tick for tick, the state the host is in.
+// Last, because building a Game replaces the `player` array.
+
+// The relay's input ring, kept here by the transport under the host: every frame it fanned
+// out is what a joiner replays the gap with.
+const ring = [];
+const host_transport = new Loopback_Transport();
+const to_relay = host_transport.send;
+host_transport.send = function (msg) {
+    if (msg.type === "input") ring.push({ t: msg.t, seats: msg.seats });
+    to_relay(msg);
+};
+
+const HALF = 150;
+const join_log = input_log(7);
+const host = start(2468, { no_gore: false }, [0, 1], host_transport);
+let body = null;
+for (let tick = 0; tick < HALF * 2; tick++) {
+    // Packed between two ticks, which is the only moment the state is a state any tick had
+    // -- the pump steps a whole catch-up batch without yielding.
+    if (tick === HALF)
+        body = encode_snapshot(pack_snapshot(host.rnd, host.objects, host.room.now()));
+    [0, 1].forEach((scheme) => {
+        join_log[tick][scheme].forEach((down, key) => {
+            const event = { keyCode: CONTROL_SCHEMES[scheme][key] };
+            down ? host.keyboard.onKeyDown(event) : host.keyboard.onKeyUp(event);
+        });
+    });
+    host.game.step();
+}
+const host_state = checksum(host.objects.objects);
+assert.equal(host.room.now(), HALF * 2, "the host played the match through");
+
+assert.equal(
+    decode_snapshot(body).length,
+    pack_snapshot(host.rnd, host.objects, 0).length,
+    "a snapshot decodes to the same fixed-size record it was packed from",
+);
+assert.equal(decode_snapshot("not a snapshot"), null, "and a body that is not one is refused");
+
+// The joiner's relay: it answers `start` with the mid-match payload -- the host's snapshot,
+// the frames since it, and the tick to replay up to -- instead of a match at tick 0.
+const join_transport = {
+    sent: [],
+    receive(fn) {
+        this.to_client = fn;
+    },
+    send(msg) {
+        this.sent.push(msg);
+        if (msg.type !== "start") return;
+        this.to_client({
+            type: "start",
+            t: HALF,
+            until: HALF * 2,
+            d: 0,
+            seed: 2468,
+            // The settings block travels with it: a joiner with the wrong no_gore desyncs
+            // on the first kill (#22, #5).
+            settings: { no_gore: false },
+            held: [],
+            drivers: ["local", "local", "ai", "ai"],
+            snapshot: body,
+            inputs: ring.filter((frame) => frame.t >= HALF),
+        });
+    },
+};
+
+const joiner = start(2468, {}, [], join_transport);
+assert.equal(joiner.room.now(), HALF, "a joined match starts on the snapshot's tick, not zero");
+unpack_snapshot(decode_snapshot(body), joiner.rnd, joiner.objects);
+joiner.room.catch_up(joiner.game.step);
+assert.equal(joiner.room.now(), HALF * 2, "and is replayed up to the tick the room is on");
+assert.equal(
+    checksum(joiner.objects.objects),
+    host_state,
+    "a client resumed from the host's snapshot and the input ring is in the host's state",
+);
+assert.deepEqual(
+    join_transport.sent.filter((msg) => msg.type === "input"),
+    [],
+    "and sends no frames of its own for ticks that are already history",
+);
+
+// Where the replay ends is the newest tick anybody has stamped a frame for, less the delay,
+// and not only the number the relay put in the payload: fetching a level and unpacking a
+// state takes time the room spends playing, so a client that lands where the room was when
+// it asked is behind by all of it -- and a client behind by more than the delay has its
+// frames arrive for ticks everybody else has stepped past (#40, #6).
+join_transport.to_client({ type: "input", t: HALF * 2 + 30, seats: {} });
+joiner.room.catch_up(joiner.game.step);
+assert.equal(
+    joiner.room.now(),
+    HALF * 2 + 30,
+    "a replay lands on the tick the room is on now, not the one it was on when it answered",
+);
+
 console.log(
-    "OK replay is deterministic and headless, schemes bind in join order, and the leftovers ring is bounded",
+    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, and a snapshot plus the input gap lands in the host's state",
 );

@@ -2,6 +2,7 @@
 // https://nodejs.org/api/path.html
 const path = require("path");
 
+const webpack = require("webpack");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const ExtractTextPlugin = require("extract-text-webpack-plugin");
 
@@ -20,6 +21,13 @@ module.exports = {
     },
     // Tell webpack to use html plugin
     plugins: [
+        // The build this bundle is, stamped in at build time. A lockstep room cannot be
+        // played by two different builds of the simulation, and a tab left open across a
+        // rebuild goes on running the old one: nothing re-fetches a page nobody reloaded,
+        // so the relay is told which build each client is and refuses the mismatch.
+        new webpack.DefinePlugin({
+            "process.env.JNB_BUILD": JSON.stringify(String(Date.now())),
+        }),
         new HtmlWebpackPlugin({
             template: path.join(__dirname, "src/jnb.html"),
         }),

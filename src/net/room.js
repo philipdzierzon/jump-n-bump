@@ -1,5 +1,12 @@
 var RELEASED = { left: false, right: false, up: false };
 
+// The most ticks a `start` may ask this client to replay. A minute of them costs a few
+// hundred milliseconds; more than that is a host that stopped snapshotting rather than a
+// gap worth closing, and a client that replayed it would land minutes behind the room and
+// consume every frame late (#51). A gap this size is a match not joined, not one joined
+// short: the caller checks `gap()` and stays in the lobby (#40).
+export var MAX_CATCH_UP = 3600;
+
 // The client's half of a room (#33). It owns the tick counter, the input-delay buffer and
 // the driver table, and it never knows whether the transport under it is a WebSocket or
 // the in-tab loopback -- offline play is a room of one, not a second code path (#16).
@@ -14,6 +21,17 @@ export function Room(transport, read_input) {
     var drivers = [];
     var input_at = {}; // tick -> { seat: frame }
     var drivers_at = {}; // tick -> [ driver message ]
+    // Replaying the gap between a snapshot and now, rather than playing the match: no
+    // frame of this client's own is read, scheduled or sent for a tick that is already
+    // history, or it would overwrite the frames the gap is made of (#40).
+    var catching_up = false;
+    var catch_up_to = 0;
+    // The newest tick anybody has stamped a frame for. A client stamps d ahead of the tick
+    // it is on, so this less d is the tick the room's fastest client is on -- which is where
+    // a client replaying a gap has to land, and it is fresher than the number the relay put
+    // in the payload: fetching a level and unpacking a state takes time the room spends
+    // playing (#40).
+    var newest = 0;
 
     // Set by the relay's `start`, which is where everything the match must agree on rides
     // -- the seed and the settings both, since a differing no_gore desyncs the RNG stream
@@ -21,13 +39,20 @@ export function Room(transport, read_input) {
     this.d = 0;
     this.seed = 0;
     this.settings = {};
+    // The host's packed simulation state, when this `start` is one that joins a match
+    // already running or replaces a state that has gone wrong -- one payload, two
+    // triggers (#40). Null on a `start` that begins a match at tick 0.
+    this.resume = null;
     this.on_start = null;
     this.on_match_end = null;
 
     transport.receive(function (msg) {
         switch (msg.type) {
             case "start":
-                tick = 0;
+                // Zero when a match begins, the snapshot's own tick when this is a
+                // mid-match join or a resync: the match is already running, and the state
+                // that arrives with it belongs to a tick somewhere in the middle (#40).
+                tick = msg.t | 0;
                 input_at = {};
                 drivers_at = {};
                 // The table rides on `start` rather than as four stamped changes: a
@@ -38,6 +63,20 @@ export function Room(transport, read_input) {
                 self.seed = msg.seed;
                 self.settings = msg.settings;
                 held = msg.held;
+                self.resume = msg.snapshot || null;
+                catch_up_to = Math.max(tick, msg.until == null ? tick : msg.until | 0);
+                // The frames the relay rang since that snapshot: the gap between the
+                // state and now, scheduled exactly as live ones are (#40).
+                (msg.inputs || []).forEach(function (frame) {
+                    schedule_input(frame.t, frame.seats);
+                });
+                // And the driver changes stamped for a tick this client has not reached:
+                // wiped with `drivers_at` above, so the payload hands them back rather
+                // than leaving this client the only one in the room that never applies
+                // them (#7, #40).
+                (msg.changes || []).forEach(function (change) {
+                    (drivers_at[change.t] = drivers_at[change.t] || []).push(change);
+                });
                 // A socket answers later than a loopback does, so the match's shared
                 // state is not readable on the line after `start` (#34).
                 if (self.on_start) self.on_start(msg);
@@ -55,6 +94,7 @@ export function Room(transport, read_input) {
     });
 
     function schedule_input(t, seats) {
+        if (t > newest) newest = t;
         var frames = (input_at[t] = input_at[t] || {});
         for (var seat in seats) frames[seat] = seats[seat];
     }
@@ -66,6 +106,41 @@ export function Room(transport, read_input) {
             settings: config.settings,
             held: config.held,
         });
+    };
+
+    // Where a replay has to end: as far as the relay said, or as far as the frames that have
+    // arrived since say, whichever is further on.
+    function target() {
+        return Math.max(catch_up_to, newest - self.d);
+    }
+
+    // How many ticks of history this `start` is asking to be replayed. Zero for one that
+    // begins a match at tick 0.
+    this.gap = function () {
+        return target() - tick;
+    };
+
+    // Replays the gap, one `step` per tick, up to the tick the relay said the room's
+    // fastest client is about to step: this client lands where everybody else is playing
+    // from rather than a delay ahead of them (#40).
+    this.catch_up = function (step) {
+        catching_up = true;
+        while (tick < target()) step();
+        catching_up = false;
+    };
+
+    // The host's, every two seconds, and nobody else's: staggering four clients meant no
+    // two ever snapshotted the same tick, so there was nothing to byte-compare and a
+    // desynced client could seed the next joiner (#40 amends #19). The tick and the board
+    // ride outside the body, which the relay stores without ever decoding.
+    this.send_snapshot = function (t, matrix, body) {
+        transport.send({ type: "snapshot", t: t, matrix: matrix, body: body });
+    };
+
+    // Asks for that payload: what a client sends to join a match in progress, and what
+    // #41 will send when its own state has gone wrong.
+    this.request_resume = function () {
+        transport.send({ type: "resync" });
     };
 
     this.set_driver = function (seat, driver) {
@@ -109,14 +184,17 @@ export function Room(transport, read_input) {
         });
         delete drivers_at[tick];
 
-        var seats = {};
-        held.forEach(function (seat, scheme) {
-            if (drivers[seat] === "local") seats[seat] = read_input(scheme);
-        });
-        // Every tick, unconditionally, stamped d ahead so the delay is the one-way trip;
-        // never echoed back to its sender, so this client schedules its own (#12, #6).
-        schedule_input(tick + self.d, seats);
-        transport.send({ type: "input", t: tick + self.d, seats: seats });
+        if (!catching_up) {
+            var seats = {};
+            held.forEach(function (seat, scheme) {
+                if (drivers[seat] === "local") seats[seat] = read_input(scheme);
+            });
+            // Every tick, unconditionally, stamped d ahead so the delay is the one-way
+            // trip; never echoed back to its sender, so this client schedules its own
+            // (#12, #6).
+            schedule_input(tick + self.d, seats);
+            transport.send({ type: "input", t: tick + self.d, seats: seats });
+        }
 
         var frames = input_at[tick] || {};
         delete input_at[tick];

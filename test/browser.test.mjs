@@ -31,6 +31,7 @@ import { chromium } from "playwright";
 import { start_server } from "../server/index.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { generate_room_id } from "../src/net/room_id.js";
+import { SNAPSHOT_INTS, decode_snapshot, encode_snapshot } from "../src/game/snapshot.js";
 
 // Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does.
 const given = process.env.JNB_BASE_URL;
@@ -40,6 +41,8 @@ const origin = given ? given.replace(/\/$/, "") : "http://localhost:" + server.a
 // container without the second run colliding with the first run's rooms.
 const room_a = generate_room_id({});
 const room_b = generate_room_id({ [room_a]: true });
+const room_c = generate_room_id({ [room_a]: true, [room_b]: true });
+const room_d = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true });
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -75,6 +78,24 @@ await page.addInitScript(() => {
         ),
     );
 });
+// Every <audio> the page plays, and whether it is still playing. Sound_Player creates them
+// and keeps them to itself -- they are never in the document -- so patching the prototype is
+// the only way to see them from out here. A match builds one Sound_Player, so a match being
+// played sounds one looping track and a match that is over sounds none; two loops at once
+// was a session left running behind the one on screen, which is how it was heard (#28, #40).
+await page.addInitScript(() => {
+    window.__audio = new Set();
+    window.__sounding = () =>
+        [...window.__audio]
+            .filter((audio) => !audio.paused)
+            .map((audio) => audio.src.split("/").pop() + (audio.loop ? " (loop)" : ""));
+    const play = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+        window.__audio.add(this);
+        return play.apply(this, arguments);
+    };
+});
+
 let sockets = 0;
 page.on("websocket", (ws) => {
     const n = ++sockets;
@@ -121,6 +142,8 @@ async function on(name, root = page) {
     await screen(name, root).waitFor({ state: "visible" });
     await root.waitForFunction((n) => window.location.hash === "#" + n, name);
 }
+
+const sounding = (root = page) => root.evaluate(() => window.__sounding());
 
 const seats = (root = page) => screen("names", root).locator("li");
 const overlay = (root = page) => root.locator("div.overlay");
@@ -676,6 +699,154 @@ async function walk() {
     );
 
     chief.close();
+    await click("Leave");
+    await on("landing");
+
+    // --- the host is the reference state, and a client joins the match it runs (#40) ---
+    // The page hosts and plays. Two seconds in it has packed its own simulation and handed
+    // it to the relay, which is what the next client to ask is given: the state, the frames
+    // since it, and the settings block that goes with them.
+
+    await click("Create a room");
+    await on("create");
+    await screen("create").locator("input").fill(room_c);
+    await click("Create");
+    await on("names");
+    await page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats().count()) === 1);
+    await click("Take the seats");
+    await on("room");
+    // Alone in the room, so there is nobody to be ready for and the match begins at once.
+    await click("Start the match");
+    await on("play");
+    // Everything this page says and hears from here on, which is what the assertion below
+    // is really about: a client handed the match by `start` must not also ask to be let in.
+    const in_match = frames.length;
+
+    // One looping track while a match is played. A browser that refused to autoplay sounds
+    // none at all, which is why this counts rather than requires: what it is here to catch
+    // is a second simulation playing its own music behind the one on screen.
+    const loops = (await sounding()).filter((track) => track.includes("(loop)"));
+    assert.ok(loops.length <= 1, "one match, one music: " + JSON.stringify(loops));
+
+    const joiner_saw = [];
+    const joiner = relay_client({ type: "join", id: room_c }, joiner_saw);
+    await until("the joiner", () => joiner_saw.some((msg) => msg.type === "joined"));
+    const resumed = [];
+    joiner.receive((msg) => resumed.push(msg));
+    joiner.send({ type: "seats", names: ["Zip"] });
+    await until("the seat", () => joiner_saw.some((msg) => msg.type === "room" && msg.held.length));
+    // The host snapshots on a wall clock, so this waits one out rather than a tick count. It
+    // is the one assertion in this file that the page really is packing its own simulation,
+    // and no fake clock can stand in for it: the relay is on the real one.
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    joiner.send({ type: "resync" });
+    await until("the match in progress", () => resumed.some((msg) => msg.type === "start"));
+
+    const payload = resumed.find((msg) => msg.type === "start");
+    assert.ok(
+        decode_snapshot(payload.snapshot),
+        "the body is a packed simulation of the size the serializer packs, not an opaque nothing",
+    );
+    assert.ok(payload.t > 0, "taken on a tick somewhere in the middle of the match");
+    assert.ok(payload.until >= payload.t, "and replayed forward from it, never backwards");
+    assert.ok(payload.inputs.length, "with the input frames the relay rang since it");
+    assert.equal(
+        payload.settings.level,
+        "default",
+        "and the settings block: a joiner with the wrong no_gore desyncs on the first kill (#22)",
+    );
+    // The relay remembers an ask it cannot answer yet and answers it with the host's first
+    // snapshot. That had the host resyncing itself two seconds into every match: the
+    // simulation rebuilt under the player, and a second copy of the looping music started
+    // over the first (#28, #40).
+    // The build stamped into the bundle travels on every handshake, which is what lets the
+    // relay refuse a page left open across a rebuild (#40). "dev" would mean the stamp never
+    // reached the bundle, which is the failure worth catching here.
+    const handshakes = frames.filter((frame) => frame.includes('"build":'));
+    assert.ok(handshakes.length, "every handshake says which build this page is");
+    assert.ok(
+        !handshakes.some((frame) => frame.includes('"build":"dev"')),
+        "and it is the one webpack stamped in, not the source running from node",
+    );
+
+    // Over the whole walk, not just this match: every room this page has been in either had
+    // no match running or handed it one, and neither is a room to ask about.
+    assert.deepEqual(
+        frames.filter((frame) => frame.includes('"type":"resync"')),
+        [],
+        "a client handed the match by `start` never asks to be let into it",
+    );
+    assert.deepEqual(
+        frames.slice(in_match).filter((frame) => frame.includes('<- {"type":"start"')),
+        [],
+        "so it is handed the match once, and plays its own through its own snapshot",
+    );
+
+    joiner.close();
+    // The host ends the match on the way out, so the room it leaves behind is a lobby again
+    // rather than one the relay still thinks is playing (#22).
+    await click("Back to the lobby");
+    await on("room");
+    // And none once it is over. The music is stopped by the match it belongs to being left,
+    // so a simulation nothing stopped goes on playing in an empty lobby.
+    assert.deepEqual(await sounding(), [], "a match that is over sounds nothing");
+    await click("Leave");
+    await on("landing");
+
+    // --- leaving a match that is still running (#37, #40) -----------------------------
+    // Somebody else hosts this one, so the match goes on without this page: a client that
+    // walks back to the lobby keeps its seats and hands its bunnies to the AI, and the room
+    // it left is still a room with a match running. Asking to be let into a match in
+    // progress is what a client that just left must not do -- it walked out on purpose, and
+    // the answer would walk it straight back in.
+
+    const boss_saw = [];
+    const boss = relay_client({ type: "create", id: room_d }, boss_saw);
+    await until("the room", () => boss_saw.some((msg) => msg.type === "joined"));
+    boss.send({ type: "seats", names: ["Boss"] });
+    await until("the host to sit down", () =>
+        boss_saw.some((msg) => msg.type === "room" && msg.host),
+    );
+
+    await click("Join with a room code");
+    await on("join");
+    await screen("join").locator("input").fill(room_d);
+    await click("Continue");
+    await on("names");
+    await page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats().count()) === 1);
+    await click("Take the seats");
+    await on("room");
+    await click("Ready");
+
+    boss.send({ type: "start", seed: 4321, settings: {}, held: [] });
+    await on("play");
+    // A snapshot for the relay to answer with, because the thing under test is what this
+    // page does when there *is* one to be handed: a room whose host never snapshots cannot
+    // walk anybody back into anything. The relay never decodes a body, so an empty
+    // simulation of the right size is as good as a played one -- and the page really does
+    // unpack it, which is why it has to be the right size.
+    boss.send({
+        type: "snapshot",
+        t: 0,
+        matrix: new Array(16).fill(0),
+        body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
+    });
+    await settle();
+    await click("Back to the lobby");
+    await on("room");
+    // Long enough for the ask to have been made, answered and acted on, which is what this
+    // is here to prove did not happen.
+    await settle();
+    await settle();
+    assert.equal(
+        await page.evaluate(() => window.location.hash),
+        "#room",
+        "a client that left the match stays left, and is not walked back into it",
+    );
+    assert.deepEqual(await sounding(), [], "and the match it left sounds nothing");
+    boss.close();
     await click("Leave");
     await on("landing");
 
