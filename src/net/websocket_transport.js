@@ -18,7 +18,15 @@ export function WebSocket_Transport(url, entry, on_room, on_error) {
     };
 
     socket.onmessage = function (event) {
-        var msg = JSON.parse(event.data);
+        var msg;
+        // The relay guards its own parse and drops the frame; this end did not, so one frame
+        // that was not JSON took the handler with it and the page went deaf mid-match (#94).
+        try {
+            msg = JSON.parse(event.data);
+        } catch (e) {
+            console.log("dropped a malformed frame: %s", event.data);
+            return;
+        }
         switch (msg.type) {
             case "ping":
                 // Echoed with the relay's own timestamp: one-way trip is its arithmetic
@@ -45,8 +53,6 @@ export function WebSocket_Transport(url, entry, on_room, on_error) {
     };
 
     socket.onclose = function () {
-        // ponytail: a closed socket is reported once and the match is over. upgrade path:
-        // reserved seats, AI takeover and reconnect (#42).
         if (on_error) on_error("DISCONNECTED");
     };
 
