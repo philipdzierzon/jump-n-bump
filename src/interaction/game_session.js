@@ -9,6 +9,7 @@ import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
 import {
     bump_matrix,
+    checksum_ban_map,
     checksum_snapshot,
     decode_snapshot,
     encode_snapshot,
@@ -85,7 +86,7 @@ export function Game_Session(get_level, config, muted, transport) {
     // with, so it hashes nothing (#16). The host hashes too -- its own is the reference.
     if (!config.local)
         room.checksum = function (t) {
-            return checksum_snapshot(pack_snapshot(rnd, objects, t));
+            return checksum_snapshot(pack_snapshot(rnd, objects, t), level_hash);
         };
 
     var game = null;
@@ -100,6 +101,19 @@ export function Game_Session(get_level, config, muted, transport) {
     // module's rather than this session's (#5).
     var objects = null;
     var rnd = null;
+    // The ban map this match is being played on, hashed once when the level is built and
+    // chained into every tick's checksum. The level crosses the wire as a name and each
+    // client fetches the bytes behind it for itself, so two clients that resolved one name
+    // to two different `.dat` bodies disagree on every hash from tick 0 rather than on the
+    // first tick a bunny happens to touch the tile that differs (#95). Zero until a level
+    // is built, which is before any tick is stepped.
+    //
+    // ponytail: the relay cannot tell a wrong ban map from a determinism bug, so a client
+    // on a stale level is repaired five times from a snapshot that cannot fix it -- about
+    // twelve seconds -- before it is dropped from the match. upgrade path: a `level`
+    // message of its own that the relay compares at match start and answers with one
+    // refusal, if that window ever turns up in a log.
+    var level_hash = 0;
     var snapshot_timer = null;
     var start_when_ready = false;
     var board_timer = null;
@@ -257,6 +271,9 @@ export function Game_Session(get_level, config, muted, transport) {
         var gap = room.gap();
         if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return;
         var t1 = performance.now();
+        // After the guards above: a `start` this client refuses to build must leave the
+        // hash on the level its simulation is still running (#95).
+        level_hash = checksum_ban_map(level.ban_map);
         rnd = make_rnd(room.seed);
         var settings = room.settings;
 

@@ -151,9 +151,21 @@ export function decode_snapshot(body) {
 // ponytail: 32 bits, so one desync in four billion hashes to the host's and is missed. The
 // next check is 30 ticks later, and a desync is permanent. upgrade path: a wider hash if a
 // room ever runs long enough for that to be the thing that went wrong.
-export function checksum_snapshot(ints) {
+//
+// `basis` is what the hash starts from, which is how a second thing gets chained in front of
+// the state without a second hashing scheme: the default is FNV-1a's own offset basis, so a
+// caller that passes nothing hashes exactly what it always did.
+export function checksum_snapshot(ints, basis = 2166136261) {
     var bytes = new Uint8Array(ints.buffer);
-    var hash = 2166136261;
+    var hash = basis;
     for (var i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619);
     return hash | 0;
+}
+
+// The level the match is being played on, hashed the same way so it can be chained in front
+// of every tick's state (#95). The level crosses the wire as a name, and two clients that
+// resolved one name to two different bodies otherwise agree on every hash until a bunny
+// touches a tile that differs.
+export function checksum_ban_map(ban_map) {
+    return checksum_snapshot(Int32Array.from(ban_map));
 }
