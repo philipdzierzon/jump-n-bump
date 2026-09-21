@@ -171,3 +171,79 @@ that it _only_ works because sessions never overlap.
   behaviour to [#51](https://github.com/philipdzierzon/jump-n-bump/issues/51)'s loop pacing. The
   bunched arrivals are the evidence.
 - **Not worth doing:** reusing the object graph across a repair. See §3.
+
+---
+
+## Postscript: the floor is late too, and so is everything else the client knows
+
+Answers the re-run [#71](https://github.com/philipdzierzon/jump-n-bump/issues/71) asked for, which
+is why that issue is closed and its patch is not merged.
+
+**#71 proposed that a client stamp its frames at the relay's own deadline — `newest − d + 1`, the
+same number `room.due` is — instead of at `tick + d`, so a frame that would be dropped becomes an
+on-time frame for a slightly later tick. It was built, and it changes nothing that can be
+measured.** The deadline is computed from `newest`, and `newest` is read off frames that reached
+this client's event loop: the same event loop whose lateness is the thing being corrected for. A
+client cannot compute a deadline from information that is late by exactly the amount it is late.
+
+### 6. Two scenarios, either side, one machine
+
+Same shape as §"How it was measured": two Chromium contexts, one relay in-process, both holding
+<kbd>→</kbd>, `d = 2`, one seat each. Throwaway harness again; the numbers are the shipped counters
+and the relay's own log.
+
+| scenario                                 | master                                  | with #71's fix                          |
+| ---------------------------------------- | --------------------------------------- | --------------------------------------- |
+| 6× CPU throttle, 45 s, ×2 runs           | dropped after 5 repairs, tick 840 / 870 | dropped after 5 repairs, tick 990 / 840 |
+| 3 × 3 s event-loop freeze, 20 s, ×3 runs | 0 drops                                 | 0 drops                                 |
+
+The second scenario is the one that should have suited it: a frozen event loop puts the client
+behind in **ticks**, not just in wall-clock, which is the case #71's arithmetic is written for. It
+still never fires. After three three-second freezes the guest reported **1 rebase and a worst shift
+of one tick**; over a 45 s throttled match, ~93 rebases and a worst shift of **four** ticks, against
+a frame stream that is three ticks late essentially always (§1).
+
+### 7. Why it cannot fire: the backlog is drained before the socket is read
+
+`pump()` steps its whole tick backlog synchronously — that is what §"What this turns into" already
+called its uncapped `while`. A client coming out of a stall, or inside a throttled batch, therefore
+steps and stamps every one of those ticks _before_ the event loop delivers the `input` messages
+that would have told it the room had moved on. `newest` is stale at the exact moment the floor is
+read from it, so the floor sits a tick _below_ the natural stamp and `max(tick + d, floor)` is just
+`tick + d` again.
+
+That is the same failure at both ends of the loop: the client's frames leave late because the data
+did not exist yet, and its picture of the room is late because the messages have not been read yet.
+Fixing the stamp cannot fix either. The quantity #71 needed is this client's own tick against the
+wall clock, which nothing measures and `Room` is deliberately clock-free — a design question rather
+than a patch, and squarely [#51](https://github.com/philipdzierzon/jump-n-bump/issues/51)'s.
+
+### 8. A stamp must never outrun `newest`
+
+Worth recording even though the patch is gone, because the next person to try this will write the
+same three-term maximum #71 did.
+
+`newest − d` is not only an input to the stamp. `gap()` reads it as _the tick the room's fastest
+client is on_, and `pump()` sprints while that gap is positive — an identity that holds only while
+every stamp is its sender's own `tick + d`. #71's third term, `last_stamp + 1`, breaks it: a client
+stepping a catch-up burst emits one stamp per step, so its stamps outrun its tick, every other
+client reads that as a room that has run ahead and sprints after it, which ratchets _its_ stamps.
+Two clients drag each other to the end of time in about a minute:
+
+```
+match over at tick 62700: 91 frames substituted, 5 of 5080 arrived late,
+worst margin -1 ticks (d 2), 43 rebases, shift 3857, late by -1:5
+```
+
+43 rebases and a shift of 3857 on the _unthrottled_ host, in a 45-second match.
+
+### What this turns into, still
+
+- **[#51](https://github.com/philipdzierzon/jump-n-bump/issues/51) is the live candidate for this
+  failure mode**, not a parallel one. Both halves of the lateness are `pump()`'s loop.
+- **An unvalidated peer stamp could fast-forward a client through the match.** Found while
+  measuring: `newest` is set from a frame the relay accepts on `Number.isInteger(t) && t >= 0`
+  alone, so `t = 1e6` left a client with `gap()` at 999388 and `pump` sprinting. Bounded now.
+- **`substituted` was two numbers in one.** A seat of this client's own with no frame is never the
+  room covering for it — today that is #72's repair hole, counted apart as `holes` now.
+- **Not worth doing:** stamping at the relay's deadline. See above.
