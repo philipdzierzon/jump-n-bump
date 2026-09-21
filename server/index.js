@@ -160,6 +160,19 @@ function create(client, msg) {
         substituted: 0,
         late: 0,
         forged: 0,
+        // What each token has spent of its repair allowance, and whether the relay has given
+        // up repairing it this match (#41, #93). Keyed by token, not kept on the socket: the
+        // socket is what a reload replaces, so a counter on it counts reloads, not repairs.
+        // Emptied at `begin`, which is the fresh start a new match is. Not a growth bound: a
+        // room that never starts one, or an endless match, accumulates one entry per token
+        // admitted. Bounded with the rest of abuse (#47).
+        //
+        // ponytail: the token is accepted from the client verbatim (`admit`), so a client that
+        // wants a fresh allowance sends a fresh one and re-takes the seat it just gave up
+        // (`leave` frees it now, `take_seats` re-grants it mid-match). Closes the accidental
+        // reload, deters nothing deliberate. upgrade path: an identity the client cannot choose
+        // (#7), or rate limiting (#47).
+        allowances: new Map(),
         // The whole phase model: a room is in lobby or in-game, and there is no third
         // (#21). The countdown is part of the lobby, not a phase of its own.
         started: false,
@@ -304,7 +317,7 @@ function seat_labels(room) {
     const online = online_seats(room);
     const dropped = new Set();
     for (const client of room.clients)
-        if (client.dropped) for (const seat of client.seats) dropped.add(seat);
+        if (client.allowance.dropped) for (const seat of client.seats) dropped.add(seat);
     return room.last_names.map((name, seat) =>
         !name
             ? null
@@ -506,6 +519,14 @@ function vacate(client) {
     seat_queue(room);
 }
 
+// One record per token, made on the way in so nothing downstream has to test for it -- and
+// found again rather than remade on a reconnect, which is the whole of #93.
+function allowance_of(room, token) {
+    let spent = room.allowances.get(token);
+    if (!spent) room.allowances.set(token, (spent = { repairs: 0, at: 0, dropped: false }));
+    return spent;
+}
+
 function admit(client, room, msg) {
     client.room = room;
     client.arrived = ++arrivals;
@@ -513,6 +534,9 @@ function admit(client, room, msg) {
     // browser is one socket and one reconnect, so the token reclaims every seat that client
     // held. A username is guessable by anyone in the room and is never an identity (#7).
     client.token = String(msg.token || "") || randomUUID();
+    // The repair allowance is the player's, not the socket's: a reconnect on the same token
+    // comes back to what it has spent rather than to a fresh five (#93).
+    client.allowance = allowance_of(room, client.token);
     // A seat whose holder is connected is not reclaimable: duplicating a tab copies
     // sessionStorage, and two sockets driving one seat is a desync, not a rejoin.
     const online = online_seats(room);
@@ -811,7 +835,7 @@ function resume(client) {
     if (!room.started || !room.snapshot) return;
     // Out of this match for good: a client the relay gave up repairing must not be handed
     // the match back by an ask still in flight, or by the next snapshot answering it (#41).
-    if (client.dropped) return void (client.waiting = false);
+    if (client.allowance.dropped) return void (client.waiting = false);
     // A client waiting for a seat has nothing to resume into, and asks on the way *out* of
     // the queue instead -- `seat_client` clears `queued`, and the ask that follows is the
     // one every mid-match arrival makes (#40, #44).
@@ -893,7 +917,7 @@ function keep_checksum(client, msg) {
     if (!room.started) return;
     if (!Number.isInteger(msg.t) || !Number.isInteger(msg.h)) return;
     if (!client.host) {
-        if (client.dropped || msg.t <= (client.resync_t || 0)) return;
+        if (client.allowance.dropped || msg.t <= (client.resync_t || 0)) return;
         const reference = room.checksums.find((one) => one.t === msg.t);
         // Held one deep rather than queued: a client has one tick in flight at a time, and
         // a hash it sent for a tick the host has not reached yet is the newer question.
@@ -918,9 +942,12 @@ function keep_checksum(client, msg) {
 // a desync correction and a lag correction look alike from the inside.
 function desync(client, t) {
     const room = client.room;
+    // The player's record, not this socket's: a reload is a new socket on the same token and
+    // comes back to what that token has spent (#93).
+    const spent = client.allowance;
     // A hash held for a host hash that arrived after its sender went is nobody's
     // disagreement any more, and must not spend a repair.
-    if (!room.clients.has(client) || client.dropped) return;
+    if (!room.clients.has(client) || spent.dropped) return;
     // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
     // and the first hashes are half a second in, so the whole allowance would be spent
     // before a single repair could be sent. Marked instead, and answered by that first
@@ -936,15 +963,15 @@ function desync(client, t) {
     // nothing (#92 review).
     if (room.snapshot.t <= room.holed) return void (client.waiting = true);
     const now = Date.now();
-    const since = now - (client.repaired_at || 0);
+    const since = now - spent.at;
     // Quiet for long enough: the run this client was in is over, and the repair that ended
     // it worked. What is starting now gets the whole allowance.
-    if (since > repair_reset_ms()) client.repairs = 0;
+    if (since > repair_reset_ms()) spent.repairs = 0;
     // Still the same unrepaired desync, seen again 30 ticks later: the last repair has not
     // had a fresh snapshot to have worked from yet, so this is not a second one.
     else if (since < repair_cooldown_ms()) return;
     room.desyncs++;
-    if (client.repairs >= MAX_REPAIRS) {
+    if (spent.repairs >= MAX_REPAIRS) {
         console.log(
             "room %s desync %d at tick %d, dropped after %d repairs with no let-up",
             room.id,
@@ -959,11 +986,11 @@ function desync(client, t) {
         room.id,
         room.desyncs,
         t,
-        client.repairs + 1,
+        spent.repairs + 1,
         MAX_REPAIRS,
     );
-    client.repairs++;
-    client.repaired_at = now;
+    spent.repairs++;
+    spent.at = now;
     client.waiting = true;
     resume(client);
 }
@@ -978,9 +1005,14 @@ function desync(client, t) {
 // #39).
 function drop_from_match(client) {
     const room = client.room;
-    client.dropped = true;
+    client.allowance.dropped = true;
     client.waiting = false;
-    send(client, { type: "match_end", reason: "desync", matrix: last_board(room) });
+    // Every client on this token, not only the one that spent the last repair: a duplicated
+    // tab (#93) shares the record, so a desync in one is a desync for both, and the other
+    // must hear it too or it sits repaired-forever on a `dropped` record it never sees change.
+    for (const other of room.clients)
+        if (other.allowance === client.allowance)
+            send(other, { type: "match_end", reason: "desync", matrix: last_board(room) });
     // The seat reads `(out of sync)` from here on, which is a change to the room.
     broadcast_state(room);
 }
@@ -1010,6 +1042,10 @@ function begin(room, msg) {
     room.due = 0;
     room.missing = new Array(SEATS).fill(0);
     room.substituted = room.late = room.forged = 0;
+    // A fresh match is a legitimately fresh allowance -- for every token in the room, dropped
+    // or not (#41, #93). Cleared before the walk below, or the re-point it does is thrown
+    // away again.
+    room.allowances.clear();
     // Nobody is waiting to be let into a match that has not started yet: every client in
     // the room is being handed this one.
     // With the tick counter, since the next match counts from zero again: a client resynced
@@ -1020,9 +1056,7 @@ function begin(room, msg) {
         other.pending = null;
         // A client dropped out of the last match plays this one: being out of step is the
         // match's state, never the room's (#41).
-        other.dropped = false;
-        other.repairs = 0;
-        other.repaired_at = 0;
+        other.allowance = allowance_of(room, other.token);
         // No frame in for a tick of a match that has not been stepped yet (#42).
         other.last_t = -1;
     }

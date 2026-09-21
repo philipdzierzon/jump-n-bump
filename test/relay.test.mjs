@@ -966,7 +966,7 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "REFERENCE-BODY" });
 
 const chk_guest = connect({ type: "join", id: "CHKSM" });
-await lobby(chk_guest);
+const chk_token = await lobby_token(chk_guest);
 await chk_guest.seats(["Guest"]);
 const chk_saw = [];
 chk_guest.socket.receive((msg) => chk_saw.push(msg));
@@ -1036,9 +1036,9 @@ assert.equal(
     "a hash stamped before the repair is not a second desync",
 );
 
-// Repairs two to five, each a cooldown apart. The client's hash first on one of them, since
+// Repairs two to four, each a cooldown apart. The client's hash first on one of them, since
 // clients run at their own pace and either order has to reach the same comparison.
-for (const t of [630, 660, 690, 720]) {
+for (const t of [630, 660, 690]) {
     await cooled();
     chk_saw.length = 0;
     if (t === 660) {
@@ -1051,24 +1051,52 @@ for (const t of [630, 660, 690, 720]) {
     assert.ok(await awaited(chk_saw, "start"), "repaired again rather than given up on");
 }
 
+// The allowance is the player's, not the socket's (#93). Reloaded here, after four of five,
+// rather than after the drop: what has to survive the reload is the *count*, not only a
+// flag a finished drop would leave behind. Moving `dropped` into the record and leaving
+// `repairs`/`at` on the socket -- the exact split this diff removed -- would pass every
+// assertion above and hand the reloaded socket a fresh count right here.
+chk_guest.socket.close();
+const chk_back = connect({ type: "join", id: "CHKSM", token: chk_token });
+const reloaded = await lobby(chk_back);
+assert.deepEqual(reloaded.held, [1], "the reload comes back to the seat the token held");
+assert.equal(
+    reloaded.labels[1],
+    "Guest",
+    "not dropped yet -- four of five spent is still a client the relay is repairing",
+);
+const back_saw = [];
+chk_back.socket.receive((msg) => back_saw.push(msg));
+
+// The fifth, on the reloaded socket: carried over from the one that closed, so this is the
+// last of the allowance and not a fresh first.
+await cooled();
+back_saw.length = 0;
+chk_host.socket.send({ type: "checksum", t: 720, h: 111 });
+chk_back.socket.send({ type: "checksum", t: 720, h: 222 });
+assert.ok(
+    await awaited(back_saw, "start"),
+    "repaired again rather than given up on, reload included",
+);
+
 // The sixth is a client that is not hiccupping. It leaves the match -- not the room: the
 // seat stays its own, the board says why nobody is driving it, and the next match in this
 // room is one it plays like any other.
 await cooled();
-chk_saw.length = 0;
+back_saw.length = 0;
 // Drained, so the room update awaited below is the one the drop broadcast and not an older
 // one still in the queue from the seat being taken.
-chk_guest.events.length = 0;
+chk_back.events.length = 0;
 chk_host.socket.send({ type: "checksum", t: 750, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 750, h: 222 });
-const dropped = await awaited(chk_saw, "match_end");
+chk_back.socket.send({ type: "checksum", t: 750, h: 222 });
+const dropped = await awaited(back_saw, "match_end");
 assert.equal(dropped.reason, "desync", "the match ends for that client, and says why");
 assert.equal(
-    chk_saw.find((msg) => msg.type === "start"),
+    back_saw.find((msg) => msg.type === "start"),
     undefined,
     "with no sixth repair behind it",
 );
-const after_drop = await chk_guest.until((msg) => msg.type === "room");
+const after_drop = await chk_back.until((msg) => msg.type === "room");
 assert.deepEqual(after_drop.held, [1], "the seat is still the dropped client's to play next match");
 assert.equal(
     after_drop.labels[1],
@@ -1076,39 +1104,40 @@ assert.equal(
     "and the board says why nobody is driving it, beside `(left)` and `(AI)` (#13)",
 );
 
-// Dropped is dropped for the rest of this match: an ask still in flight, or another hash,
-// must not hand the match back.
-chk_saw.length = 0;
-chk_guest.socket.send({ type: "resync" });
+// Dropped is dropped for the rest of this match, across the reload already inside it: an ask
+// still in flight, another hash, or a fresh socket on the same token must not hand the match
+// back.
+back_saw.length = 0;
+chk_back.socket.send({ type: "resync" });
 await cooled();
 chk_host.socket.send({ type: "checksum", t: 780, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 780, h: 222 });
+chk_back.socket.send({ type: "checksum", t: 780, h: 222 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
-    chk_saw.find((msg) => msg.type === "start"),
+    back_saw.find((msg) => msg.type === "start"),
     undefined,
-    "a client the relay gave up repairing is not let back into the match it was dropped from",
+    "a reload is not a fresh allowance -- the relay still will not repair it (#93)",
 );
 
 // Out of the match, never out of the room: the next match in it is one the dropped client
-// plays like any other, with its seat and its name back (#41).
-chk_saw.length = 0;
-chk_guest.events.length = 0;
+// plays like any other, with its seat and its name back (#41), across the reload too (#93).
+back_saw.length = 0;
+chk_back.events.length = 0;
 // Readied after the match ends, not before: walking back to the lobby resets the room's
 // ready flags, which is what the countdown is there to collect again (#37).
 chk_host.socket.send({ type: "match_end", reason: "lobby", matrix: null });
 await new Promise((resolve) => setTimeout(resolve, 100));
-chk_guest.socket.send({ type: "ready", ready: true });
+chk_back.socket.send({ type: "ready", ready: true });
 await new Promise((resolve) => setTimeout(resolve, 50));
 chk_host.socket.send({ type: "start", seed: 8, settings: {}, held: [] });
-const next_match = await awaited(chk_saw, "start");
+const next_match = await awaited(back_saw, "start");
 assert.equal(next_match.t, 0, "the next match begins at tick zero for it like everybody else");
 assert.deepEqual(next_match.held, [1], "on the seat it kept");
-const relabelled = await chk_guest.until((msg) => msg.type === "room" && msg.labels[1] === "Guest");
+const relabelled = await chk_back.until((msg) => msg.type === "room" && msg.labels[1] === "Guest");
 assert.equal(relabelled.labels[1], "Guest", "and the board stops saying it was out of step");
 
 chk_host.socket.close();
-chk_guest.socket.close();
+chk_back.socket.close();
 
 // Five is five in a row, not five in a match. A client that recovers -- repaired, then
 // quiet -- starts the next run with the whole allowance, so an evening of occasional
