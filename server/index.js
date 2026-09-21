@@ -16,7 +16,7 @@ import express from "express";
 import { WebSocketServer } from "ws";
 
 import { generate_room_id, normalise_room_id } from "../src/net/room_id.js";
-import { config_diff, default_config } from "../src/net/room_config.js";
+import { DRIVERS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/room_config.js";
 
 const PORT = process.env.PORT || 8080;
 const TICK_MS = 1000 / 60;
@@ -70,11 +70,6 @@ const repair_cooldown_ms = () => Number(process.env.REPAIR_COOLDOWN_MS || 2000);
 // five rather than the tail of one it has already recovered from. Five with no let-up
 // between them is a client that is not coming back (#41).
 //
-// The premise #41 was written on -- that the relay substitutes a missing frame, so every
-// client plays the same input stream and a desync can only be a determinism bug -- is not
-// true yet: #17's substitution is #42's to build. Until it is, a client whose frames arrive
-// later than `d` diverges continuously, and no number of repairs fixes that (#68).
-//
 // ponytail: a client that needs a repair just less often than this is repaired for as long
 // as it cares to play, teleporting every half minute for everybody else. upgrade path: a
 // cap on repairs for the whole match if one ever turns up in a log.
@@ -104,6 +99,13 @@ function broadcast_frame(room, msg, except) {
         if (client !== except && !client.queued.length) send(client, msg);
 }
 
+// The room's password, as it is stored and as every join is compared against it. One
+// coercion for both sides, because the comparison is `!==`: a room created with something
+// that is not a string could never be joined again -- by the host as much as by anybody --
+// and the host's own config handler coerced while the create handler did not (#8, #82).
+// Absent, empty or null is no password at all, which is also how a host clears one.
+const password_of = (msg) => (msg.password == null ? null : String(msg.password) || null);
+
 function create(client, msg) {
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
     if (!id) return send(client, { type: "error", code: "BAD_ID" });
@@ -112,7 +114,7 @@ function create(client, msg) {
     if (rooms[id]) return send(client, { type: "error", code: "ID_TAKEN" });
     rooms[id] = {
         id,
-        password: msg.password || null,
+        password: password_of(msg),
         // The build of the client that opened it. Every client in a lockstep room has to be
         // running the same simulation, and the relay cannot tell one build from another by
         // watching it play -- so it is told, and refuses the mismatch on the way in (#40).
@@ -187,7 +189,7 @@ function join(client, msg) {
     // One opaque code for a wrong password and a missing room alike: telling them apart is
     // what would turn an unlisted room's id into something worth guessing at (#8). No
     // profanity blocklist, and no second failure code to leak the difference.
-    if (!room || room.password !== (msg.password || null))
+    if (!room || room.password !== password_of(msg))
         return send(client, { type: "error", code: "ROOM_UNAVAILABLE" });
     // After the password, so a refusal still says nothing about a room the client could not
     // have joined anyway (#8). A client that declares no build is not checked: the headless
@@ -1032,7 +1034,7 @@ function countdown_zero(room) {
 function host_config(client, msg) {
     const room = client.room;
     if (!client.host) return;
-    if ("password" in msg) room.password = String(msg.password) || null;
+    if ("password" in msg) room.password = password_of(msg);
     if (!msg.config) return broadcast_state(room);
     // Twice through the validator, because the two questions are different ones. First:
     // what did the host actually change? Diffing against the effective config drops a key
@@ -1095,6 +1097,16 @@ function relay(client, msg) {
             // again. Dropped silently and counted, because a client cannot be told to send
             // it sooner (#42).
             if (msg.t < room.due) return void room.late++;
+            // And the other end of the same clock: a tick further ahead than any client
+            // could catch up to is not a frame, it is a number. The line below raises the
+            // room's tick to it, and `substitute` then walks every tick in between -- a
+            // scan per seat per tick and a frame broadcast each -- which is the whole
+            // process, and every room on it, for as long as the arithmetic takes (#80, #82).
+            // ponytail: one frame may still legitimately push the room's clock a whole
+            // minute ahead, which is 3600 substituted ticks in one turn of the event loop.
+            // upgrade path: a bound of a few ticks past `room.tick + room.d`, if a client
+            // whose clock raced ever turns out not to need the slack.
+            if (msg.t - room.tick > MAX_CATCH_UP) return void room.forged++;
             // Monotonic, and a whole delay ahead of any client's real tick, since `t` is
             // already stamped d into the future: stamping too late loses nothing, and
             // letting a slower client drag it backwards would stamp a change for a tick a
@@ -1137,6 +1149,15 @@ function relay(client, msg) {
             broadcast_state(room);
             break;
         case "driver":
+            // A seat's driver is its holder's to change, exactly as its input is. The seat
+            // has to be one this client holds -- which is also what makes it a seat index
+            // rather than an arbitrary property to write the driver table at -- and the
+            // value has to be one the room knows: `local` for a seat somebody else holds
+            // clears that seat's missing-tick counter, which is AI takeover itself switched
+            // off (#7, #42). Counted as forged and answered with nothing, like a forged
+            // frame is (#82).
+            if (!client.seats.includes(msg.seat) || !DRIVERS.includes(msg.driver))
+                return void room.forged++;
             stamp_driver(room, msg.seat, msg.driver);
             break;
         case "snapshot":
@@ -1155,11 +1176,30 @@ function relay(client, msg) {
             host_config(client, msg);
             break;
         case "match_end":
-            // Broadcast exactly as the host sent it, final board included: the relay
-            // cannot read the simulation, so it could not compute one (#19, #22). The
-            // announcement is over with it, so an arrival is told about a room and not
+            // The host's to announce, as the start was (#22, #37). It ends the match for
+            // everybody and the board rides on it verbatim -- the relay cannot read the
+            // simulation, so it could not compute one (#19) -- which is exactly why a peer
+            // must not be able to send one: it would end everyone's match and dictate the
+            // result. The client's board-shape guard bounds the shape, not the right. A
+            // client that still believes it is host through a migration is dropped here in
+            // silence, which is the relay's flag being the one that counts (#82).
+            if (!client.host) return;
+            // The announcement is over with it, so an arrival is told about a room and not
             // about a match nobody is running.
             to_lobby(room, msg);
+            break;
+        default:
+            // A type this relay has no case for: a newer client against an older
+            // deployment, or a bot. Dropped -- the relay answers nothing it did not
+            // understand -- but said so once per client rather than once per message.
+            // ponytail: the type itself is never logged and the second unknown type from
+            // the same client is silent, because `msg.type` is unbounded client input and
+            // nothing rate-limits an established socket (#47). upgrade path: log the type
+            // once payload caps exist.
+            if (!client.unknown_type) {
+                client.unknown_type = true;
+                console.log("room %s dropped a message type it does not know", room.id);
+            }
             break;
     }
 }
@@ -1231,7 +1271,13 @@ export function start_server(port = PORT) {
             }
             switch (msg.type) {
                 case "pong":
-                    client.one_way = (Date.now() - msg.at) / 2;
+                    // The only number a client sends before it is even in a room, and the
+                    // one every room's input delay is derived from. `NaN` walks straight
+                    // through `input_delay`'s clamp -- `Math.max(2, NaN)` is `NaN` -- and
+                    // the delay is fixed for the match at `begin`, so one malformed pong
+                    // stops substitution comparing at all and serialises as `null` on
+                    // `start`, leaving every client stamping with no delay (#34, #82).
+                    if (Number.isFinite(msg.at)) client.one_way = (Date.now() - msg.at) / 2;
                     break;
                 case "create":
                     if (!client.room) create(client, msg);

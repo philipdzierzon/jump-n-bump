@@ -9,6 +9,10 @@
 //
 // The password is not in here. It is write-only, never in a room view and never on a link,
 // so it is the one setting that has no place in an object the relay broadcasts (#8).
+//
+// Two constants that are not settings live here for the same reason: the catch-up ceiling
+// and the list of drivers are values the client and the relay have to agree on, and one
+// definition is what stops them disagreeing (#82).
 
 // The levels shipped in `game/levels/`, each one `<name>/<name>.dat` beside the page --
 // except `default`, which is the built-in map and its two <img> tags. A name is resolved
@@ -48,6 +52,21 @@ export var FLAGS = [
 // the only place it is ever compared against -- a clock is a thing four clients disagree
 // about, and a tick count is not.
 export var LIMITS = { bump_limit: 99, time_limit: 60 };
+
+// The most ticks a client may be asked, or may ask a room, to catch up by. A minute of them
+// costs a few hundred milliseconds to replay; more than that is a host that stopped
+// snapshotting rather than a gap worth closing, and a client that replayed it would land
+// minutes behind the room and consume every frame late (#51). A gap this size is a match not
+// joined, not one joined short: the caller checks `gap()` and stays in the lobby (#40).
+//
+// Both halves of one ceiling: the client drops a frame stamped further ahead than this
+// (#80), and the relay refuses to raise the room's clock to one in the first place (#82).
+export var MAX_CATCH_UP = 3600;
+
+// Who may be driving a seat: the client holding it, the AI, or nobody at all when the room
+// disabled it (#7, #37). An allowlist like `LEVELS` -- it is what stops a peer writing
+// something the room has never heard of into the relay's driver table (#82).
+export var DRIVERS = ["local", "ai", "off"];
 
 export function default_config() {
     var config = { level: "default", ai_fill: true };
