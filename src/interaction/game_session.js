@@ -270,6 +270,13 @@ export function Game_Session(get_level, config, muted, transport) {
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
         var gap = room.gap();
         if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return;
+        // A key tapped in the lobby has no tick to be read on yet -- it would otherwise sit
+        // latched and land on this match's first tick, a spurious jump/step nobody pressed
+        // just then (#86). `clear_taps`, not `release_all`: a key held into the countdown
+        // is this match's real tick-0 input (a level sample, not a latch), and wiping
+        // `keys_pressed` too would strand it with no keydown left to set it again --
+        // including on a repair, where the player never stopped holding it.
+        keyboard.clear_taps();
         var t1 = performance.now();
         // After the guards above: a `start` this client refuses to build must leave the
         // hash on the level its simulation is still running (#95).
@@ -419,7 +426,11 @@ export function Game_Session(get_level, config, muted, transport) {
         board_timer = setInterval(snapshot, 250);
     };
     this.hide_board = function () {
-        if (game) play();
+        if (!game) return;
+        // A local board pauses the sim (`show_board` above): no tick runs while it is up,
+        // so a tap on it would otherwise latch and land on the tick that unpauses (#86).
+        keyboard.clear_taps();
+        play();
     };
     // The way out of the match, whichever screen it is leaving for. The board is not that
     // any more: in a networked room it never stopped the simulation (#37).
