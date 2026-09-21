@@ -528,7 +528,7 @@ async function walk() {
 
     await click("Create a room");
     await on("create");
-    await screen("create").locator("input").fill(room_a);
+    await screen("create").locator("input.code").fill(room_a);
     await click("Create");
     // The relay answers with the room and no seats, so the flow asks who is playing.
     await on("names");
@@ -789,7 +789,7 @@ async function walk() {
 
     await click("Create a room");
     await on("create");
-    await screen("create").locator("input").fill(room_c);
+    await screen("create").locator("input.code").fill(room_c);
     await click("Create");
     await on("names");
     await page.keyboard.press("ArrowUp");
@@ -1050,7 +1050,10 @@ async function two_pages() {
     await host.goto(origin + "/");
     await click("Create a room", host);
     await on("create", host);
-    await screen("create", host).locator("input").fill(room_e);
+    await screen("create", host).locator("input.code").fill(room_e);
+    // Ticked on the way in, which is the only time it can be: listing is not host config
+    // and does not change while the room is live (#43).
+    await screen("create", host).locator("input[type=checkbox]").check();
     await click("Create", host);
     await on("names", host);
     await host.keyboard.press("ArrowUp");
@@ -1058,11 +1061,24 @@ async function two_pages() {
     await click("Take the seats", host);
     await on("room", host);
 
+    // The guest arrives by the public list rather than by the code, which is the same
+    // join underneath: Browse fetches once on entry, and the row is the way in. A room
+    // holding only its host is listed -- that is the whole point of it (#43).
     await guest.goto(origin + "/");
-    await click("Join with a room code", guest);
-    await on("join", guest);
-    await screen("join", guest).locator("input").fill(room_e);
-    await click("Continue", guest);
+    await click("Browse rooms", guest);
+    await on("browse", guest);
+    const row = screen("browse", guest).locator("li");
+    await until("the host's room in the public list", async () => (await row.count()) === 1);
+    // `:visible`, because an unrendered element's `innerText` is its text content and the
+    // lock a listed room does not have would read as one.
+    const fields = await row.locator("span:visible, small:visible").allInnerTexts();
+    assert.deepEqual(
+        fields,
+        ["Dott", room_e, "1/4", "in the lobby"],
+        "the host's username, the code, the occupancy and the phase, and no fifth field " +
+            "until it is locked",
+    );
+    await click("Join", guest);
     await on("names", guest);
     await guest.keyboard.press("ArrowUp");
     await until("the guest's participant", async () => (await seats(guest).count()) === 1);

@@ -103,6 +103,9 @@ function ViewModel() {
     // The room id this client has already spent its no-password attempt on, so Back onto
     // the same link does not open a second socket to be refused by the same room.
     var attempted_id = null;
+    // Whether the id being joined came from a Browse row the list said was unlocked, which
+    // is the one case where a refused join means "gone" and not "wrong password" (#43).
+    var browsed = false;
     // Granted by the relay, never assumed: the seats this client holds, in the order it
     // holds them, which is the order its control schemes bind in (#7).
     var granted = ko.observableArray([]);
@@ -122,6 +125,8 @@ function ViewModel() {
 
     this.screen = ko.observable("landing");
     this.code = ko.observable("");
+    this.listed = ko.observable(false);
+    this.rooms = ko.observableArray([]);
     this.password = ko.observable("");
     this.error = ko.observable("");
     this.room_id = ko.observable(null);
@@ -810,6 +815,14 @@ function ViewModel() {
                     go("landing", true);
                 } else if (self.screen() === "password") {
                     self.error(UNAVAILABLE);
+                } else if (browsed) {
+                    // The list said this room had no password, so a refusal can only mean
+                    // it is gone: a password screen for a password that does not exist is
+                    // the wrong place to land. A locked row still lands there, because
+                    // there a dead room and a wrong password stay indistinguishable (#8).
+                    browsed = false;
+                    self.error(UNAVAILABLE);
+                    go("browse", true);
                 } else {
                     // Which of the two it was is exactly what is not said: the password
                     // screen is where both answers land (#8).
@@ -881,6 +894,7 @@ function ViewModel() {
         if (route.screen !== "play") end_match();
         if (route.screen === "landing" || route.screen === "browse") leave_room();
         self.screen(route.screen);
+        if (route.screen === "browse") self.refresh_rooms();
         if (route.screen === "password" && !self.pending_id()) return go("landing", true);
         if (route.screen === "room" || route.screen === "play")
             if (!self.participants().length) {
@@ -924,6 +938,25 @@ function ViewModel() {
     this.go_browse = function () {
         go("browse");
     };
+    // A snapshot, never a subscription: once on entry, again on the button, and again when
+    // a join is refused. Nothing polls, because the list is not what decides whether a
+    // room will have you -- the join is (#43).
+    this.refresh_rooms = function () {
+        fetch("api/rooms")
+            .then(function (res) {
+                return res.json();
+            })
+            .then(self.rooms)
+            .catch(function () {
+                self.rooms([]);
+            });
+    };
+    // Clicking a row is the same join as typing the code.
+    this.join_listed = function (row) {
+        browsed = !row.locked;
+        attempted_id = null;
+        go(row.id);
+    };
     this.go_lobby = function () {
         // Only the host ends the match for everyone; anybody else is just leaving it, and
         // their seat goes quiet until the next one (#22).
@@ -943,12 +976,13 @@ function ViewModel() {
     this.create_room = function () {
         var id = self.code() ? normalise_room_id(self.code()) : "";
         if (self.code() && !id) return self.error(CODE_HINT);
-        connect({ type: "create", id: id });
+        connect({ type: "create", id: id, listed: self.listed() });
     };
     this.join_room = function () {
         var id = normalise_room_id(self.code());
         if (!id) return self.error(CODE_HINT);
         attempted_id = null;
+        browsed = false;
         go(id);
     };
     this.submit_password = function () {

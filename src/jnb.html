@@ -147,6 +147,7 @@
         <div class="eyebrow">create a room</div>
         <p class="muted">Leave it blank to be given a code, or pick your own.</p>
         <input class="code" maxlength="5" placeholder="CODE" data-bind="value: code, valueUpdate: 'input'" />
+        <label><input type="checkbox" data-bind="checked: listed" /> Show it in the public list</label>
         <button class="pri" data-bind="click: create_room">Create</button>
         <p class="err" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Back</button>
@@ -265,8 +266,20 @@
 
     <div data-bind="visible: screen() === 'browse'" class="kiosk">
         <div class="eyebrow">public rooms</div>
-        <p class="muted">No room list yet &mdash; rooms are found by their code.</p>
+        <ul class="seats" data-bind="foreach: rooms">
+            <li>
+                <span class="grow" data-bind="text: host"></span>
+                <small data-bind="text: id"></small>
+                <small data-bind="text: seats + '/' + of"></small>
+                <small data-bind="visible: locked">locked</small>
+                <small data-bind="text: started ? 'in a match' : 'in the lobby'"></small>
+                <button class="sm" data-bind="click: $parent.join_listed">Join</button>
+            </li>
+        </ul>
+        <p class="muted" data-bind="visible: !rooms().length">Nothing public right now &mdash; make one, or join by its code.</p>
+        <p class="err" data-bind="text: error"></p>
         <button class="pri" data-bind="click: go_create">Create a room</button>
+        <button class="sm" data-bind="click: refresh_rooms">Refresh</button>
         <button class="sm" data-bind="click: go_landing">Back</button>
     </div>
 </body>
