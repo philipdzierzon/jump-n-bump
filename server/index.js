@@ -94,6 +94,16 @@ function broadcast(room, msg, except) {
     for (const client of room.clients) if (client !== except) send(client, msg);
 }
 
+// The same fan-out, minus the clients waiting for a seat. A client with no seat is not the
+// test: one that followed a link into a running match has no seat either and is spectating
+// the simulation it asked for (#40). A client in the queue asked for a seat and is waiting
+// for one, which is the whole of what it is doing until it gets one (#44). Room news still
+// reaches it -- that is `broadcast_state`, a loop of its own.
+function broadcast_frame(room, msg, except) {
+    for (const client of room.clients)
+        if (client !== except && !client.queued.length) send(client, msg);
+}
+
 function create(client, msg) {
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
     if (!id) return send(client, { type: "error", code: "BAD_ID" });
@@ -224,6 +234,50 @@ function ensure_host(room) {
     for (const client of room.clients) client.host = client === successor;
 }
 
+// The one room Quick Join would put this client in, or null if none would take it. Listed
+// and unlocked, because an unlisted room is somebody's private code and a locked one is
+// nobody's to walk into; room enough for the whole client, because a couch is atomic; and a
+// name it can still use.
+//
+// Fewest free seats first, then a match in progress over a lobby, then oldest. Concentrating
+// rather than spreading is the whole point: spreading is what makes a quiet subdomain feel
+// broken, and a lobby may never start on its own -- the default bump limit is endless (#44).
+// Insertion order is creation order, so "oldest" needs no timestamp and a stable sort keeps
+// it (#43).
+function best_room(names, build) {
+    return (
+        Object.values(rooms)
+            .filter(
+                (room) =>
+                    room.listed &&
+                    !room.password &&
+                    !(build && room.build && build !== room.build) &&
+                    free_seats(room).length >= names.length &&
+                    !name_taken(room, names),
+            )
+            .sort(
+                (a, b) =>
+                    free_seats(a).length - free_seats(b).length ||
+                    Number(b.started) - Number(a.started),
+            )[0] || null
+    );
+}
+
+// One round trip, and it never waitlists: a client that pressed Quick Join asked to play
+// now, and the queue is the answer to wanting one particular room (#44). The pick and the
+// seating happen in the same step, so there is no list to go stale between them and nothing
+// to retry -- and when nothing fits, the answer is a room of its own rather than a wait.
+function quick_join(client, msg) {
+    const names = clean_names(msg.names);
+    if (!names) return send(client, { type: "error", code: "BAD_NAME" });
+    const room = best_room(names, msg.build);
+    // Listed, because an unlisted one would leave the next client pressing Quick Join with
+    // nothing to find and a second room to sit alone in. Either way the seats are taken
+    // inside `admit`, on the way in: one round trip, one answer.
+    if (!room) create(client, { ...msg, id: "", listed: true });
+    else admit(client, room, msg);
+}
+
 // The seats whose holder is connected right now. A seat held by an absent token is neither
 // reclaimable by anyone else nor driven by a keyboard, which is the one question both
 // callers ask.
@@ -323,6 +377,9 @@ function room_view(room, client) {
         started: room.started,
         ready: ready_seats(room),
         you_ready: !!client.ready,
+        // Waiting for a seat in this room rather than choosing names for one: the two are
+        // the same zero seats held, and only one of them is a screen to stay on (#44).
+        queued: !!client.queued.length,
         // Milliseconds left of the countdown, from the relay's own deadline rather than a
         // count the client accumulates: a hidden tab stops its game loop but not its
         // clock, and a countdown built on frames would freeze with it (#51).
@@ -342,25 +399,69 @@ function broadcast_state(room) {
 
 // A client is atomic: its seat count is fixed at the names screen and granted
 // all-or-nothing, so a couch pair stays together and keeps every seat (#14).
+// The seats nobody is holding. A reserved seat is not one of them: its holder's token owns
+// it until the window runs out, which is the same reason `/api/rooms` counts it as occupied.
+function free_seats(room) {
+    return room.seats.map((seat, index) => (seat ? -1 : index)).filter((index) => index >= 0);
+}
+
+// Seats a whole client or none of it, which is the one rule every way into a seat obeys: a
+// couch is atomic, so a client that does not fit waits rather than splitting (#14). False
+// when the room cannot take it -- too few seats, or a name that somebody took while it
+// waited.
+function seat_client(client, names) {
+    const room = client.room;
+    const free = free_seats(room);
+    if (free.length < names.length || name_taken(room, names)) return false;
+    client.seats = free.slice(0, names.length);
+    client.seats.forEach((seat, nth) => {
+        room.seats[seat] = { token: client.token, name: names[nth] };
+        room.last_names[seat] = names[nth];
+    });
+    client.queued = [];
+    ensure_host(room);
+    // Taken while a match is running: the seat was the AI's when that match began, so the
+    // room is told on an agreed tick that somebody is driving it now (#7, #40). After the
+    // grant, never during it: a half-seated couch is not a room view anybody should see.
+    if (room.started) for (const seat of client.seats) stamp_driver(room, seat, "local");
+    return true;
+}
+
+// A full room waitlists rather than refuses (#44): the names it asked with are kept, so a
+// seat that frees can be handed over without asking for them again, and `arrived` -- which
+// the room already keeps for host migration -- is the arrival order the queue is served in.
 function take_seats(client, msg) {
     const room = client.room;
     if (client.seats.length) return;
     const names = clean_names(msg.names);
     if (!names) return send(client, { type: "error", code: "BAD_NAME" });
     if (name_taken(room, names)) return send(client, { type: "error", code: "NAME_TAKEN" });
-    const free = room.seats.map((seat, index) => (seat ? -1 : index)).filter((i) => i >= 0);
-    if (free.length < names.length) return send(client, { type: "error", code: "ROOM_FULL" });
-    client.seats = free.slice(0, names.length);
-    client.seats.forEach((seat, nth) => {
-        room.seats[seat] = { token: client.token, name: names[nth] };
-        room.last_names[seat] = names[nth];
-    });
-    ensure_host(room);
-    // Taken while a match is running: the seat was the AI's when that match began, so the
-    // room is told on an agreed tick that somebody is driving it now (#7, #40). After the
-    // grant, never during it: a half-seated couch is not a room view anybody should see.
-    if (room.started) for (const seat of client.seats) stamp_driver(room, seat, "local");
+    if (!seat_client(client, names)) client.queued = names;
     broadcast_state(room);
+}
+
+// The waitlist, in arrival order: the clients in this room holding no seats and waiting for
+// some. Derived rather than kept, so a client that disconnects leaves the queue by leaving
+// the room and there is no second list to keep true.
+function queue(room) {
+    return [...room.clients]
+        .filter((client) => client.queued.length)
+        .sort((a, b) => a.arrived - b.arrived);
+}
+
+// Freed seats go to the first waiting client that fits, and a smaller client may pass a
+// blocked larger one: head-of-line blocking is accepted, not fixed, because a client is
+// atomic and splitting one to fill a seat is the thing that rule exists to prevent (#44).
+// The reserved holder is ahead of all of them, and needs no code here -- a reserved seat is
+// still held, so it is not free to hand out. AI-fill is behind them, and happens where it
+// always did: at the next `begin`, and mid-match after thirty missing ticks.
+function seat_queue(room) {
+    for (const client of queue(room)) {
+        if (!seat_client(client, client.queued)) continue;
+        // Seated inside a countdown it had no chance to press anything during, which is
+        // the rule a client joining inside one already gets (#37).
+        client.ready = !!room.deadline;
+    }
 }
 
 // One seat at a time, which is the other way into one (#42). It is what a newcomer displaces
@@ -403,6 +504,7 @@ function vacate(client) {
     // A client with no seats is not in the room, so it has nothing left to come back to.
     if (room.away_host === client.token) room.away_host = null;
     ensure_host(room);
+    seat_queue(room);
 }
 
 function admit(client, room, msg) {
@@ -420,10 +522,20 @@ function admit(client, room, msg) {
             seat && seat.token === client.token && !online.has(index) ? index : -1,
         )
         .filter((index) => index >= 0);
+    // The names this client is waiting to sit down with, empty unless it asked for seats
+    // in a room that had none (#44).
+    client.queued = [];
     // Joining or reconnecting during a countdown is auto-ready: whoever arrives inside it
     // has had no chance to press anything, and would otherwise be vacated at zero (#37).
     client.ready = !!room.deadline;
     room.clients.add(client);
+    // Quick Join answered the names screen before it asked, so its seats are taken on the
+    // way in rather than on a second message: `joined` is what the client acts on, and a
+    // client told it holds nothing walks back to the names screen (#44).
+    if (msg.type === "quick") {
+        const names = clean_names(msg.names);
+        if (names) seat_client(client, names);
+    }
     // A reload is a disconnect, so the host migrated the moment it dropped -- and hands the
     // room back when its own token returns inside the reservation window. Amends #17's
     // "host gets no grace and no restore": migration still happens immediately, so a host
@@ -513,7 +625,11 @@ function last_board(room) {
 // ahead of time, so the cost is the one-way trip rather than the round trip.
 function input_delay(room) {
     let worst = 0;
-    for (const client of room.clients) worst = Math.max(worst, client.one_way);
+    // Not the clients waiting for a seat: a queued client's round trip is nobody's frame
+    // deadline, and letting it set the delay would make the whole room play to the latency
+    // of somebody who is not playing (#44).
+    for (const client of room.clients)
+        if (!client.queued.length) worst = Math.max(worst, client.one_way);
     return Math.min(10, Math.max(2, Math.ceil(worst / TICK_MS) + 1));
 }
 
@@ -525,7 +641,7 @@ function stamp_driver(room, seat, driver) {
     // A seat handed to a client starts its gap count again: whatever that seat missed, it
     // missed while somebody else was driving it (#42).
     if (driver === "local") room.missing[seat] = 0;
-    broadcast(room, { type: "driver", t, seat, driver });
+    broadcast_frame(room, { type: "driver", t, seat, driver });
     room.stamped.push({ t, seat, driver, was: room.drivers[seat] });
     // A client that walks back to the lobby keeps its seats and hands the AI its bunnies,
     // so the seat is held, its holder is connected, and the AI is driving it all the same.
@@ -609,7 +725,7 @@ function substitute(room) {
             }
         }
         if (!Object.keys(seats).length) continue;
-        broadcast(room, { type: "input", t, seats });
+        broadcast_frame(room, { type: "input", t, seats });
         room.inputs.push({ t, seats });
         if (room.inputs.length > MAX_RING) room.inputs.shift();
     }
@@ -658,6 +774,10 @@ function resume(client) {
     // Out of this match for good: a client the relay gave up repairing must not be handed
     // the match back by an ask still in flight, or by the next snapshot answering it (#41).
     if (client.dropped) return void (client.waiting = false);
+    // A client waiting for a seat has nothing to resume into, and asks on the way *out* of
+    // the queue instead -- `seat_client` clears `queued`, and the ask that follows is the
+    // one every mid-match arrival makes (#40, #44).
+    if (client.queued.length) return void (client.waiting = false);
     client.waiting = false;
     // Every hash this client stamped for a tick at or before now belongs to the state being
     // replaced, and some of it is still in flight: counting it would spend a second of the
@@ -860,19 +980,24 @@ function begin(room, msg) {
         seat && online.has(index) ? "local" : room.config.ai_fill ? "ai" : "off",
     );
     room.drivers = drivers;
+    // Not the clients waiting for a seat: a queued client has no simulation, and a `start`
+    // is what would make it build one. It enters through the resync path instead, once a
+    // freed seat has made it a client in the match (#44).
     for (const other of room.clients)
-        send(other, {
-            type: "start",
-            t: 0,
-            d: room.d,
-            seed: msg.seed,
-            // The room's, never the proposer's: a client that configured itself -- an old
-            // query param, a stale tab, a bot -- would desync the RNG stream on the first
-            // kill, so what a `start` carries in `settings` is ignored here (#5, #38).
-            settings: room.config,
-            held: other.seats,
-            drivers,
-        });
+        if (!other.queued.length)
+            send(other, {
+                type: "start",
+                t: 0,
+                d: room.d,
+                seed: msg.seed,
+                // The room's, never the proposer's: a client that configured itself -- an
+                // old query param, a stale tab, a bot -- would desync the RNG stream on
+                // the first kill, so what a `start` carries in `settings` is ignored here
+                // (#5, #38).
+                settings: room.config,
+                held: other.seats,
+                drivers,
+            });
     // The room changed on the way in -- the staged config landed -- and a client that is
     // not playing this match hears about it on the same broadcast every other change uses
     // (#36). It is also what retires the staged banner once the match it named begins.
@@ -961,6 +1086,10 @@ function relay(client, msg) {
             break;
         case "input": {
             if (!Number.isInteger(msg.t) || msg.t < 0) return;
+            // A client waiting for a seat has no frame to send, and the one it sent would
+            // move the room's clock on: `tick` is taken before any seat is looked at, so a
+            // queued client could make every real client's frames late (#44).
+            if (client.queued.length) return;
             // Past its deadline: the relay already put a released frame in for this tick and
             // the room stepped it, so the real one is for a tick that never comes round
             // again. Dropped silently and counted, because a client cannot be told to send
@@ -986,7 +1115,7 @@ function relay(client, msg) {
                 }
             // Every other client, never the sender: it scheduled its own frame when it
             // sent it, which is what makes the delay one-way (#12).
-            broadcast(room, { type: "input", t: msg.t, seats }, client);
+            broadcast_frame(room, { type: "input", t: msg.t, seats }, client);
             // Rung as well as fanned out, the sender's own frames included: a joiner needs
             // every seat's input for the gap, not just the ones somebody else sent (#40).
             room.inputs.push({ t: msg.t, seats });
@@ -1109,6 +1238,9 @@ export function start_server(port = PORT) {
                     break;
                 case "join":
                     if (!client.room) join(client, msg);
+                    break;
+                case "quick":
+                    if (!client.room) quick_join(client, msg);
                     break;
                 default:
                     if (client.room) relay(client, msg);

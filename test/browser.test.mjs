@@ -64,6 +64,25 @@ const room_g = generate_room_id({
     [room_e]: true,
     [room_f]: true,
 });
+const room_h = generate_room_id({
+    [room_a]: true,
+    [room_b]: true,
+    [room_c]: true,
+    [room_d]: true,
+    [room_e]: true,
+    [room_f]: true,
+    [room_g]: true,
+});
+const room_i = generate_room_id({
+    [room_a]: true,
+    [room_b]: true,
+    [room_c]: true,
+    [room_d]: true,
+    [room_e]: true,
+    [room_f]: true,
+    [room_g]: true,
+    [room_h]: true,
+});
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -1421,6 +1440,102 @@ async function browse() {
     assert.deepEqual(errors, [], "and the browse screen threw nothing");
 }
 
+// Quick Join and the queue, from the two sides a player sees them from: one client asks to
+// be put somewhere and is, in the tightest room that fits it, and the next one to ask for a
+// seat in that now-full room waits for one instead of being turned away (#44).
+async function queueing() {
+    const quick_page = await (await make_context("quick")).newPage();
+    const waiting_page = await (await make_context("waiting")).newPage();
+    const errors = [];
+    quick_page.on("pageerror", (error) => errors.push("quick: " + error.message));
+    waiting_page.on("pageerror", (error) => errors.push("waiting: " + error.message));
+    const lobby_of = (root) => screen("room", root);
+    const named = (root) => lobby_of(root).locator("ul.seats li span.grow").allInnerTexts();
+    const waiting_line = () =>
+        lobby_of(waiting_page).locator("p.muted").filter({ hasText: "waiting for one" });
+
+    // Two listed rooms with room for a couch of two: one with exactly two seats free and one
+    // with three. The tighter of them is the one Quick Join is supposed to pick, and a couch
+    // is what tells the two apart -- a single player would fit the one free seat an earlier
+    // walk left open in a room older than either of these, and would rightly be sent there.
+    const fill = async (id, names) => {
+        const seen = [];
+        const client = relay_client({ type: "create", id: id, listed: true }, seen);
+        await until("the room " + id, async () => seen.some((msg) => msg.type === "joined"));
+        client.send({ type: "seats", names: names });
+        await until("its " + names.length + " seats", async () =>
+            seen.some((msg) => msg.type === "room" && msg.held.length === names.length),
+        );
+        return client;
+    };
+    const tight = await fill(room_h, ["Ann", "Ben"]);
+    const roomy = await fill(room_i, ["Cid"]);
+
+    await quick_page.goto(origin + "/");
+    await click("Quick Join", quick_page);
+    // Names first: the relay cannot pick a room that fits this client without knowing how
+    // many seats it needs.
+    await on("names", quick_page);
+    await quick_page.keyboard.press("ArrowUp");
+    await quick_page.keyboard.press("w");
+    await until("a couch of two to join with", async () => (await seats(quick_page).count()) === 2);
+    await seats(quick_page).nth(0).locator("input").fill("Dot");
+    await seats(quick_page).nth(0).locator("input").blur();
+    await seats(quick_page).nth(1).locator("input").fill("Fay");
+    await seats(quick_page).nth(1).locator("input").blur();
+    await click("Take the seats", quick_page);
+    await on("room", quick_page);
+    await until("the room it was put in", async () =>
+        (await lobby_of(quick_page).locator("h2").innerText()).includes(room_h),
+    );
+    assert.deepEqual(
+        await named(quick_page),
+        ["Ann", "Ben", "Dot", "Fay"],
+        "the two free seats in the tightest room that fits the whole couch, taken on the way in",
+    );
+
+    // That room is full now, so the next client to ask for a seat in it waits.
+    await waiting_page.goto(origin + "/");
+    await click("Join with a room code", waiting_page);
+    await on("join", waiting_page);
+    await screen("join", waiting_page).locator("input").fill(room_h);
+    await click("Continue", waiting_page);
+    await on("names", waiting_page);
+    await waiting_page.keyboard.press("ArrowUp");
+    await until(
+        "a participant to wait with",
+        async () => (await seats(waiting_page).count()) === 1,
+    );
+    await seats(waiting_page).nth(0).locator("input").fill("Eve");
+    await seats(waiting_page).nth(0).locator("input").blur();
+    await click("Take the seats", waiting_page);
+    // The lobby, not the names screen: the asking is done and the answer was "not yet".
+    await on("room", waiting_page);
+    await until("the line that says it is waiting", async () => await waiting_line().isVisible());
+    assert.deepEqual(
+        await named(waiting_page),
+        ["Ann", "Ben", "Dot", "Fay"],
+        "and it is in the room, watching it, holding none of it",
+    );
+
+    // A seat comes free, and the client waiting for it is seated with the names it gave --
+    // no second ask, and nothing to press.
+    await click("Leave", quick_page);
+    await on("landing", quick_page);
+    await until("the seat it was waiting for", async () =>
+        (await named(waiting_page)).includes("Eve"),
+    );
+    assert.equal(
+        await waiting_line().isVisible(),
+        false,
+        "and the line about waiting goes with the waiting",
+    );
+
+    tight.close();
+    roomy.close();
+    assert.deepEqual(errors, [], "and neither page threw");
+}
+
 async function phone() {
     const phone_context = await make_context("phone", { viewport: { width: 390, height: 844 } });
     const phone_page = await phone_context.newPage();
@@ -1570,6 +1685,7 @@ try {
     await reconnect();
     await sound();
     await browse();
+    await queueing();
     await phone();
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
