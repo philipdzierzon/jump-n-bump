@@ -192,28 +192,30 @@ relay in-process, `Emulation.setCPUThrottlingRate({rate: 6})` on the guest once 
 `#play`, both holding <kbd>→</kbd>, 45 s, `d = 2`, one seat each. Throwaway again; the numbers are
 the shipped counters and the relay's own log.
 
-| run      | first desync | dropped at | relay dropped late | host substituted | guest rebases |
-| -------- | ------------ | ---------- | ------------------ | ---------------- | ------------- |
-| before 1 | tick 150     | tick 840   | 379                | 404              | —             |
-| before 2 | tick 180     | tick 870   | 370                | 399              | —             |
-| after 1  | tick 540     | tick 1230  | 269                | 398              | 93            |
-| after 2  | tick 150     | tick 810   | 305                | 437              | 94            |
+| run      | first desync | dropped at | relay dropped late | host substituted | guest rebases | guest worst shift |
+| -------- | ------------ | ---------- | ------------------ | ---------------- | ------------- | ----------------- |
+| before 1 | tick 150     | tick 840   | 379                | 404              | —             | —                 |
+| before 2 | tick 180     | tick 870   | 370                | 399              | —             | —                 |
+| after 1  | tick 300     | tick 990   | 312                | 448              | 95            | 4                 |
+| after 2  | tick 270     | tick 840   | 315                | 435              | 92            | 4                 |
 
-`after 1` looked like a cure and was noise; `after 2` is indistinguishable from either before.
+Two earlier after-runs, on a build that reported the shift as a per-tick snapshot rather than the
+worst of the match, dropped at tick 1230 and tick 810. The 1230 looked like a cure and was noise.
+
 The host's own line is the one that matters, and it says the same thing on both sides:
 
 ```
-match over at tick 2705: 437 frames substituted, 438 of 943 arrived late,
-worst margin -1 ticks (d 2), 0 rebases, shift 0, late by -1:438
+match over at tick 2705: 435 frames substituted, 436 of 971 arrived late,
+worst margin -1 ticks (d 2), 0 rebases, worst shift 0, 0 holes, late by -1:436
 ```
 
-The guest ends every match at `shift 0` having rebased ~93 times out of ~900 ticks: the floor
-climbs above `tick + d` for a tick here and there and then falls back under it, because the
-`newest` it is computed from is as stale as the frames it is meant to outrun. In the steady state
-this failure mode actually has — the guest's _tick_ keeps up, only its frames leave late — the
-floor sits a tick _below_ the natural stamp and the rebase never fires at all. #71's premise that
-"the client can compute that number itself" holds only for a client that is behind in ticks. This
-one is behind in wall-clock.
+**The guest rebases ~93 times a match and the worst lag it ever takes on is four ticks**, against a
+frame stream that is three ticks late essentially always (§1). The floor climbs above `tick + d`
+for a tick here and there and falls straight back under it, because the `newest` it is computed
+from is as stale as the frames it is meant to outrun. In the steady state this failure mode
+actually has — the guest's _tick_ keeps up, only its frames leave late — the floor sits a tick
+_below_ the natural stamp and nothing fires at all. #71's premise that "the client can compute that
+number itself" holds for a client that is behind in ticks. This one is behind in wall-clock.
 
 ### 7. A rebase must never outrun `newest`
 

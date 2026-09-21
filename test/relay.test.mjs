@@ -1581,6 +1581,7 @@ assert.deepEqual(
     "and counts the rebase, once, rather than once per tick it was behind",
 );
 assert.equal(slow_room.stats().shift, floor - d, "with the input lag it just took on itself");
+assert.equal(slow_room.stats().holes, 0, "and no hole yet: the ticks it skipped are still ahead");
 
 // Arriving at all is the assertion: the relay drops a frame past its deadline silently and
 // fans out nothing, so a frame the other client sees is a frame that was not counted late
@@ -1605,9 +1606,21 @@ assert.equal(
     1,
     "stamps stay monotonic after a rebase: the stream shifts on, it never collapses",
 );
+assert.equal(
+    slow_room.stats().shift,
+    floor - d,
+    "the worst shift is kept rather than the current one, which is zero on almost every tick",
+);
+assert.equal(
+    slow_room.stats().holes,
+    0,
+    "and it is short none of its own: this client had stamped nothing when the room ran " +
+        "ahead, so the relay rang released for its seat over exactly the ticks it stepped over",
+);
 
-// A client with budget left is untouched, and a room of one never rebases: `newest` is its
-// own last stamp, so the floor is `tick + 1 - d` and the natural stamp is already past it.
+// A client with budget left is untouched, and a room of one never rebases: its own last
+// stamp is `newest`, so the floor works out at the tick it is on and the natural stamp is a
+// whole delay past it.
 const solo = connect({ type: "create", id: "SBLNE" });
 await lobby(solo);
 await solo.seats(["Alone"]);

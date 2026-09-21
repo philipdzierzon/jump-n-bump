@@ -220,7 +220,16 @@ assert.deepEqual(
 // late (#70). Seat 0 is this client's own and is never short a frame.
 assert.deepEqual(
     delayed_room.stats(),
-    { substituted: 2, arrived: 0, late: 0, worst_margin: 2, late_by: {}, rebases: 0, shift: 0 },
+    {
+        substituted: 2,
+        arrived: 0,
+        late: 0,
+        worst_margin: 2,
+        late_by: {},
+        rebases: 0,
+        shift: 0,
+        holes: 0,
+    },
     "a missing frame is counted, and the first d ticks are not counted against it",
 );
 // A frame for a tick this room stepped three ticks ago: it arrived, it was too late to be
@@ -235,11 +244,28 @@ assert.deepEqual(
         worst_margin: -3,
         late_by: { "-3": 1 },
         // Nothing to rebase against: the room's newest stamp is this client's own, so its
-        // budget is never spent and it carries no shift (#71).
+        // budget is never spent, it carries no shift, and it leaves no tick of its own
+        // unstamped (#71).
         rebases: 0,
         shift: 0,
+        holes: 0,
     },
     "a frame arriving after the tick it was stamped for is counted, with its slack",
+);
+
+// The room has run away from this client: the newest tick anybody stamped is 30, so the
+// relay's deadline is 29 and anything this client stamps `tick + d` for is already past it
+// (#71). It stamps at the deadline instead, and the ticks it steps over carry no frame of
+// its own -- read all keys released here, counted apart from the seat somebody else is
+// failing to send for, because one is this client's own doing and the other is not.
+delayed_transport.to_client({ type: "input", t: 30, seats: { 1: { left: true } } });
+for (let tick = 4; tick < 29; tick++) delayed_room.step();
+const rebased = delayed_room.stats();
+assert.deepEqual(
+    { rebases: rebased.rebases, shift: rebased.shift, holes: rebased.holes },
+    { rebases: 1, shift: 23, holes: 23 },
+    // Tick 5 is not one of them: it was stamped before the rebase, by the step on tick 3.
+    "one rebase, the worst lag it took on, and one hole per tick it stepped over",
 );
 
 // The pump keeps up with the room, not with its own clock (#42). A client resumed into a

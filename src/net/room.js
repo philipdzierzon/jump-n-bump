@@ -69,11 +69,15 @@ export function Room(transport, read_input) {
             late: 0,
             worst_margin: self.d,
             late_by: {},
-            // How often the floor moved this client's stamp, and how far past `tick + d` it
-            // is stamping now: the self-inflicted input lag a struggling client is carrying,
-            // which nobody else pays for (#71).
+            // How often the floor moved this client's stamp, the worst shift it ever took
+            // on, and the ticks it left itself no frame for doing it: the self-inflicted
+            // input lag a struggling client is carrying, which nobody else pays for (#71).
+            // The worst rather than the current one, which is zero on almost every tick --
+            // `tick + d` overtakes the floor within a few ticks of every rebase, so a
+            // client that rebased a hundred times would still end the match reporting none.
             rebases: 0,
             shift: 0,
+            holes: 0,
         };
     }
 
@@ -141,6 +145,13 @@ export function Room(transport, read_input) {
                 if (self.on_start) self.on_start(msg);
                 break;
             case "input":
+                // A tick this client could not reach if it replayed for a minute, so it is
+                // not a frame: `newest` is what `gap()` reads as the room's position and
+                // what `step()` stamps against, and the relay checks only that `t` is a
+                // non-negative integer. One frame stamped a million would sprint the pump
+                // and then leave this client stamping under its own last stamp -- sending
+                // nothing at all -- for the rest of the match (#71, #51).
+                if ((msg.t | 0) - tick > MAX_CATCH_UP) break;
                 // Measured on arrival rather than on use: this is the only moment the wire
                 // trip and the sender's own lateness are both visible (#70).
                 stats.arrived++;
@@ -283,13 +294,14 @@ export function Room(transport, read_input) {
             // sprinting after the other's stamp reach the end of time in about a minute.
             //
             // It only bites a client further behind the room's fastest than `d`. One a tick
-            // behind has budget left and is untouched, and a room of one never rebases:
-            // `newest` is its own last stamp, so the floor is `tick + 1 - d`. The cost is the
-            // struggling client's alone: a few ticks of its own input lag and a stutter at
-            // each rebase. Nobody else pays a millisecond.
+            // behind has budget left and is untouched, and a room of one never rebases: its
+            // own last stamp is `newest`, so the floor is `tick - 1 + d - d + 1`, which is
+            // the tick it is on. The cost is the struggling client's alone: a few ticks of
+            // its own input lag and a stutter at each rebase. Nobody else pays a
+            // millisecond.
             var floor = newest - self.d + 1;
             var stamp = Math.max(tick + self.d, floor);
-            stats.shift = stamp - (tick + self.d);
+            if (stamp - (tick + self.d) > stats.shift) stats.shift = stamp - (tick + self.d);
             // A tick already stamped for keeps the frame it was stamped with. Two reads on
             // one tick is one of them thrown away, and the room has already been told the
             // older one -- so the ticks a rebase steps over carry no frame from this client
@@ -301,7 +313,7 @@ export function Room(transport, read_input) {
                 held.forEach(function (seat, scheme) {
                     if (drivers[seat] === "local") seats[seat] = read_input(scheme);
                 });
-                if (stats.shift > 0) stats.rebases++;
+                if (stamp > tick + self.d) stats.rebases++;
                 last_stamp = stamp;
                 schedule_input(stamp, seats);
                 transport.send({ type: "input", t: stamp, seats: seats });
@@ -333,7 +345,14 @@ export function Room(transport, read_input) {
             // Not the first d ticks, where every seat is substituted for by definition, and
             // not a replayed gap, whose holes are the relay's ring rather than this
             // client's lateness (#70).
-            if (!catching_up && tick >= self.d) stats.substituted++;
+            //
+            // A seat of this client's own is never somebody covering for it: it stamped
+            // every tick it has a frame for, so one without is one it skipped -- a rebase
+            // stepping over it (#71), or the d-tick hole a repair digs (#72). Counted
+            // apart, so `substituted` goes on meaning what the other clients cost this one.
+            if (catching_up || tick < self.d) return;
+            if (held.indexOf(seat) >= 0) stats.holes++;
+            else stats.substituted++;
         });
         tick++;
         return frames;
