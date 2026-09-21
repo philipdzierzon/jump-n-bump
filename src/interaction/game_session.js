@@ -219,13 +219,18 @@ export function Game_Session(get_level, config, muted, transport) {
         var stats = room.stats();
         console.log(
             "match over at tick %d: %d frames substituted, %d of %d arrived late, " +
-                "worst margin %d ticks (d %d), late by %s",
+                "worst margin %d ticks (d %d), %d rebases, shift %d, late by %s",
             room.now(),
             stats.substituted,
             stats.late,
             stats.arrived,
             stats.worst_margin,
             room.d,
+            // What this client spent to stay inside the relay's deadline: how often the
+            // floor moved its stamp, and how far past `tick + d` it ended the match
+            // stamping. Both zero is a client that never ran out of budget (#71).
+            stats.rebases,
+            stats.shift,
             // Every late frame, by how many ticks: the distribution a bigger d would have
             // to cover, which one worst case cannot say (#70, #71).
             Object.keys(stats.late_by)

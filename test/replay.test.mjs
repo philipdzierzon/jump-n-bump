@@ -220,7 +220,7 @@ assert.deepEqual(
 // late (#70). Seat 0 is this client's own and is never short a frame.
 assert.deepEqual(
     delayed_room.stats(),
-    { substituted: 2, arrived: 0, late: 0, worst_margin: 2, late_by: {} },
+    { substituted: 2, arrived: 0, late: 0, worst_margin: 2, late_by: {}, rebases: 0, shift: 0 },
     "a missing frame is counted, and the first d ticks are not counted against it",
 );
 // A frame for a tick this room stepped three ticks ago: it arrived, it was too late to be
@@ -228,7 +228,17 @@ assert.deepEqual(
 delayed_transport.to_client({ type: "input", t: 1, seats: { 1: { left: true } } });
 assert.deepEqual(
     delayed_room.stats(),
-    { substituted: 2, arrived: 1, late: 1, worst_margin: -3, late_by: { "-3": 1 } },
+    {
+        substituted: 2,
+        arrived: 1,
+        late: 1,
+        worst_margin: -3,
+        late_by: { "-3": 1 },
+        // Nothing to rebase against: the room's newest stamp is this client's own, so its
+        // budget is never spent and it carries no shift (#71).
+        rebases: 0,
+        shift: 0,
+    },
     "a frame arriving after the tick it was stamped for is counted, with its slack",
 );
 

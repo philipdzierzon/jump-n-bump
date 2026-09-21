@@ -36,7 +36,15 @@ export function Room(transport, read_input) {
     // a client replaying a gap has to land, and it is fresher than the number the relay put
     // in the payload: fetching a level and unpacking a state takes time the room spends
     // playing (#40).
+    //
+    // That identity is load-bearing and `step()` below keeps it: `pump` sprints while
+    // `gap()` is positive, so a stamp that ran ahead of the tick it was read on would read
+    // here as a room that had run ahead -- and two clients each sprinting to catch the
+    // other's stamp drag each other to the end of time (#71).
     var newest = 0;
+    // The newest tick this client has stamped a frame for. Stamps are monotonic: a rebase
+    // shifts the stream on, and two ticks of input never collapse onto one (#71).
+    var last_stamp = 0;
     // What a late frame cost this client, counted per match (#70). A frame that crossed
     // late used to *be* the divergence -- it was used by whoever had not reached its tick
     // yet and substituted for by whoever had -- until the relay took the substitution over
@@ -55,7 +63,18 @@ export function Room(transport, read_input) {
     reset_stats();
 
     function reset_stats() {
-        stats = { substituted: 0, arrived: 0, late: 0, worst_margin: self.d, late_by: {} };
+        stats = {
+            substituted: 0,
+            arrived: 0,
+            late: 0,
+            worst_margin: self.d,
+            late_by: {},
+            // How often the floor moved this client's stamp, and how far past `tick + d` it
+            // is stamping now: the self-inflicted input lag a struggling client is carrying,
+            // which nobody else pays for (#71).
+            rebases: 0,
+            shift: 0,
+        };
     }
 
     // Set by the relay's `start`, which is where everything the match must agree on rides
@@ -84,6 +103,15 @@ export function Room(transport, read_input) {
                 tick = msg.t | 0;
                 input_at = {};
                 drivers_at = {};
+                // With them: `newest` names a tick of the match whose frames were just
+                // wiped, and the match starting counts from `msg.t`. Left standing, last
+                // match's number is a floor no stamp of this one could ever reach (#71).
+                // One before the first tick, because nobody has stamped for that tick yet
+                // either -- the relay's own `room.tick` is `newest + 1` and starts a match
+                // at `msg.t`, and a local room runs on `d = 0`, where a floor one too high
+                // would push every frame past the tick it is read on (#16).
+                newest = tick - 1;
+                last_stamp = tick - 1;
                 // The table rides on `start` rather than as four stamped changes: a
                 // client steps tick 0 the instant `start` lands, and a separate message
                 // for that same tick is a message for a tick already stepped past (#34).
@@ -233,15 +261,51 @@ export function Room(transport, read_input) {
         delete drivers_at[tick];
 
         if (!catching_up) {
-            var seats = {};
-            held.forEach(function (seat, scheme) {
-                if (drivers[seat] === "local") seats[seat] = read_input(scheme);
-            });
             // Every tick, unconditionally, stamped d ahead so the delay is the one-way
             // trip; never echoed back to its sender, so this client schedules its own
             // (#12, #6).
-            schedule_input(tick + self.d, seats);
-            transport.send({ type: "input", t: tick + self.d, seats: seats });
+            //
+            // `d` is a budget, and a client that has spent it stamps at the floor instead
+            // (#71). The relay drops a frame for a tick it has already substituted for --
+            // `msg.t < room.due`, where `due` is `newest - d + 1` -- and broadcasts released
+            // keys for that seat to the whole room, the holder included. The holder never
+            // reads that broadcast: it scheduled its own real frame for the tick when it
+            // stepped, and a frame for a stepped tick is never read. So the room steers that
+            // bunny with released keys while its holder steers it for real, and #41 sees the
+            // disagreement. Stamping at the floor -- locally and on the wire, the same number
+            // -- makes a dropped frame an on-time frame for a slightly later tick.
+            //
+            // The floor is `newest - d + 1`, so a rebased stamp is never past `newest` and
+            // can never move the room's clock on: only the client whose `tick + d` is highest
+            // does that, which is the fastest one, exactly as before. A floor that could
+            // outrun `newest` would be read by every other client as a room that had run
+            // ahead, and `pump` sprints while `gap()` is positive -- two clients each
+            // sprinting after the other's stamp reach the end of time in about a minute.
+            //
+            // It only bites a client further behind the room's fastest than `d`. One a tick
+            // behind has budget left and is untouched, and a room of one never rebases:
+            // `newest` is its own last stamp, so the floor is `tick + 1 - d`. The cost is the
+            // struggling client's alone: a few ticks of its own input lag and a stutter at
+            // each rebase. Nobody else pays a millisecond.
+            var floor = newest - self.d + 1;
+            var stamp = Math.max(tick + self.d, floor);
+            stats.shift = stamp - (tick + self.d);
+            // A tick already stamped for keeps the frame it was stamped with. Two reads on
+            // one tick is one of them thrown away, and the room has already been told the
+            // older one -- so the ticks a rebase steps over carry no frame from this client
+            // at all, and read all keys released everywhere through the floor in `step()`
+            // below. One hole per rebase, not one per tick, and `client.last_t` keeps
+            // advancing on the relay rather than freezing under its deadline.
+            if (stamp > last_stamp) {
+                var seats = {};
+                held.forEach(function (seat, scheme) {
+                    if (drivers[seat] === "local") seats[seat] = read_input(scheme);
+                });
+                if (stats.shift > 0) stats.rebases++;
+                last_stamp = stamp;
+                schedule_input(stamp, seats);
+                transport.send({ type: "input", t: stamp, seats: seats });
+            }
             // On the same tick on every client, and from the same point in it: the state
             // hashed here is every tick before this one applied and none of this one, which
             // is a state each client reaches in its own time and all of them agree on. Not

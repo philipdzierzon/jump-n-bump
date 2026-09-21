@@ -623,6 +623,13 @@ function last_board(room) {
 // Derived once, from the worst one-way trip in the room, and fixed for the match: a delay
 // that adapts mid-match is a delay every client disagrees about (#34). Clients stamp ticks
 // ahead of time, so the cost is the one-way trip rather than the round trip.
+//
+// One term, one measurement, and deliberately so: the wire is the only lateness the room as
+// a whole is responsible for. A client whose own event loop cannot make 60 Hz stamps its
+// frames late for a reason no ping contains, and covering that here would charge every other
+// player the delay -- 100 ms of input lag for all four to carry one. The sender's own
+// lateness is the sender's to absorb, and it does: it stamps at this delay's own floor
+// instead, `newest - d + 1`, which is exactly `room.due` below (#70, #71).
 function input_delay(room) {
     let worst = 0;
     // Not the clients waiting for a seat: a queued client's round trip is nobody's frame

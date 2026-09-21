@@ -1523,6 +1523,106 @@ duo.socket.close();
 lone_host.socket.close();
 unlisted.socket.close();
 
+// --- the sender stamps for a tick the relay will still accept (#71)
+//
+// A client whose own loop cannot make 60 Hz reads the keys for tick T at wall-tick T+3, so
+// the frame it stamps `T + d` for is already past `room.due` when it lands and the relay
+// drops it (#70). Nobody hears about that: the holder scheduled its own real frame locally
+// when it stepped and is never echoed one (#12), so the room steers that bunny with the
+// relay's released keys while its holder steers it for real, and #41 sees the disagreement.
+//
+// The floor is the fix, and `newest - d + 1` is exactly what `room.due` is: stamp there,
+// locally and on the wire, and a dropped frame becomes an on-time frame for a slightly
+// later tick. Driven through the real `Room` rather than raw JSON, because the number under
+// test is the one the client works out for itself.
+const slow = connect({ type: "create", id: "RBSFT" });
+await lobby(slow);
+await slow.seats(["Slow"]);
+const quick = connect({ type: "join", id: "RBSFT" });
+await lobby(quick);
+await quick.seats(["Quick"]);
+const quick_saw = [];
+quick.socket.receive((msg) => quick_saw.push(msg));
+
+const slow_room = new Room(slow.socket, () => pressed_key);
+const playing = new Promise((resolve) => (slow_room.on_start = resolve));
+quick.socket.send({ type: "ready", ready: true });
+slow_room.start({ seed: 71, settings: {}, held: [] });
+await playing;
+
+// The room runs ahead of this client without it having stepped a tick: one frame stamped
+// forty ticks out is a client forty ticks further on, which is what a 6x-throttled tab
+// looks like from here. The relay's clock moves with it, and its deadline behind that.
+const lead = 40;
+const d = slow_room.d;
+quick.socket.send({ type: "input", t: lead, seats: { 1: pressed_key } });
+const since = Date.now();
+while (slow_room.gap() < lead - d) {
+    if (Date.now() - since > 2000) throw new Error("the room never ran ahead of the slow client");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+const floor = lead - d + 1;
+slow_room.step();
+assert.equal(
+    (
+        await until_seen(
+            quick_saw,
+            (msg) => msg.type === "input" && msg.seats["0"] && msg.seats["0"].right,
+            "the slow client's own frame",
+        )
+    ).t,
+    floor,
+    "a client further behind the room than d stamps for the first tick the relay still takes",
+);
+assert.deepEqual(
+    slow_room.stats().rebases,
+    1,
+    "and counts the rebase, once, rather than once per tick it was behind",
+);
+assert.equal(slow_room.stats().shift, floor - d, "with the input lag it just took on itself");
+
+// Arriving at all is the assertion: the relay drops a frame past its deadline silently and
+// fans out nothing, so a frame the other client sees is a frame that was not counted late
+// (`msg.t < room.due` returns before `broadcast_frame`). The same number locally, which is
+// the whole point -- the two agree by construction rather than by a message arriving in
+// time.
+const stepped = [];
+for (let tick = 1; tick <= floor; tick++) stepped.push(slow_room.step());
+assert.deepEqual(
+    stepped[floor - 2][0],
+    no_key,
+    "the ticks the rebase steps over read all keys released on the sender too, through the " +
+        "floor in step() and the relay's own ring -- no new substitution path",
+);
+assert.deepEqual(
+    stepped[floor - 1][0],
+    pressed_key,
+    "and the rebased frame is the client's own, on the tick it stamped it for",
+);
+assert.equal(
+    slow_room.stats().rebases,
+    1,
+    "stamps stay monotonic after a rebase: the stream shifts on, it never collapses",
+);
+
+// A client with budget left is untouched, and a room of one never rebases: `newest` is its
+// own last stamp, so the floor is `tick + 1 - d` and the natural stamp is already past it.
+const solo = connect({ type: "create", id: "SBLNE" });
+await lobby(solo);
+await solo.seats(["Alone"]);
+const solo_room = new Room(solo.socket, () => pressed_key);
+const solo_playing = new Promise((resolve) => (solo_room.on_start = resolve));
+solo_room.start({ seed: 71, settings: {}, held: [] });
+await solo_playing;
+for (let tick = 0; tick < 120; tick++) solo_room.step();
+assert.equal(solo_room.stats().rebases, 0, "a room of one never rebases");
+assert.equal(solo_room.stats().shift, 0, "and carries no input lag of its own");
+
+slow.socket.close();
+quick.socket.close();
+solo.socket.close();
+
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");
 process.exit(0);
