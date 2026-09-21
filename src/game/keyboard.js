@@ -35,6 +35,15 @@ export function Keyboard(key_function_mappings) {
         var action = key_function_mappings[String.fromCharCode(evt.keyCode)];
         if (action != null) action();
     };
+
+    // Every key up at once, for a window that stopped being told about keyups at all: a tab
+    // switched away from never delivers the keyup for the key that was held, and the map
+    // would go on reporting it pressed for every tick of it (#85). Not a loop of `onKeyUp`,
+    // which would fire M's and P's actions -- a flush is the keys being let go of, not the
+    // player pressing them.
+    this.release_all = function () {
+        keys_pressed = {};
+    };
 }
 
 // The jump key of a scheme, which is how a couch player is added on the names screen

@@ -456,6 +456,18 @@ export function Game_Session(get_level, config, muted, transport) {
     document.onkeyup = function (evt) {
         if (!is_typing(evt)) keyboard.onKeyUp(evt);
     };
+
+    // Alt-tab with right held and the browser never sends the keyup: the map stays pressed,
+    // and `Room.step` re-reads it and re-stamps it 60 times a second, so the bunny runs
+    // right forever on every client in the room and not just this one (#85). Both events,
+    // because neither covers the other: switching applications blurs a window whose tab
+    // Chrome still calls visible, and a phone backgrounding the browser can hide it without
+    // a blur anybody promises.
+    // Assigned rather than added, exactly like the key handlers above: a session is built on
+    // every entry to the lobby and again on every reconnect, and `addEventListener` would
+    // pile one listener per session onto keyboards that are already gone.
+    window.onblur = keyboard.release_all;
+    document.onvisibilitychange = keyboard.release_all;
 }
 
 // Shared with the flow screens, which have text fields of their own (#35).
