@@ -519,6 +519,19 @@ function ViewModel() {
 
     function end_match() {
         var game = self.current_game();
+        // Only the host ends the match for everyone; anybody else is just leaving it, and
+        // their seat goes quiet until the next one (#22). Said here, not on the button:
+        // browser Back is the same way out of a match, and used to just tear the session
+        // down while the relay went on believing it was running (#87).
+        // `game_state() !== Not_Started` guards the window before `build()`: a connected
+        // host parked in `start_when_ready` who Backs `#play` -> `#room` here would
+        // otherwise announce nothing and strand the match for everyone else, same as the
+        // hole this fixes -- microtask-wide in practice, and backstopped by the relay's own
+        // `host_left` if the socket goes instead.
+        // Above the read below, not beside the button: a local room echoes the announcement
+        // back synchronously, and that echo is what names the reason and carries the board.
+        if (game && game.in_match && host && game.game_state() !== Game_State.Not_Started)
+            game.announce_end("lobby");
         // Read once and forgotten here, before the guard: the reason and the board belong
         // to the match being left, and must not be waiting for the next one.
         var reason = ended_because;
@@ -908,6 +921,12 @@ function ViewModel() {
         var route = screen_of(window.location.hash);
         if (route.screen !== "play") end_match();
         if (route.screen === "landing" || route.screen === "browse") leave_room();
+        // A room-code hash is a join route, not one of the two screen names above, so
+        // following somebody else's link while seated used to leave the old room holding an
+        // empty bunny for the whole reservation window (#87). `self.room_id()` keeps a cold
+        // load off this path -- it holds no relay seat and needs no leave -- and `!==` keeps
+        // re-following your own link the no-op `enter()` already makes of it.
+        if (route.room_id && self.room_id() && route.room_id !== self.room_id()) leave_room();
         self.screen(route.screen);
         if (route.screen === "browse") self.refresh_rooms();
         if (route.screen === "password" && !self.pending_id()) return go("landing", true);
@@ -927,7 +946,11 @@ function ViewModel() {
         // transport, and the one the reconnect builds would never replace it (#42).
         if (route.screen === "room" && !self.disconnected()) session();
         if (route.screen === "play") {
-            if (!self.current_game()) return go("room", true);
+            // A session exists from the lobby on (line above), so "there is a game" never
+            // meant "a match is running": `in_match` is a `start` having landed on this
+            // session and not yet ended (#40, #87). Without it the lobby's own session made
+            // the match screen reachable, drawing a clock and a Back link over a blank canvas.
+            if (!self.current_game() || !self.current_game().in_match) return go("room", true);
             self.current_game().start();
         }
         if (route.room_id) enter(route.room_id);
@@ -989,12 +1012,9 @@ function ViewModel() {
         attempted_id = null;
         go(row.id);
     };
+    // A route and nothing else: what leaving a match tells the room is `end_match`'s job now,
+    // so this button and the browser's own Back say the same thing (#87).
     this.go_lobby = function () {
-        // Only the host ends the match for everyone; anybody else is just leaving it, and
-        // their seat goes quiet until the next one (#22).
-        var game = self.current_game();
-        if (host && game && game.game_state() !== Game_State.Not_Started)
-            game.announce_end("lobby");
         go("room");
     };
     // Offline is the same flow over the loopback: names, lobby, match, board (#16).
