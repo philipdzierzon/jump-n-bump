@@ -149,10 +149,16 @@ assert.equal(
     "NAME_TAKEN",
     "two participants on one couch hit the same check",
 );
-assert.equal(
-    (await generated.seats(["Carol", "Dave", "Erin"])).code,
-    "ROOM_FULL",
-    "a client is atomic: three seats into two free ones is refused, not part-filled",
+// A client is atomic, so three seats into two free ones takes none of them -- and is no
+// longer refused for it: the room has nowhere to put it, which is what the waitlist is
+// for (#44). The names it asked with are kept, so a seat that frees needs no second ask.
+generated.socket.send({ type: "seats", names: ["Carol", "Dave", "Erin"] });
+const waiting = await generated.until((msg) => msg.type === "room" && msg.queued);
+assert.deepEqual(waiting.held, [], "three seats into two free ones takes none of them");
+assert.deepEqual(
+    waiting.seats,
+    ["Alice", "Bob", null, null],
+    "and puts no name on a seat it did not get",
 );
 // The grant itself, in a room of its own: the match below needs QMFTX's other two seats
 // left to the AI.
@@ -217,13 +223,17 @@ assert.equal(frames[fixed][0].right, true, "and driven by its client from tick d
 assert.equal(frames[fixed][2], undefined, "a seat nobody holds has no frame, so the AI has it");
 
 await new Promise((resolve) => setTimeout(resolve, 100));
-const start_msg = seen.find((msg) => msg.type === "start");
-assert.equal(start_msg.d, fixed, "every client in the room is handed the same delay");
-assert.deepEqual(
-    start_msg.drivers,
-    ["local", "local", "ai", "ai"],
-    "the driver table rides on `start`, so tick 0 has one before anybody steps it",
+// The client waiting for a seat in this room was handed no match at all: it has no
+// simulation, and `start` is what would make it build one (#44). What it does hear is the
+// room -- the view it is sent says a match is running, which is the whole of what a client
+// in the queue needs to know. The same delay and driver table reaching two *seated*
+// clients is asserted where there are two of them, below.
+assert.equal(
+    seen.find((msg) => msg.type === "start"),
+    undefined,
+    "a client in the queue is not handed the match it is waiting for",
 );
+assert.equal(seen.filter((msg) => msg.type === "input").length, 0, "nor a single frame of it");
 
 // A client that follows the link after the host started is told so, rather than waiting on
 // a broadcast that already happened (#40).
@@ -1272,14 +1282,219 @@ assert.equal(
 after.socket.close();
 generated.socket.close();
 
+// The waitlist: a room's arrival-ordered list of clients holding no seats and waiting for
+// some. It is what a full room answers with instead of a refusal, and the only thing that
+// reaches it is asking a full room for seats (#44).
+const held_host = connect({ type: "create", id: "WATLZ" });
+await lobby(held_host);
+await held_host.seats(["Ann"]);
+const held_pair = connect({ type: "join", id: "WATLZ" });
+await lobby(held_pair);
+await held_pair.seats(["Cid", "Dot"]);
+// The fourth seat on a client of its own, so that exactly one seat can come free.
+const held_one = connect({ type: "join", id: "WATLZ" });
+await lobby(held_one);
+await held_one.seats(["Ben"]);
+
+// Two waiting clients, in the order they arrived: a couch of two first, then one of one.
+const wants_two = connect({ type: "join", id: "WATLZ" });
+await lobby(wants_two);
+wants_two.socket.send({ type: "seats", names: ["Eve", "Fay"] });
+assert.deepEqual(
+    (await wants_two.until((msg) => msg.type === "room" && msg.queued)).held,
+    [],
+    "a full room waitlists rather than refusing, and seats none of the couch on the way",
+);
+const wants_one = connect({ type: "join", id: "WATLZ" });
+await lobby(wants_one);
+wants_one.socket.send({ type: "seats", names: ["Gus"] });
+await wants_one.until((msg) => msg.type === "room" && msg.queued);
+
+// One seat frees, and the couch of two does not fit it. The single client behind it does,
+// and takes it: head-of-line blocking is accepted rather than fixed, because a client is
+// atomic and splitting the couch to fill the seat is what that rule prevents (#44).
+held_one.socket.send({ type: "leave" });
+assert.deepEqual(
+    (await wants_one.until((msg) => msg.type === "room" && msg.held.length)).held,
+    [3],
+    "a smaller client passes a blocked larger one",
+);
+assert.equal(
+    (await wants_two.until((msg) => msg.type === "room")).queued,
+    true,
+    "and the one it passed is still waiting, with the names it asked with",
+);
+
+// Both of the freed seats at once, and now the couch fits. Seated together or not at all,
+// which is the same rule that put it in the queue.
+held_pair.socket.send({ type: "leave" });
+const couch_seated = await wants_two.until((msg) => msg.type === "room" && msg.held.length);
+assert.deepEqual(couch_seated.held, [1, 2], "a freed pair of seats goes to the couch waiting");
+assert.deepEqual(
+    couch_seated.seats,
+    ["Ann", "Eve", "Fay", "Gus"],
+    "with the names it waited with, and no second ask for them",
+);
+assert.equal(couch_seated.queued, false, "and it is out of the queue");
+wants_two.socket.close();
+wants_one.socket.close();
+held_host.socket.close();
+held_pair.socket.close();
+held_one.socket.close();
+
+// The reserved holder is ahead of the whole queue: a dropped socket holds its seats for its
+// token, and a seat that is still held is not a seat to hand out (#42, #44).
+process.env.RESERVE_MS = "400";
+const reserving = connect({ type: "create", id: "HELDZ" });
+const reserving_token = await lobby_token(reserving);
+await reserving.seats(["Hal", "Ivy"]);
+const filler = connect({ type: "join", id: "HELDZ" });
+await lobby(filler);
+await filler.seats(["Jan", "Kit"]);
+const hopeful = connect({ type: "join", id: "HELDZ" });
+await lobby(hopeful);
+hopeful.socket.send({ type: "seats", names: ["Lee"] });
+await hopeful.until((msg) => msg.type === "room" && msg.queued);
+// A dropped connection, not a Leave: the seats stay this token's for the window.
+reserving.socket.close();
+await new Promise((resolve) => setTimeout(resolve, 150));
+assert.equal(
+    (await hopeful.until((msg) => msg.type === "room")).queued,
+    true,
+    "a reserved seat is not offered to the queue while its holder may still come back",
+);
+// And the token comes back and takes them, past a client that was waiting for one.
+const returning = connect({ type: "join", id: "HELDZ", token: reserving_token });
+assert.deepEqual(
+    (await lobby(returning)).held,
+    [0, 1],
+    "the holder reclaims them, ahead of everyone waiting",
+);
+// Let the window run out with the holder back: nothing is freed, so nobody is seated.
+await new Promise((resolve) => setTimeout(resolve, 400));
+assert.equal(
+    (await hopeful.until((msg) => msg.type === "room")).queued,
+    true,
+    "and the queue is still waiting once the window it lost to has passed",
+);
+delete process.env.RESERVE_MS;
+returning.socket.close();
+filler.socket.close();
+hopeful.socket.close();
+
+// A client in the queue is not a client the countdown waits for: the gate asks the clients
+// holding seats, so a room whose seat-holders are all ready begins instead of counting down
+// on behalf of somebody who is not playing (#37, #44).
+const four_up = connect({ type: "create", id: "CNTDW" });
+await lobby(four_up);
+await four_up.seats(["Ada", "Bax", "Cal", "Dee"]);
+const stuck = connect({ type: "join", id: "CNTDW" });
+await lobby(stuck);
+stuck.socket.send({ type: "seats", names: ["Eli"] });
+await stuck.until((msg) => msg.type === "room" && msg.queued);
+const begun = [];
+four_up.socket.receive((msg) => begun.push(msg));
+four_up.socket.send({ type: "start", seed: 7 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    begun.find((msg) => msg.type === "start").seed,
+    7,
+    "the one client holding seats is ready, so the match begins on its word",
+);
+assert.equal(
+    (await stuck.until((msg) => msg.type === "room" && msg.started)).countdown,
+    null,
+    "and no countdown was armed for the client waiting for a seat",
+);
+four_up.socket.close();
+stuck.socket.close();
+
+// Quick Join: one round trip, and the answer is a seat. The room it picks is the listed,
+// unlocked one with the fewest free seats that still takes the whole client -- a match in
+// progress before a lobby, oldest breaking ties -- and when nothing fits, a room of its own
+// rather than a place in a queue (#44).
+const alone = connect({ type: "quick", names: ["Nan"] });
+const alone_joined = await lobby(alone);
+assert.deepEqual(
+    alone_joined.held,
+    [0],
+    "nothing to join, so Quick Join makes a room and seats you",
+);
+assert.equal(alone_joined.host, true, "as its host");
+const alone_list = await (
+    await fetch("http://localhost:" + server.address().port + "/api/rooms")
+).json();
+assert.ok(
+    alone_list.some((room) => room.id === alone_joined.id),
+    "and lists it, or the next client to press Quick Join would sit alone too",
+);
+
+// Four rooms it could have now: the one Quick Join just made (three free), one with two
+// free, one with one free, and one that is full. A client of two fits the first two and
+// takes the tighter of them; the room with one seat does not fit it, and the full one is
+// never on offer.
+const roomy = connect({ type: "create", id: "QJANE", listed: true });
+await lobby(roomy);
+await roomy.seats(["Pat", "Rue"]);
+const tight = connect({ type: "create", id: "QJBEN", listed: true });
+await lobby(tight);
+await tight.seats(["Quin", "Rex", "Sam"]);
+const full = connect({ type: "create", id: "QJFUL", listed: true });
+await lobby(full);
+await full.seats(["Tim", "Uma", "Vic", "Wes"]);
+const pairing = connect({ type: "quick", names: ["Xan", "Yul"] });
+const pairing_joined = await lobby(pairing);
+assert.equal(
+    pairing_joined.id,
+    "QJANE",
+    "the fewest free seats that still fit the whole client, never the full room",
+);
+assert.deepEqual(pairing_joined.held, [2, 3], "seated on the way in, in one round trip");
+// The room with one free seat is the tightest fit for a client of one, so that is where a
+// single player lands -- concentrating rather than spreading.
+const single = connect({ type: "quick", names: ["Zed"] });
+assert.equal(
+    (await lobby(single)).id,
+    "QJBEN",
+    "and a client of one takes the last seat in the tightest room, not the roomiest",
+);
+single.socket.close();
+pairing.socket.close();
+roomy.socket.close();
+tight.socket.close();
+
+// Nothing listed and unlocked is left with room in it once the room Quick Join made for
+// the first client goes with it.
+alone.socket.close();
+
+// Neither an unlisted room nor a locked one is Quick Join's to walk into: one is somebody's
+// private code and the other is nobody's room to enter without the password (#8).
+const secret = connect({ type: "create", id: "QJLZK", listed: true, password: "hunter2" });
+await lobby(secret);
+await secret.seats(["Abe"]);
+const unlisted_room = connect({ type: "create", id: "QJHDN" });
+await lobby(unlisted_room);
+await unlisted_room.seats(["Bea"]);
+const fresh = connect({ type: "quick", names: ["Cyd"] });
+const fresh_joined = await lobby(fresh);
+assert.ok(
+    !["QJLZK", "QJHDN", "QJFUL"].includes(fresh_joined.id),
+    "neither a locked room nor an unlisted one nor a full one, so a room of its own it is",
+);
+assert.deepEqual(fresh_joined.held, [0], "and it is seated in it");
+fresh.socket.close();
+secret.socket.close();
+unlisted_room.socket.close();
+full.socket.close();
+
 // The public list: a create-time flag, five fields, most occupied first, and a password
 // that is a boolean there as everywhere else a client can see it (#43).
 const duo = connect({ type: "create", listed: true });
 const pair_id = (await lobby(duo)).id;
 await duo.seats(["Dott", "Bernard"]);
-const solo = connect({ type: "create", listed: true, password: "hunter2" });
-const solo_id = (await lobby(solo)).id;
-await solo.seats(["Laverne"]);
+const lone_host = connect({ type: "create", listed: true, password: "hunter2" });
+const lone_host_id = (await lobby(lone_host)).id;
+await lone_host.seats(["Laverne"]);
 const unlisted = connect({ type: "create" });
 const unlisted_id = (await lobby(unlisted)).id;
 await unlisted.seats(["Ted"]);
@@ -1289,7 +1504,7 @@ assert.equal(answer.headers.get("cache-control"), "max-age=10", "ten seconds of 
 const shown = await answer.json();
 assert.deepEqual(
     shown.map((room) => room.id),
-    [pair_id, solo_id],
+    [pair_id, lone_host_id],
     "a room is listed only if its creator asked for it, most occupied first",
 );
 assert.deepEqual(
@@ -1305,7 +1520,7 @@ assert.ok(
     "an unlisted room is not in the list at all",
 );
 duo.socket.close();
-solo.socket.close();
+lone_host.socket.close();
 unlisted.socket.close();
 
 server.close();

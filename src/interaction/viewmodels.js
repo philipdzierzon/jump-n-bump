@@ -106,6 +106,10 @@ function ViewModel() {
     // Whether the id being joined came from a Browse row the list said was unlocked, which
     // is the one case where a refused join means "gone" and not "wrong password" (#43).
     var browsed = false;
+    // Whether the names screen is being walked on the way to a Quick Join, which asks for
+    // names first: the relay cannot pick a room that fits this client without knowing how
+    // many seats it needs (#44).
+    var quick = false;
     // Granted by the relay, never assumed: the seats this client holds, in the order it
     // holds them, which is the order its control schemes bind in (#7).
     var granted = ko.observableArray([]);
@@ -127,6 +131,7 @@ function ViewModel() {
     this.code = ko.observable("");
     this.listed = ko.observable(false);
     this.rooms = ko.observableArray([]);
+    this.queued = ko.observable(false);
     this.password = ko.observable("");
     this.error = ko.observable("");
     this.room_id = ko.observable(null);
@@ -683,7 +688,15 @@ function ViewModel() {
             fill_form();
             preload();
         }
+        self.queued(!!msg.queued);
         if (!msg.held.length) {
+            // Waiting for a seat in a room that had none: the lobby is where it waits, and
+            // the names screen is not, because the asking is done and the answer was "not
+            // yet" rather than "ask again" (#44).
+            if (msg.queued) {
+                if (self.screen() === "names") go("room");
+                return;
+            }
             // Every seat gone: un-ready at countdown zero, which reserves nothing. The
             // client is still in the room, so the names screen is where it asks for seats
             // again rather than the landing page (#37, #17).
@@ -764,6 +777,10 @@ function ViewModel() {
                     // The lobby's own URL is `#room`, which says nothing about which room:
                     // this is what a reload reads to find its way back to one (#36).
                     remember("room", { id: msg.id });
+                    // Quick Join is granted its seats on the way in, so the schemes the
+                    // names screen fixed are remembered here rather than on an ask that
+                    // never happens (#44).
+                    if (self.participants().length) remember(msg.id, { schemes: schemes_of() });
                 } else if (transport !== socket) return;
                 apply_room(msg);
                 if (msg.type !== "joined") return;
@@ -805,8 +822,6 @@ function ViewModel() {
                     // Somebody else sat down first, or its holder is on the way back: a
                     // reservation belongs to one token until it expires (#42).
                     self.error("That seat is not free.");
-                } else if (code === "ROOM_FULL") {
-                    self.error("Not enough free seats in that room for everyone here.");
                 } else if (entry.type === "create") {
                     self.error(code === "ID_TAKEN" ? "That code is taken." : CODE_HINT);
                 } else if (self.screen() === "room" || self.screen() === "play") {
@@ -939,6 +954,14 @@ function ViewModel() {
     // Cleared on the way in, like every other screen the flow walks to deliberately --
     // and not in `refresh_rooms`, because the one message worth keeping there is the one a
     // refused join put up on its way back here (#43).
+    // Names first, room second. It leaves whatever room this client was in: Quick Join is
+    // an answer to "put me somewhere", and somewhere is not where it already is (#44).
+    this.go_quick = function () {
+        leave_room();
+        quick = true;
+        self.error("");
+        go("names");
+    };
     this.go_browse = function () {
         self.error("");
         go("browse");
@@ -1033,7 +1056,7 @@ function ViewModel() {
         var names = participants.map(function (participant) {
             return participant.name();
         });
-        if (!self.room_id()) {
+        if (!self.room_id() && !quick) {
             granted(
                 participants.map(function (_, seat) {
                     return seat;
@@ -1047,6 +1070,12 @@ function ViewModel() {
             return go("room");
         }
         self.error("");
+        // One round trip: the names go with the ask, and the relay answers with the room it
+        // picked and the seats already taken in it (#44).
+        if (quick) {
+            quick = false;
+            return connect({ type: "quick", names: names });
+        }
         remember(self.room_id(), { schemes: schemes_of() });
         transport.send({ type: "seats", names: names });
     };

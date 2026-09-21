@@ -135,7 +135,8 @@
     <div data-bind="visible: screen() === 'landing'" class="kiosk centre">
         <h1>JUMP 'N BUMP</h1>
         <p class="muted">Four bunnies. One goal: lagomorphic cranial domination.</p>
-        <button class="pri" data-bind="click: go_create">Create a room</button>
+        <button class="pri" data-bind="click: go_quick">Quick Join</button>
+        <button data-bind="click: go_create">Create a room</button>
         <button data-bind="click: go_join">Join with a room code</button>
         <div class="row">
             <button class="sm grow" data-bind="click: go_browse">Browse rooms</button>
@@ -217,6 +218,7 @@
         </ul>
         <p class="muted">Every seat in the room. The ones nobody takes are played by the AI.</p>
         <p class="muted" data-bind="visible: match_running() &amp;&amp; !seated()">A match is in progress; you are in for the next one.</p>
+        <p class="muted" data-bind="visible: queued">Every seat is taken. You are waiting for one &mdash; the room seats you the moment it comes free, with the names you gave.</p>
         <button class="pri" data-bind="visible: can_rejoin, click: rejoin_match">Rejoin the match</button>
         <button class="sm" data-bind="visible: room_id() &amp;&amp; seated(), click: toggle_ready, text: ready() ? 'Not ready' : 'Ready'"></button>
         <p class="muted" data-bind="visible: countdown">Starting in <span data-bind="text: countdown"></span>s. Anyone not ready by then gives up their seats.</p>
