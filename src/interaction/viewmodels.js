@@ -923,6 +923,7 @@ function ViewModel() {
     // The flow's Back is the browser's, which the hash router already answers; this is the
     // way out of it, so it replaces rather than pushes and the trail does not grow.
     this.go_landing = function () {
+        self.error("");
         go("landing", true);
     };
     this.go_create = function () {
@@ -935,14 +936,22 @@ function ViewModel() {
         self.error("");
         go("join");
     };
+    // Cleared on the way in, like every other screen the flow walks to deliberately --
+    // and not in `refresh_rooms`, because the one message worth keeping there is the one a
+    // refused join put up on its way back here (#43).
     this.go_browse = function () {
+        self.error("");
         go("browse");
     };
     // A snapshot, never a subscription: once on entry, again on the button, and again when
     // a join is refused. Nothing polls, because the list is not what decides whether a
     // room will have you -- the join is (#43).
     this.refresh_rooms = function () {
-        fetch("api/rooms")
+        // `no-store`, because the response carries `max-age=10` for the cache in front of
+        // the relay and a default `fetch` would honour it here too: a room that died would
+        // sit in the list until the ten seconds ran out, and the button would do nothing
+        // about it (#29, #43).
+        fetch("api/rooms", { cache: "no-store" })
             .then(function (res) {
                 return res.json();
             })

@@ -56,6 +56,14 @@ const room_f = generate_room_id({
     [room_d]: true,
     [room_e]: true,
 });
+const room_g = generate_room_id({
+    [room_a]: true,
+    [room_b]: true,
+    [room_c]: true,
+    [room_d]: true,
+    [room_e]: true,
+    [room_f]: true,
+});
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -1351,6 +1359,68 @@ async function sound() {
 // revisiting every time the design shifts. Touch controls are #45, and this is the viewport
 // they will be walked at.
 
+// The list is a snapshot, and the only thing that keeps a snapshot honest is that asking
+// again really asks again. Both of these were shipped broken: a `max-age=10` response and a
+// default `fetch` left a dead room in the list for ten seconds, and the refusal message
+// outlived the screen it was about (#43).
+async function browse() {
+    const browse_page = await (await make_context("browse")).newPage();
+    const errors = [];
+    browse_page.on("pageerror", (error) => errors.push(error.message));
+    // This walk's own room, by its code: an earlier walk's room is still up and still
+    // listed, which is the list working rather than a row to count around.
+    const rows = () => screen("browse", browse_page).locator("li").filter({ hasText: room_g });
+    const message = () => screen("browse", browse_page).locator(".err").innerText();
+
+    const seen = [];
+    const doomed = relay_client({ type: "create", id: room_g, listed: true }, seen);
+    await until("a listed room", async () => seen.some((msg) => msg.type === "joined"));
+    doomed.send({ type: "seats", names: ["Ghost"] });
+    await until("its host on a seat", async () =>
+        seen.some((msg) => msg.type === "room" && msg.held.length),
+    );
+
+    await browse_page.goto(origin + "/");
+    await click("Browse rooms", browse_page);
+    await on("browse", browse_page);
+    await until("the listed room in the list", async () => (await rows().count()) === 1);
+    assert.ok(
+        (await screen("browse", browse_page).locator("li").count()) > 1,
+        "and it is listed alongside the room the walk before this one left up",
+    );
+
+    // A room dies with its last client, so the row on screen is now a row for a room that
+    // is not there -- which is exactly the click the list cannot protect anyone from, and
+    // does not try to: the join is what is authoritative.
+    doomed.close();
+    await rows().locator("button").click();
+    await on("browse", browse_page);
+    await until("the dead room gone from the list", async () => (await rows().count()) === 0);
+    assert.match(await message(), /not available/, "and a word about why it bounced back");
+
+    // The way out of that message is the way a player takes: out to the menu and back.
+    await click("Back", browse_page);
+    await on("landing", browse_page);
+    await click("Browse rooms", browse_page);
+    await on("browse", browse_page);
+    assert.equal(await message(), "", "the refusal does not outlive the screen it was about");
+
+    // And the button asks the relay, not the browser's cache: this room was created well
+    // inside the ten seconds the last answer was good for.
+    const again = [];
+    const revived = relay_client({ type: "create", id: room_g, listed: true }, again);
+    await until("the room again", async () => again.some((msg) => msg.type === "joined"));
+    revived.send({ type: "seats", names: ["Ghost"] });
+    await until("its host on a seat again", async () =>
+        again.some((msg) => msg.type === "room" && msg.held.length),
+    );
+    await click("Refresh", browse_page);
+    await until("the new room on a manual refresh", async () => (await rows().count()) === 1);
+    revived.close();
+
+    assert.deepEqual(errors, [], "and the browse screen threw nothing");
+}
+
 async function phone() {
     const phone_context = await make_context("phone", { viewport: { width: 390, height: 844 } });
     const phone_page = await phone_context.newPage();
@@ -1499,6 +1569,7 @@ try {
     await two_pages();
     await reconnect();
     await sound();
+    await browse();
     await phone();
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
