@@ -171,3 +171,81 @@ that it _only_ works because sessions never overlap.
   behaviour to [#51](https://github.com/philipdzierzon/jump-n-bump/issues/51)'s loop pacing. The
   bunched arrivals are the evidence.
 - **Not worth doing:** reusing the object graph across a repair. See §3.
+
+---
+
+## Postscript: the floor is late too ([#71](https://github.com/philipdzierzon/jump-n-bump/issues/71))
+
+**#71's fix is in, and the 6× repro is unchanged: the throttled client still desyncs every
+150 ticks and is still dropped after five repairs.** It does what it says — a client that knows
+it is behind stamps at the relay's deadline instead of past it, and ~90 frames a match that the
+relay used to drop are now accepted for a later tick. It just almost never knows. The floor is
+`newest − d + 1`, and `newest` is read off frames that reached this client's event loop — the same
+event loop that is three ticks behind, and the same three ticks that made its own frames late.
+A client cannot compute a deadline from information that is late by exactly the amount it is
+trying to correct for.
+
+### 6. Four runs, two either side, same machine
+
+The harness was rebuilt to the same shape as §"How it was measured": two Chromium contexts, one
+relay in-process, `Emulation.setCPUThrottlingRate({rate: 6})` on the guest once both pages reach
+`#play`, both holding <kbd>→</kbd>, 45 s, `d = 2`, one seat each. Throwaway again; the numbers are
+the shipped counters and the relay's own log.
+
+| run      | first desync | dropped at | relay dropped late | host substituted | guest rebases |
+| -------- | ------------ | ---------- | ------------------ | ---------------- | ------------- |
+| before 1 | tick 150     | tick 840   | 379                | 404              | —             |
+| before 2 | tick 180     | tick 870   | 370                | 399              | —             |
+| after 1  | tick 540     | tick 1230  | 269                | 398              | 93            |
+| after 2  | tick 150     | tick 810   | 305                | 437              | 94            |
+
+`after 1` looked like a cure and was noise; `after 2` is indistinguishable from either before.
+The host's own line is the one that matters, and it says the same thing on both sides:
+
+```
+match over at tick 2705: 437 frames substituted, 438 of 943 arrived late,
+worst margin -1 ticks (d 2), 0 rebases, shift 0, late by -1:438
+```
+
+The guest ends every match at `shift 0` having rebased ~93 times out of ~900 ticks: the floor
+climbs above `tick + d` for a tick here and there and then falls back under it, because the
+`newest` it is computed from is as stale as the frames it is meant to outrun. In the steady state
+this failure mode actually has — the guest's _tick_ keeps up, only its frames leave late — the
+floor sits a tick _below_ the natural stamp and the rebase never fires at all. #71's premise that
+"the client can compute that number itself" holds only for a client that is behind in ticks. This
+one is behind in wall-clock.
+
+### 7. A rebase must never outrun `newest`
+
+Worth recording, because the first implementation followed #71's formula literally and the room
+reached tick 62700 in 45 seconds.
+
+`newest − d` is not just an input to the stamp. `pump()` sprints while `room.gap()` is positive,
+and `gap()` reads `newest − d` as _the tick the room's fastest client is on_ — an identity that
+holds only while every stamp is its sender's own `tick + d`. #71's third term, `last_stamp + 1`,
+breaks it: a client stepping a catch-up burst emits one stamp per step, so its stamps outrun its
+tick, every other client reads that as a room that has run ahead, and sprints — which ratchets
+_its_ stamps, and so on. Two clients drag each other to the end of time in about a minute:
+
+```
+match over at tick 62700: 91 frames substituted, 5 of 5080 arrived late,
+worst margin -1 ticks (d 2), 43 rebases, shift 3857, late by -1:5
+```
+
+43 rebases and a shift of 3857 on the _unthrottled_ host. The fix is to drop the ratchet: stamp
+`max(tick + d, newest − d + 1)`, which is never past `newest`, and skip the send for a tick
+already stamped rather than stamping a later one. Only the client whose `tick + d` is highest
+moves the room's clock on, which is the fastest one, exactly as before.
+
+### What this turns into, still
+
+- **#71 as merged is inert on the case it was filed for.** It is correct and it costs nothing when
+  it does not fire — a client genuinely behind in ticks, after a repair or in a background tab,
+  stamps where the relay will take it. It is not the cure for a client that cannot make 60 Hz.
+- **The sender's own lateness is measurable locally, and nothing measures it.** Its tick against
+  the wall clock is the quantity #71 needed and `newest` is not. `Room` is deliberately clock-free,
+  so that is a design question rather than a patch.
+- **[#51](https://github.com/philipdzierzon/jump-n-bump/issues/51) is now the live candidate** for
+  this failure mode, not a parallel one. §"What this turns into" already named `pump()`'s uncapped
+  `while` as where the lateness comes from; two runs either side of #71 say nothing else has
+  removed it.
