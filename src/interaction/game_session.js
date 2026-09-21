@@ -300,7 +300,19 @@ export function Game_Session(get_level, config, muted, transport) {
         // tick-0 simulation just built, and the gap between the two is replayed at once.
         if (resumed) {
             var t2 = performance.now();
-            unpack_snapshot(resumed, rnd, objects);
+            var packed_t = unpack_snapshot(resumed, rnd, objects);
+            // Two numbers for one tick: the packed state carries the tick it was taken on,
+            // and the relay carried the same tick in plaintext beside the body because it
+            // never decodes one (#12). Until now the packed one was read out of the buffer
+            // and thrown away, so a body and a tick from different moments would have
+            // replayed the gap from the wrong end of it with nothing to say so (#92).
+            //
+            // ponytail: reported and then played anyway -- nobody has ever seen one, and
+            // refusing would put a client out of a match over a log line. upgrade path:
+            // refuse the payload, the way a body that will not decode is refused above, if
+            // one ever turns up.
+            if (packed_t !== room.now())
+                console.log("snapshot packed at tick %d arrived as tick %d", packed_t, room.now());
             // Hundreds of ticks of history must not replay as a burst of deaths and
             // splashes, so the catch-up is silent and `play` is what un-mutes it (#28).
             sound_player.set_muted(true);
