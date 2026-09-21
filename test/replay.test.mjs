@@ -220,7 +220,7 @@ assert.deepEqual(
 // late (#70). Seat 0 is this client's own and is never short a frame.
 assert.deepEqual(
     delayed_room.stats(),
-    { substituted: 2, arrived: 0, late: 0, worst_margin: 2, late_by: {} },
+    { substituted: 2, arrived: 0, late: 0, worst_margin: 2, late_by: {}, holes: 0 },
     "a missing frame is counted, and the first d ticks are not counted against it",
 );
 // A frame for a tick this room stepped three ticks ago: it arrived, it was too late to be
@@ -228,7 +228,7 @@ assert.deepEqual(
 delayed_transport.to_client({ type: "input", t: 1, seats: { 1: { left: true } } });
 assert.deepEqual(
     delayed_room.stats(),
-    { substituted: 2, arrived: 1, late: 1, worst_margin: -3, late_by: { "-3": 1 } },
+    { substituted: 2, arrived: 1, late: 1, worst_margin: -3, late_by: { "-3": 1 }, holes: 0 },
     "a frame arriving after the tick it was stamped for is counted, with its slack",
 );
 
@@ -271,6 +271,36 @@ assert.equal(
 );
 assert.equal(behind.room.gap(), 0, "so the next frame it sends is for a tick nobody has passed");
 behind.game.pause();
+
+// And a frame for a tick no replay could reach is not a frame at all. `newest` is what the
+// gap above is measured from and `pump` sprints while it is positive, so one client stamping
+// a million -- which the relay fans out, checking only that the number is a non-negative
+// integer -- would fast-forward every other client through the rest of the match (#51).
+// The d-tick hole a repair digs in the repaired client's own input (#72). `catch_up` stamps
+// nothing -- those ticks are history -- so the client lands d ticks past the last frame it
+// stamped for itself and its own bunny reads all keys released until its stream catches up.
+// That is its own doing rather than the room failing to send, which is why the two are
+// counted apart: `substituted` is what the other clients cost this one, and `holes` is this.
+const repaired_transport = behind_transport(40);
+const repaired = start(9, {}, [0], repaired_transport);
+repaired.room.catch_up(repaired.game.step);
+assert.equal(repaired.room.stats().holes, 0, "replaying the gap is not a hole: it is history");
+repaired.room.step();
+repaired.room.step();
+assert.deepEqual(
+    [repaired.room.stats().holes, repaired.room.stats().substituted],
+    [2, 0],
+    "and the d ticks after it lands are holes of its own, not the room covering for it (#72)",
+);
+
+const absurd_transport = behind_transport(0);
+const absurd = start(9, {}, [0], absurd_transport);
+for (let tick = 0; tick < 10; tick++) absurd.room.step();
+absurd_transport.deliver({ type: "input", t: 1000000, seats: { 1: { left: true } } });
+assert.ok(
+    absurd.room.gap() <= 0,
+    "a frame stamped past anything this client could replay is dropped, not believed",
+);
 
 let ended = null;
 local.room.on_match_end = (msg) => (ended = msg);

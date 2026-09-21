@@ -219,13 +219,16 @@ export function Game_Session(get_level, config, muted, transport) {
         var stats = room.stats();
         console.log(
             "match over at tick %d: %d frames substituted, %d of %d arrived late, " +
-                "worst margin %d ticks (d %d), late by %s",
+                "worst margin %d ticks (d %d), %d holes, late by %s",
             room.now(),
             stats.substituted,
             stats.late,
             stats.arrived,
             stats.worst_margin,
             room.d,
+            // Ticks this client left its own seats no frame for, which is its own doing
+            // rather than the room's -- the hole a repair digs, today (#72).
+            stats.holes,
             // Every late frame, by how many ticks: the distribution a bigger d would have
             // to cover, which one worst case cannot say (#70, #71).
             Object.keys(stats.late_by)

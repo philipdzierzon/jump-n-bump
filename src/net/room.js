@@ -55,7 +55,19 @@ export function Room(transport, read_input) {
     reset_stats();
 
     function reset_stats() {
-        stats = { substituted: 0, arrived: 0, late: 0, worst_margin: self.d, late_by: {} };
+        stats = {
+            substituted: 0,
+            arrived: 0,
+            late: 0,
+            worst_margin: self.d,
+            late_by: {},
+            // Ticks this client's own seats had no frame for, which is never somebody
+            // covering for it: it stamps every tick it plays, so one without is one it
+            // never stamped -- the d-tick hole a repair digs, and nothing else today
+            // (#72). Counted apart, so `substituted` goes on meaning what the other
+            // clients cost this one.
+            holes: 0,
+        };
     }
 
     // Set by the relay's `start`, which is where everything the match must agree on rides
@@ -113,6 +125,13 @@ export function Room(transport, read_input) {
                 if (self.on_start) self.on_start(msg);
                 break;
             case "input":
+                // A tick this client could not reach if it replayed for a whole minute, so
+                // it is not a frame. `newest` is what `gap()` reads as the room's position,
+                // `pump` sprints while that gap is positive, and the relay checks only that
+                // `t` is a non-negative integer before fanning a frame out -- so one client
+                // stamping a million fast-forwards every other client through the rest of
+                // the match (#51, #71).
+                if ((msg.t | 0) - tick > MAX_CATCH_UP) break;
                 // Measured on arrival rather than on use: this is the only moment the wire
                 // trip and the sender's own lateness are both visible (#70).
                 stats.arrived++;
@@ -269,7 +288,9 @@ export function Room(transport, read_input) {
             // Not the first d ticks, where every seat is substituted for by definition, and
             // not a replayed gap, whose holes are the relay's ring rather than this
             // client's lateness (#70).
-            if (!catching_up && tick >= self.d) stats.substituted++;
+            if (catching_up || tick < self.d) return;
+            if (held.indexOf(seat) >= 0) stats.holes++;
+            else stats.substituted++;
         });
         tick++;
         return frames;
