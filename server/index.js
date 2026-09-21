@@ -233,12 +233,22 @@ function name_taken(room, names) {
     return new Set(all).size !== all.length;
 }
 
+// Which seat the host is sitting on. `host` in the room view is the recipient's own answer,
+// so a client that is not the host is told there is one and never which (#88).
+// ponytail: the first of the host's seats, so a couch is named after its first participant;
+// upgrade path is sending every seat it holds if the sentence ever names more than one.
+function host_seat(room) {
+    for (const client of room.clients)
+        if (client.host && client.seats.length) return client.seats[0];
+    return null;
+}
+
 // Host is a property of the client, not of a seat or a participant, and it always holds at
 // least one seat -- which is also why it cannot drop its last one: a client's seat count is
 // fixed for the room's lifetime (#7, #14). It migrates to the oldest remaining seat-holding
 // client, so a stranger who leaves does not evaporate a live match.
 function ensure_host(room) {
-    for (const client of room.clients) if (client.host && client.seats.length) return;
+    if (host_seat(room) !== null) return;
     let successor = null;
     for (const client of room.clients)
         if (client.seats.length && (!successor || client.arrived < successor.arrived))
@@ -386,6 +396,9 @@ function room_view(room, client) {
         labels: seat_labels(room),
         held: client.seats,
         host: !!client.host,
+        // Which seat that host is on, so the lobby can name the player everyone is
+        // waiting for: the flag above names nobody (#88).
+        host_seat: host_seat(room),
         started: room.started,
         ready: ready_seats(room),
         you_ready: !!client.ready,

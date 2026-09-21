@@ -2,7 +2,7 @@ import { create_default_level } from "../asset_data/default_levelmap.js";
 import { Dat_Level_Loader } from "../resource_loading/dat_level_loader.js";
 import { Game_Session, Game_State, is_typing } from "../interaction/game_session.js";
 import { Scores_ViewModel, match_result, BUNNY_NAMES } from "../interaction/scores_viewmodel.js";
-import { screen_of } from "../interaction/router.js";
+import { screen_of, FLOW_TEXT, waiting_for } from "../interaction/router.js";
 import { jump_scheme } from "../game/keyboard.js";
 import { Loopback_Transport } from "../net/loopback_transport.js";
 import { WebSocket_Transport } from "../net/websocket_transport.js";
@@ -27,12 +27,9 @@ function relay_url() {
 // scheme (#32).
 var SCHEME_NAMES = ["Arrows", "A D W", "NumPad 4 6 8", "J L I"];
 var CODE_HINT = "A code is 5 letters, no I and no O.";
-// One answer for a wrong password and for a room that is not there: telling them apart is
-// what would make an unlisted room's id worth guessing at (#8).
 // Nobody holds a seat, so nobody is keeping the room waiting: an AI-filled seat is ready
 // by definition (#37).
 var ALL_READY = [true, true, true, true];
-var UNAVAILABLE = "That room is not available. Check the code, and the password if it has one.";
 // The settings panel's own wording. The relay validates the keys and never renders them,
 // so the labels live here and nowhere near the wire (#38).
 var LABELS = {
@@ -131,12 +128,20 @@ function ViewModel() {
     this.code = ko.observable("");
     this.listed = ko.observable(false);
     this.rooms = ko.observableArray([]);
+    // A failed fetch and an empty list are the same empty array otherwise, so which one it
+    // was is remembered rather than inferred (#88). Its own observable, not `error`: Browse
+    // deliberately keeps a refused join's message across a refresh (#43), and a refresh
+    // that works has to clear this one without clearing that one.
+    this.rooms_error = ko.observable("");
     this.queued = ko.observable(false);
     this.password = ko.observable("");
     this.error = ko.observable("");
     this.room_id = ko.observable(null);
     this.pending_id = ko.observable(null);
     this.is_host = ko.observable(true);
+    // The seat the room says its host is on, or null in a local room, which has no relay
+    // to ask and no host to wait for.
+    this.host_seat = ko.observable(null);
     this.participants = ko.observableArray([]);
     // Every seat in the room, by the username of the participant on it -- null for a seat
     // nobody holds, which is the AI's (#36).
@@ -373,6 +378,14 @@ function ViewModel() {
                 take_label: "Take seat (" + SCHEME_NAMES[free_scheme()] + ")",
             };
         });
+    });
+
+    // Who the lobby is waiting on, by the name the room knows them under -- not the
+    // board's label, which would read "Zip (AI) to start" for a host whose socket is out
+    // (#88).
+    this.waiting_text = ko.computed(function () {
+        var seat = self.host_seat();
+        return waiting_for(seat == null ? null : self.seat_names()[seat]);
     });
 
     // The live match's board while one is up, and the board of the last match once it is
@@ -677,7 +690,16 @@ function ViewModel() {
         if (msg.started && !self.match_running()) {
             self.board(null);
             self.board_reason(null);
+            // The last match's announcement goes with its board: the ready it was about
+            // has been pressed again by now.
+            self.notice("");
         }
+        // Ready clears for everyone when a match ends, and cleared checkboxes alone read
+        // as a bug rather than as the rule they are -- the same reason a staged config
+        // change says so (#10, #38, #88). Gated on held seats: a queued client has no
+        // Ready button to press for the next one.
+        if (self.match_running() && !msg.started && msg.held.length)
+            self.notice(FLOW_TEXT.ready_cleared);
         self.match_running(!!msg.started);
         // The match this client was in is over, so the next one is a match it has not been
         // in and has not asked about.
@@ -687,6 +709,7 @@ function ViewModel() {
         }
         host = msg.host;
         self.is_host(host);
+        self.host_seat(msg.host_seat);
         granted(msg.held);
         self.ready(!!msg.you_ready);
         self.seat_ready(msg.ready || ALL_READY);
@@ -713,11 +736,16 @@ function ViewModel() {
             // Every seat gone: un-ready at countdown zero, which reserves nothing. The
             // client is still in the room, so the names screen is where it asks for seats
             // again rather than the landing page (#37, #17).
+            // ponytail: names the countdown because it is the only way a seated client is
+            // left holding nothing today; upgrade path is a reason on the room view if a
+            // second way ever appears.
             if (
                 self.participants().length &&
                 (self.screen() === "room" || self.screen() === "play")
-            )
+            ) {
+                self.error(FLOW_TEXT.vacated);
                 go("names", true);
+            }
             return;
         }
         if (self.participants().length) {
@@ -820,7 +848,7 @@ function ViewModel() {
                     // or already left -- has nothing to reconnect into: there is no seat
                     // reserved anywhere and the landing screen is where that ends.
                     if (transport === socket) leave_room();
-                    self.error("The connection dropped.");
+                    self.error(FLOW_TEXT.dropped);
                     if (self.screen() === "play" || self.screen() === "room") go("landing", true);
                 } else if (code === "NAME_TAKEN") {
                     self.error("Somebody in this room already has that name.");
@@ -838,22 +866,29 @@ function ViewModel() {
                 } else if (entry.type === "create") {
                     self.error(code === "ID_TAKEN" ? "That code is taken." : CODE_HINT);
                 } else if (self.screen() === "room" || self.screen() === "play") {
-                    // A reload into a room that has since gone: there is nothing to reclaim
-                    // and no password worth asking for.
+                    // A reload into a room that will not have it back -- ended, or a
+                    // password gained while this client was away, one relay code for both
+                    // (#8). Either way there is nothing to reclaim.
+                    self.error(FLOW_TEXT.room_gone);
                     go("landing", true);
                 } else if (self.screen() === "password") {
-                    self.error(UNAVAILABLE);
+                    self.error(FLOW_TEXT.unavailable);
                 } else if (browsed) {
                     // The list said this room had no password, so a refusal can only mean
                     // it is gone: a password screen for a password that does not exist is
                     // the wrong place to land. A locked row still lands there, because
                     // there a dead room and a wrong password stay indistinguishable (#8).
                     browsed = false;
-                    self.error(UNAVAILABLE);
+                    self.error(FLOW_TEXT.unavailable);
                     go("browse", true);
                 } else {
-                    // Which of the two it was is exactly what is not said: the password
-                    // screen is where both answers land (#8).
+                    // Which of the two it was is exactly what is not said, but that it was
+                    // refused is: the password screen is where both answers land, and
+                    // silence there reads as a locked room rather than a guess at whether
+                    // one exists (#8, #88). No password has been typed yet here, so the
+                    // sentence cannot claim the room is gone -- the commonest reason to
+                    // land here is a locked room that opens on the very next screen.
+                    self.error(FLOW_TEXT.not_accepted);
                     go("password", true);
                 }
             },
@@ -882,7 +917,9 @@ function ViewModel() {
 
     function give_up() {
         leave_room();
-        self.error("The connection dropped.");
+        // Not "the connection dropped": the retries ran the whole reservation window out,
+        // and what the player lost is the seats (#42).
+        self.error(FLOW_TEXT.gave_up);
         go("landing", true);
     }
 
@@ -1001,9 +1038,13 @@ function ViewModel() {
             .then(function (res) {
                 return res.json();
             })
-            .then(self.rooms)
+            .then(function (list) {
+                self.rooms_error("");
+                self.rooms(list);
+            })
             .catch(function () {
                 self.rooms([]);
+                self.rooms_error(FLOW_TEXT.rooms_failed);
             });
     };
     // Clicking a row is the same join as typing the code.
@@ -1172,6 +1213,10 @@ function ViewModel() {
     // player on this couch has no key of its own to press (#7, #37).
     this.toggle_ready = function () {
         transport.send({ type: "ready", ready: !self.ready() });
+        // Only its own instruction, not an unrelated confirmation still on screen (a
+        // password just set) -- otherwise "Press Ready for the next one." stands until
+        // the match after this one.
+        if (self.notice() === FLOW_TEXT.ready_cleared) self.notice("");
     };
     this.cancel_countdown = function () {
         transport.send({ type: "cancel" });
