@@ -1272,6 +1272,42 @@ assert.equal(
 after.socket.close();
 generated.socket.close();
 
+// The public list: a create-time flag, five fields, most occupied first, and a password
+// that is a boolean there as everywhere else a client can see it (#43).
+const duo = connect({ type: "create", listed: true });
+const pair_id = (await lobby(duo)).id;
+await duo.seats(["Dott", "Bernard"]);
+const solo = connect({ type: "create", listed: true, password: "hunter2" });
+const solo_id = (await lobby(solo)).id;
+await solo.seats(["Laverne"]);
+const unlisted = connect({ type: "create" });
+const unlisted_id = (await lobby(unlisted)).id;
+await unlisted.seats(["Ted"]);
+
+const answer = await fetch("http://localhost:" + server.address().port + "/api/rooms");
+assert.equal(answer.headers.get("cache-control"), "max-age=10", "ten seconds of cache (#29)");
+const shown = await answer.json();
+assert.deepEqual(
+    shown.map((room) => room.id),
+    [pair_id, solo_id],
+    "a room is listed only if its creator asked for it, most occupied first",
+);
+assert.deepEqual(
+    shown[0],
+    { id: pair_id, host: "Dott", seats: 2, of: 4, locked: false, started: false },
+    "five fields and no sixth: no level, no waitlist depth, no room name",
+);
+assert.equal(shown[1].seats, 1, "a room holding only its host is listed, which is the point");
+assert.equal(shown[1].locked, true, "a password-protected room may be listed, shown locked");
+assert.ok(!JSON.stringify(shown).includes("hunter2"), "and the password itself never goes out");
+assert.ok(
+    !JSON.stringify(shown).includes(unlisted_id),
+    "an unlisted room is not in the list at all",
+);
+duo.socket.close();
+solo.socket.close();
+unlisted.socket.close();
+
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");
 process.exit(0);

@@ -157,6 +157,9 @@ function create(client, msg) {
         // The room's config, and the only configuration path there is: the creator gets
         // the defaults and the host stages changes from the lobby (#38). Nothing on the
         // handshake sets it, so a link cannot carry one either.
+        // Chosen once, on the way in, and never again: the public list is not host config,
+        // so there is no staging path and nothing to change while the room is live (#43).
+        listed: !!msg.listed,
         config: default_config(),
         // Changes the host has staged, applied when the next match begins -- never to the
         // one being played (#38). Null when there is nothing waiting.
@@ -1032,6 +1035,34 @@ function relay(client, msg) {
     }
 }
 
+// The five fields a room is chosen by, and nothing else: no level (nobody picks a room by
+// it), no waitlist depth (`4/4` already says full) and no name (the host's username is the
+// name). The password is a boolean here, as everywhere a client can see it (#8, #43).
+function listing(room) {
+    let host = null;
+    for (const client of room.clients)
+        if (client.host && client.seats.length) host = room.seats[client.seats[0]].name;
+    return {
+        id: room.id,
+        host,
+        seats: room.seats.filter(Boolean).length,
+        of: SEATS,
+        locked: !!room.password,
+        started: room.started,
+    };
+}
+
+// Most occupied first, oldest breaking ties -- the same concentrating rule Quick Join will
+// use, so the two surfaces cannot contradict each other (#43, #44). `rooms` is keyed by
+// five letters, never by digits, so its insertion order is creation order and a stable sort
+// on occupancy alone leaves the oldest room first within each tie. No timestamp needed.
+function listings() {
+    return Object.values(rooms)
+        .filter((room) => room.listed)
+        .map(listing)
+        .sort((a, b) => b.seats - a.seats);
+}
+
 export function start_server(port = PORT) {
     const app = express();
     // Resolved from this file rather than from the working directory: the image runs it
@@ -1043,6 +1074,10 @@ export function start_server(port = PORT) {
         ),
     );
     app.get("/healthz", (_req, res) => res.type("text/plain").send("ok"));
+    // A snapshot, never a subscription: Browse asks once on entry and the list is never
+    // authoritative -- the join attempt is. Ten seconds of cache is what keeps a refresh
+    // button from being a polling loop in disguise (#29, #43).
+    app.get("/api/rooms", (_req, res) => res.set("Cache-Control", "max-age=10").json(listings()));
 
     const server = app.listen(port, "0.0.0.0");
     const sockets = new WebSocketServer({ server, path: "/ws" });
