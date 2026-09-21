@@ -91,6 +91,17 @@ export function Room(transport, read_input) {
                 tick = msg.t | 0;
                 input_at = {};
                 drivers_at = {};
+                // With them, because it is per-match state exactly as they are. Two paths
+                // keep a `Room` alive across a `start` -- a client still on the match
+                // screen inside the two-second end-of-match freeze when the host starts the
+                // next one, and one that reconnects into a room as a match begins -- and
+                // match 1's mark left standing opens match 2 at tick 0 with a gap of
+                // thousands: the loop takes its catch-up branch, steps the whole match
+                // without drawing, and floods out frames that drag every other client's
+                // mark up after it (#84, #51). `tick` and not zero, because on a
+                // resume-start the room really is at `msg.t`; before the payload's own
+                // frames are scheduled below, which are what may raise it again.
+                newest = tick;
                 // The table rides on `start` rather than as four stamped changes: a
                 // client steps tick 0 the instant `start` lands, and a separate message
                 // for that same tick is a message for a tick already stepped past (#34).
@@ -112,9 +123,7 @@ export function Room(transport, read_input) {
                 // wiped with `drivers_at` above, so the payload hands them back rather
                 // than leaving this client the only one in the room that never applies
                 // them (#7, #40).
-                (msg.changes || []).forEach(function (change) {
-                    (drivers_at[change.t] = drivers_at[change.t] || []).push(change);
-                });
+                (msg.changes || []).forEach(stamp_driver);
                 // A socket answers later than a loopback does, so the match's shared
                 // state is not readable on the line after `start` (#34).
                 if (self.on_start) self.on_start(msg);
@@ -139,7 +148,7 @@ export function Room(transport, read_input) {
                 schedule_input(msg.t, msg.seats);
                 break;
             case "driver":
-                (drivers_at[msg.t] = drivers_at[msg.t] || []).push(msg);
+                stamp_driver(msg);
                 break;
             case "match_end":
                 in_match = false;
@@ -154,6 +163,25 @@ export function Room(transport, read_input) {
         for (var seat in seats) frames[seat] = seats[seat];
     }
 
+    // A change stamped for a tick this client has already stepped is applied now rather than
+    // stamped: `step` collects only the tick it is on, so an entry for a passed tick is a
+    // change nobody ever applies and an entry nobody ever deletes. Both halves are the same
+    // wrong -- the room has handed this seat over, and this is the one client still driving
+    // it, reading a keyboard for it and putting a released frame in for it every tick while
+    // everybody else lets the AI steer (#7, #84). Refusing to write those keys is also what
+    // bounds the map: every other one is deleted by the `step` that reaches it, so what is
+    // left is the relay's stamp lookahead and nothing more.
+    //
+    // ponytail: applied late converges the driver table but not the state behind it, and
+    // two clients that passed the tick at different moments disagree for that window.
+    // Discarding converges never. upgrade path: the resync payload, which carries the whole
+    // table and is what the checksums already summon (#41).
+    function stamp_driver(change) {
+        var t = change.t | 0;
+        if (t < tick) drivers[change.seat] = change.driver;
+        else (drivers_at[t] = drivers_at[t] || []).push(change);
+    }
+
     this.start = function (config) {
         transport.send({
             type: "start",
@@ -164,8 +192,14 @@ export function Room(transport, read_input) {
     };
 
     // Where a replay has to end: as far as the relay said, or as far as the frames that have
-    // arrived since say, whichever is further on.
+    // arrived since say, whichever is further on. A match that is over has nowhere to replay
+    // to: a `match_end` lands while a joining client is still fetching the level, and the
+    // ticks past the one the room ended on trip the simulation's own end-of-match flag --
+    // which latches, so `Game.start` no-ops from then on and the session never pumps again
+    // (#84, #39). Here rather than in `catch_up`, because `pump` sprints on `gap()` and would
+    // step those same ticks the same way.
     function target() {
+        if (!in_match) return tick;
         return Math.max(catch_up_to, newest - self.d);
     }
 

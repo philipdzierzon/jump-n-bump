@@ -305,6 +305,70 @@ assert.ok(
     "a frame stamped past anything this client could replay is dropped, not believed",
 );
 
+// --- one Room, two matches (#84) ------------------------------------------------------
+//
+// A `Room` normally dies with its match: the end routes to the lobby, which tears the
+// session down and builds a fresh one. Two paths keep one alive across a `start` -- a client
+// still on the match screen inside the two-second end-of-match freeze when the host starts
+// the next match, and one that reconnects into a room as a match begins -- so every counter
+// a match owns has to be reset by `start` and not merely by construction.
+const no_keys = () => ({ left: false, right: false, up: false });
+
+const reused = new Room(new Loopback_Transport(), no_keys);
+reused.start({ seed: 1, settings: {}, held: [0] });
+for (let tick = 0; tick < 300; tick++) reused.step();
+assert.ok(reused.gap() <= 0, "a client alone in its room is never behind it");
+reused.start({ seed: 2, settings: {}, held: [0] });
+assert.equal(reused.now(), 0, "a second match on a live room opens at tick 0");
+assert.equal(
+    reused.gap(),
+    0,
+    "and with no gap: the newest tick match 1 stamped is not match 2's (#84)",
+);
+
+// Catch-up replays a gap; it does not replay a match that is over. A `match_end` lands while
+// a joining client is still fetching the level, and the ticks past the end are the ones that
+// trip the simulation's end-of-match flag -- which latches, leaving a session that never
+// pumps again.
+const ending_transport = behind_transport(40);
+const ending = new Room(ending_transport, no_keys);
+ending.start({ seed: 1, settings: {}, held: [0] });
+assert.equal(ending.gap(), 38, "a client 38 ticks behind the match it is in");
+ending_transport.deliver({ type: "match_end", reason: "time", matrix: [] });
+assert.equal(ending.gap(), 0, "and behind nothing at all once that match is over");
+ending.catch_up(ending.step);
+assert.equal(ending.now(), 0, "so the replay stops at the end of the match, not past it");
+
+// A driver change stamped for a tick this client has already stepped. That tick never comes
+// round again, so holding it in the map loses the change and leaks the entry: the seat the
+// room gave the AI goes on being driven by the one client that never heard (#7, #84). The
+// two halves are one branch, so this asserts both -- a released frame here would mean the
+// change was stamped rather than applied, which is also the only key that can outlive the
+// `step` that would have deleted it.
+const late_transport = {
+    receive(fn) {
+        this.deliver = fn;
+    },
+    send() {},
+};
+const late = new Room(late_transport, no_keys);
+late_transport.deliver({
+    type: "start",
+    t: 0,
+    d: 0,
+    seed: 1,
+    settings: {},
+    held: [0],
+    drivers: ["local", "local", "ai", "ai"],
+});
+for (let tick = 0; tick < 10; tick++) late.step();
+late_transport.deliver({ type: "driver", t: 3, seat: 1, driver: "ai" });
+assert.equal(
+    late.step()[1],
+    undefined,
+    "a seat the room handed the AI seven ticks ago is the AI's here too, not a released frame",
+);
+
 // #83: one simulation tick that costs more than a frame must not lock the loop. The pump
 // advances its budget by exactly one frame per tick, so before the batch bound a tick that
 // overran it left `next_time - now` monotonically decreasing and the break unreachable -- no
