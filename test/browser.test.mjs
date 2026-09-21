@@ -90,7 +90,7 @@ const browser = await chromium.launch();
 
 // Every <audio> the page plays, in the order it played them, and whether it is still
 // playing. Sound_Player creates them and keeps them to itself -- they are never in the
-// document -- so patching the prototype is the only way to see them from out here. A match
+// document -- so patching the prototype is the only way to see them from out here. A session
 // builds one Sound_Player, so a match being played sounds one looping track and a match
 // that is over sounds none; two loops at once was a session left running behind the one on
 // screen, which is how it was heard (#28, #40). The ordered list is the other half: a set
@@ -98,6 +98,18 @@ const browser = await chromium.launch();
 function record_audio() {
     window.__audio = new Set();
     window.__sounds = [];
+    // Counted as they are made rather than as they are played: a leaked <audio> is one that
+    // nothing plays again, and Sound_Player keeps them out of the document, so there is
+    // nothing to querySelectorAll for (#91).
+    // ponytail: this counts elements made, not elements still alive -- it proves a repair
+    // makes none, which is the fix, rather than that a made one was freed. upgrade path: a
+    // heap snapshot through CDP if a leak ever survives this.
+    window.__audio_made = 0;
+    const create = document.createElement.bind(document);
+    document.createElement = function (tag) {
+        if (String(tag).toLowerCase() === "audio") window.__audio_made++;
+        return create.apply(null, arguments);
+    };
     window.__sounding = () =>
         [...window.__audio]
             .filter((audio) => !audio.paused)
@@ -203,6 +215,9 @@ const sounding = (root = page) => root.evaluate(() => window.__sounding());
 // Every sound played since the list was last forgotten, in the order it was played (#66).
 const sounds = (root = page) => root.evaluate(() => window.__sounds);
 const forget_sounds = (root = page) => root.evaluate(() => (window.__sounds.length = 0));
+// Every <audio> this page has made, leaked ones included: six per Sound_Player plus the one
+// `canPlayType` is probed on (#91).
+const audio_made = (root = page) => root.evaluate(() => window.__audio_made);
 // The music as the element itself. Playing a file is one thing; decoding 54.8 seconds of
 // mp3 and moving through them is the thing a recorder cannot see (#66).
 const music = (root = page) =>
@@ -220,6 +235,15 @@ const music = (root = page) =>
               }
             : {};
     });
+
+// How far into the track this session is. `music` takes the first element it finds, which
+// on a page that has walked through several sessions is an old one, paused where its match
+// left it; the one playing now is the newest. Zero for a track that never played, so a poll
+// on this times out on its own wait rather than on a `TypeError` (#91).
+const music_t = (root = page) =>
+    root.evaluate(
+        () => [...window.__audio].filter((a) => /bump\.\w+$/.test(a.src)).pop()?.currentTime ?? 0,
+    );
 
 // On a fake clock, waiting means winding the simulation on rather than sitting through it:
 // a sound the AI causes lands on the tick it lands on, and which tick that is belongs to
@@ -954,8 +978,30 @@ async function walk() {
     // from the inside, because its own tick keeps up and its own inputs are its own. The
     // repair landing is the only local evidence there is, which is what the overlay says.
     // Eight ticks' worth, which is the window the relay keeps and four seconds of match.
+    // A repair used to build a second Sound_Player and merely mute the first, leaving its
+    // six decoded elements alive: a client repaired every two seconds orphaned ninety of
+    // them a minute, on exactly the machine that was already short of everything (#91).
+    // The track is four to eight milliseconds in when the repair lands, so `currentTime`
+    // rises across it either way -- rewound to zero it is still ahead of where it was last
+    // read. Wait for it to get going first, and then "it did not go backwards" is exactly
+    // the difference between the session's own track picked up where it was paused and a
+    // second start from the top. Half a second of real time, and the only check there is
+    // on the rewind guard (#91).
+    await until("the music to get going", async () => (await music_t()) > 0.4);
+    const audio_before = await audio_made();
+    const t_before = await music_t();
     for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", t, h: 1 });
     await until("the repair to land", () => page.locator(".reconnecting").isVisible());
+    assert.equal(
+        await audio_made(),
+        audio_before,
+        "a repair makes no audio elements at all, so a run of them cannot pile up (#91)",
+    );
+    const t_after = await music_t();
+    assert.ok(
+        t_after >= t_before,
+        `the repair rewound the music rather than resuming it: ${t_before} -> ${t_after} (#91)`,
+    );
     await click("Back to the lobby");
     await on("room");
     // And it goes with the match, rather than standing over the lobby this page walked to --

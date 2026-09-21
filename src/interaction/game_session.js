@@ -90,7 +90,11 @@ export function Game_Session(get_level, config, muted, transport) {
 
     var game = null;
     var sfx = null;
-    var sound_player = null;
+    // One per session, which is one per lobby visit: the six elements hold nothing to do
+    // with a match, so `build` making a set per match left the outgoing set paused, decoded
+    // and alive -- ninety of them a minute on a client being repaired every two seconds,
+    // which is exactly the client that could least afford them (#30, #91).
+    var sound_player = new Sound_Player(muted);
     // The two halves of the simulation a snapshot is packed from and unpacked into: the
     // objects and the RNG's own state. The players are the `player` array, which is the
     // module's rather than this session's (#5).
@@ -171,11 +175,11 @@ export function Game_Session(get_level, config, muted, transport) {
         // pump loop would go on stepping the `player` array the new one replaces, and its
         // music would go on playing.
         if (game) game.pause();
-        // Which it really did: `build` makes a Sound_Player per match, so the outgoing
-        // one's looping music has to be stopped here rather than on the way to the lobby.
-        // Leaving the match muted the old one by accident; a resync never passes through
-        // the lobby at all, and doubled the music instead (#28, #40).
-        if (sound_player) sound_player.set_muted(true);
+        // The simulation about to be replaced must not be heard over the gap: the pump is
+        // paused above, the level is still to resolve, and a load that fails leaves the
+        // match here. `play` un-mutes it again, from where the track had got to rather than
+        // from the top (#28, #40, #91).
+        sound_player.set_muted(true);
         // With it goes its snapshot timer: the tick counter belongs to the match that is
         // starting and the simulation still in these variables belongs to the last one, so
         // a snapshot taken between here and `build` would be the old match's state under
@@ -267,7 +271,6 @@ export function Game_Session(get_level, config, muted, transport) {
         objects = new Objects(rnd);
         var ai = new AI();
         var animation = new Animation(renderer, img, objects, rnd);
-        sound_player = new Sound_Player(muted);
         sfx = new Sfx(sound_player);
         var movement = new Movement(sfx, objects, settings, rnd);
         game = new Game(movement, ai, animation, renderer, objects, room, level, true, rnd);
@@ -411,7 +414,7 @@ export function Game_Session(get_level, config, muted, transport) {
         }
         // The match is over for this client, so its music is over with it: muting used to
         // ride along with the board, and the board stopped pausing anything (#37).
-        if (sound_player) sound_player.set_muted(true);
+        sound_player.set_muted(true);
         if (game) game.pause();
     };
     // Pressed before `start` has come back, which is a round trip on a socket: remembered
