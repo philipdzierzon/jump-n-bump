@@ -80,12 +80,13 @@ const won = [
     [0, 0, 0, 0],
 ];
 // The one match end only the client it happened to hears about: the relay stopped repairing
-// this client's simulation, so the match went on without it. It says both halves -- what
-// went wrong, and that the room is still its to play the next match in (#41).
+// this client's simulation, so the match went on without it. It says all three halves --
+// what went wrong, that the room is still its to play the next match in (#41), and how to
+// get out of the one desync that repeats every match until the tab is reloaded (#95).
 assert.match(
     match_result(null, BUNNY_NAMES, "desync"),
-    /fell out of step .* can play the next one\.$/,
-    "a client dropped for being out of step is told why, and that it is still in the room",
+    /fell out of step .* can play the next one\. If it keeps happening, reload the page\.$/,
+    "a client dropped for being out of step is told why, that it is still in the room, and how to stop it repeating",
 );
 assert.equal(match_result(won, BUNNY_NAMES, "bumps"), "Dott wins with 3 bumps.");
 assert.equal(match_result(won, BUNNY_NAMES, "time"), "Dott wins with 3 bumps.");

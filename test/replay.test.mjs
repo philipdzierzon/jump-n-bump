@@ -11,11 +11,13 @@ import { Animation } from "../src/game/animation.js";
 import { Movement } from "../src/game/movement.js";
 import { make_rnd } from "../src/game/rnd.js";
 import { env } from "../src/game/env.js";
-import { default_ban_map } from "../src/asset_data/default_levelmap.js";
+import { default_ban_map, LEVEL_WIDTH } from "../src/asset_data/default_levelmap.js";
+import { BAN_ICE } from "../src/game/level.js";
 import { Renderer } from "../src/interaction/renderer.js";
 import { Room } from "../src/net/room.js";
 import { Loopback_Transport } from "../src/net/loopback_transport.js";
 import {
+    checksum_ban_map,
     checksum_snapshot,
     decode_snapshot,
     encode_snapshot,
@@ -87,7 +89,14 @@ const no_sfx = { jump() {}, death() {}, spring() {}, splash() {}, fly() {}, musi
 // `held` is the seats this client holds; control scheme n drives held[n] (#32). Input
 // reaches the simulation only through the room, over a loopback transport -- the same path
 // a networked room takes, with a different transport under it (#16, #33).
-function start(seed, settings, held, transport = new Loopback_Transport(), renderer = no_renderer) {
+function start(
+    seed,
+    settings,
+    held,
+    transport = new Loopback_Transport(),
+    renderer = no_renderer,
+    ban_map = default_ban_map(),
+) {
     const keyboard = new Keyboard([]);
     const room = new Room(transport, (scheme) => keyboard.input_frame(scheme));
     room.start({ seed, settings, held });
@@ -100,7 +109,7 @@ function start(seed, settings, held, transport = new Loopback_Transport(), rende
         renderer,
         objects,
         room,
-        { ban_map: default_ban_map() },
+        { ban_map },
         true,
         rnd,
     );
@@ -660,6 +669,31 @@ assert.equal(hashed().length, 1, "a playing client hashes its state on a thirtie
 assert.equal(hashed()[0].t, HALF * 2 + 30, "stamped with the tick it hashed, not the one after");
 for (let tick = 0; tick < 29; tick++) joiner.game.step();
 assert.equal(hashed().length, 1, "and on no tick in between");
+
+// A level edited under the same name -- a tile retyped by a deploy, which is the shape the
+// stale cache serves -- is what the hash over the state alone cannot see (#95). SOLID and
+// ICE are interchangeable in both clauses of `position_player`'s spawn test, so the two
+// clients draw the same cells from the same seed and pack a byte-identical tick 0; a bunny
+// has to slide on that one tile before the states part. Last, because building a Game
+// replaces the `player` array that `pack_snapshot` reads, so each state is packed before
+// the next Game is built.
+const edited_map = default_ban_map();
+edited_map[2 + 11 * LEVEL_WIDTH] = BAN_ICE;
+const stale = start(2468, {}, [0]);
+const stale_state = pack_snapshot(stale.rnd, stale.objects, 0);
+const fresh = start(2468, {}, [0], new Loopback_Transport(), no_renderer, edited_map);
+const fresh_state = pack_snapshot(fresh.rnd, fresh.objects, 0);
+assert.equal(
+    checksum_snapshot(fresh_state),
+    checksum_snapshot(stale_state),
+    "one tile apart, two clients are in the same state at tick 0: the state alone cannot see it",
+);
+// The expression the room builds, by hand -- same as the joiner's above.
+assert.notEqual(
+    checksum_snapshot(fresh_state, checksum_ban_map(edited_map)),
+    checksum_snapshot(stale_state, checksum_ban_map(default_ban_map())),
+    "and chaining the ban map's hash in front of it makes them disagree from tick 0 (#95)",
+);
 
 console.log(
     "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, and a snapshot plus the input gap lands in the host's state",
