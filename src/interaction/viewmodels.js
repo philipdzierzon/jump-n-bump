@@ -1016,6 +1016,33 @@ function ViewModel() {
     // of the state that screen is about: no participants, and no room to rejoin, since the
     // only thing that survives a reload is the hash. Each of those falls back one step
     // rather than rendering a screen with nothing behind it (#42 is what would change it).
+
+    // Focus follows the screen, or a keyboard player tabs down from the top of the page after
+    // every transition (#90). No table of screens: the panes are in document order and
+    // Knockout hides the ones it is not showing, so the first control still laid out belongs
+    // to the screen just routed to. A pane with a `tabindex` of its own is taken instead of
+    // its first control -- the names screen's form *is* the keyboard, and `is_typing`
+    // (game_session.js:511) would swallow the jump keys into a focused text box. The match
+    // screen has no control inside a `.kiosk`, so this is a no-op there, which is what the
+    // issue's "in-game controls are out of scope" asks for.
+    function focus_screen() {
+        // Only when focus has nowhere to be. The screen that went took its control's focus
+        // with it, so this is the transition case; a route onto the screen already showing
+        // (`go("room")` from a match that ended) must not steal the box somebody is typing in.
+        // `checkVisibility()`, not `offsetParent`: a closed `<details>` keeps an offset parent
+        // in Chromium (`content-visibility: hidden`) but fails this check, so a route that
+        // lands the loop on a control inside the collapsed room settings does not silently
+        // leave focus on `<body>`.
+        var here = document.activeElement;
+        if (here && here !== document.body && here.checkVisibility()) return;
+        var targets = document.querySelectorAll(
+            ".kiosk[tabindex], .kiosk input, .kiosk select, .kiosk button",
+        );
+        for (var i = 0; i < targets.length; i++)
+            if (targets[i].checkVisibility() && !targets[i].matches(":disabled"))
+                return targets[i].focus();
+    }
+
     function apply_route() {
         var route = screen_of(window.location.hash);
         if (route.screen !== "play") end_match();
@@ -1027,6 +1054,15 @@ function ViewModel() {
         // re-following your own link the no-op `enter()` already makes of it.
         if (route.room_id && self.room_id() && route.room_id !== self.room_id()) leave_room();
         self.screen(route.screen);
+        // Six FLOW_TEXT messages (dropped/room_gone/gave_up -> landing, vacated -> names,
+        // both unavailable/not_accepted refusals -> browse/password) are set one route
+        // before this line, so their `role="alert"`/`role="status"` region is still
+        // `display: none` when the text lands -- measured in reload_into_a_dead_room():
+        // `offsetParent` is false at the exact moment `room_gone` writes. Re-touching the
+        // observable now that the pane is up re-fires the live region.
+        // ponytail: unconditional, so an unrelated route can re-announce an error that did
+        // not change. upgrade path: clear `self.error` on route change instead.
+        self.error.valueHasMutated();
         if (route.screen === "browse") self.refresh_rooms();
         if (route.screen === "password" && !self.pending_id()) return go("landing", true);
         if (route.screen === "room" || route.screen === "play")
@@ -1053,6 +1089,9 @@ function ViewModel() {
             self.current_game().start();
         }
         if (route.room_id) enter(route.room_id);
+        // Queued, not immediate: this function also runs once from the constructor (below),
+        // before `ko.applyBindings` has hidden a single pane.
+        queueMicrotask(focus_screen);
     }
 
     window.addEventListener("hashchange", apply_route);
