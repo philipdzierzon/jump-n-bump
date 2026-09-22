@@ -2497,17 +2497,15 @@ async function late_resume_from_the_lobby() {
     await click("Take the seats", guest);
     await on("room", guest);
     // #128: the client that watches a match end from the lobby is the one this region is
-    // for -- it never saw the match, and the result is the whole of what it is told. Read
-    // here, before the match it will describe has ended: empty, and already laid out, which
-    // is the half a live region cannot be announced without. The panel around it used to
-    // toggle with the board, so the text landed inside a hidden wrapper and was never read
-    // out (#88, #90, #128).
-    assert.equal(await text(result_line(guest)), "", "no last match to report yet");
-    assert.ok(
-        await result_line(guest).isVisible(),
-        "and the region is already in the page: a live region is announced on a change while " +
-            "it is there, never on being revealed with the message already inside it (#128)",
-    );
+    // for -- it never saw the match, and the result is the whole of what it is told. The
+    // panel around this line used to toggle with the board it describes, so the text landed
+    // inside a hidden wrapper and was never read out. Both halves of "announced" are read
+    // here and asserted together below: what the region was before the match ended -- empty
+    // and laid out, which is the half no write can supply -- and the write itself. Together,
+    // because neither half fails on its own: a region revealed with its message inside it
+    // still gets a write, and the `visible` flag on that write is read a microtask later,
+    // by which time the wrapper is open (#88, #90, #128).
+    const before_the_end = [await text(result_line(guest)), await result_line(guest).isVisible()];
     await watch_region(guest, RESULT_LINE);
     // Seated into a running match, so the page asks to be let into it by itself, and the
     // answer walks straight into the frozen level fetch.
@@ -2517,10 +2515,15 @@ async function late_resume_from_the_lobby() {
     await on("room", host);
     await until("the guest's board", () => board_panel(guest).isVisible());
     const told = await said_when(guest, RESULT_LINE);
-    assert.ok(
-        told.some(([what, visible]) => visible && what === "The host ended the match."),
-        "and it is told so out loud: the result lands in a region that was already there, " +
-            "which is what a screen reader reads out (#128): " +
+    assert.deepEqual(
+        [
+            ...before_the_end,
+            told.some(([what, visible]) => visible && what === "The host ended the match."),
+        ],
+        ["", true, true],
+        "it is told out loud how the match it never saw ended: a region that was laid out " +
+            "and empty while the match ran, written into once it was over, which is what a " +
+            "screen reader reads out (#128): " +
             JSON.stringify(told),
     );
     assert.deepEqual(
@@ -3779,6 +3782,12 @@ async function connecting_keeps_focus() {
             await focused(slow),
             was,
             "and the player who pressed " + label + " still has the focus (#120)",
+        );
+        // The greyed look used to come from `:disabled`, which the browser styles for you.
+        assert.equal(
+            await button(label, slow).evaluate((el) => getComputedStyle(el).opacity),
+            "0.5",
+            label + " looks unavailable too, and that style now hangs off `aria-disabled`",
         );
         // The reading that actually tells the two states apart in this browser. Measured:
         // Chromium does *not* blur an element that becomes `disabled` -- `activeElement`
