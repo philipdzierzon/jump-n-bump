@@ -1582,6 +1582,69 @@ assert.deepEqual(
 delete process.env.RESERVE_MS;
 bystander.socket.close();
 
+// --- a reload into a locked room (#117) -------------------------------------------------
+//
+// Nothing of the password survives a reload: it is write-only (#38) and was never written
+// down client-side, so the page comes back with the token alone. Compared against the
+// password first, that made the one reload the reservation window exists for the one reload
+// it could not reach. A token that owns a *reserved* seat in *this* room is let past the
+// password now -- and nothing wider than that is.
+const holder = connect({ type: "create", id: "LCKDZ", password: "hunter2" });
+const holder_token = (await lobby(holder)).token;
+await holder.seats(["Reloader"]);
+// Somebody else in the room, because a room dies with its last client and a reservation
+// nobody can come back to is not one.
+const roommate = connect({ type: "join", id: "LCKDZ", password: "hunter2" });
+await lobby(roommate);
+const away = () =>
+    roommate.until((msg) => msg.type === "room" && msg.labels[0] === "Reloader (AI)");
+
+const outsider = connect({ type: "join", id: "LCKDZ", token: "a-token-of-its-own" });
+assert.equal(
+    (await lobby(outsider)).code,
+    "ROOM_UNAVAILABLE",
+    "a token holding no seat here is refused in the one word a wrong password and a " +
+        "room that is not there are both refused in (#8)",
+);
+outsider.socket.close();
+
+// Held is not reserved. The holder is still connected, so its own token opens nothing:
+// copying `sessionStorage` into a second tab is a desync and not a rejoin, and the door
+// agrees with `admit` about which seats are reclaimable because both ask `reserved_seats`.
+const copycat = connect({ type: "join", id: "LCKDZ", token: holder_token });
+assert.equal(
+    (await lobby(copycat)).code,
+    "ROOM_UNAVAILABLE",
+    "a token whose seat is still online holds no reservation, and buys nothing at the door",
+);
+copycat.socket.close();
+
+holder.socket.close();
+await away();
+const reclaimed = connect({ type: "join", id: "LCKDZ", token: holder_token });
+assert.deepEqual(
+    (await lobby(reclaimed)).held,
+    [0],
+    "the token that reserved a seat here reclaims it with no password typed a second time",
+);
+
+// A reservation is one room's. Reserved again -- and refused at the door of a different
+// locked room, which is what keeps this from being a skeleton key for every locked room in
+// the process.
+reclaimed.socket.close();
+await away();
+const elsewhere = connect({ type: "create", id: "ZEBRA", password: "hunter2" });
+await lobby(elsewhere);
+const crosser = connect({ type: "join", id: "ZEBRA", token: holder_token });
+assert.equal(
+    (await lobby(crosser)).code,
+    "ROOM_UNAVAILABLE",
+    "a reservation opens the door of the room that granted it and of no other room",
+);
+crosser.socket.close();
+elsewhere.socket.close();
+roommate.socket.close();
+
 // --- message authorisation (#82) -------------------------------------------------------
 //
 // Four message types the relay used to take from any client without asking who sent them.

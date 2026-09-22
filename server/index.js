@@ -99,6 +99,11 @@ function broadcast_frame(room, msg, except) {
 // Absent, empty or null is no password at all, which is also how a host clears one.
 const password_of = (msg) => (msg.password == null ? null : String(msg.password) || null);
 
+// The client's claimed identity, coerced once: the door and `admit` have to agree on what
+// the token is, or a token could open a door it then reclaims nothing through (#7, #117).
+// Empty is no claim at all, and `admit` mints one instead.
+const token_of = (msg) => String(msg.token || "");
+
 function create(client, msg) {
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
     if (!id) return send(client, { type: "error", code: "BAD_ID" });
@@ -216,8 +221,21 @@ function join(client, msg) {
     const room = rooms[normalise_room_id(msg.id)];
     // One opaque code for a wrong password and a missing room alike: telling them apart is
     // what would turn an unlisted room's id into something worth guessing at (#8). No
-    // profanity blocklist, and no second failure code to leak the difference.
-    if (!room || room.password !== password_of(msg))
+    // profanity blocklist, and no second failure code to leak the difference -- and none
+    // for the third way past this line either: a token holding a reserved seat here is
+    // admitted without the password, and one holding none is refused in the same word as
+    // the other two. The reload the reservation window exists for is the one that cannot
+    // carry a password, because the password is write-only and was never written down
+    // (#38, #42, #117). This is exactly the set of seats `admit` is about to hand back, so
+    // the door cannot admit somebody it then seats as nobody.
+    //
+    // The cost is #7's, knowingly taken: tokens are client-verbatim, so a forged one now
+    // skips the password too -- but only one forged onto a seat this room is reserving in
+    // this minute, and guessing that is already the whole of taking the seat.
+    if (
+        !room ||
+        (room.password !== password_of(msg) && !reserved_seats(room, token_of(msg)).length)
+    )
         return send(client, { type: "error", code: "ROOM_UNAVAILABLE" });
     // After the password, so a refusal still says nothing about a room the client could not
     // have joined anyway (#8). A client that declares no build is not checked: the headless
@@ -325,6 +343,18 @@ function online_seats(room) {
     const online = new Set();
     for (const client of room.clients) for (const seat of client.seats) online.add(seat);
     return online;
+}
+
+// The seats this token may still reclaim: held by it, and held by nobody connected. Held is
+// not reserved -- duplicating a tab copies `sessionStorage`, and two sockets driving one
+// seat is a desync rather than a rejoin. One definition, asked by `admit` on the way in and
+// by `join` at the door, so the seats the password is skipped for are the seats that come
+// back (#7, #42, #117).
+function reserved_seats(room, token) {
+    const online = online_seats(room);
+    return room.seats
+        .map((seat, index) => (seat && seat.token === token && !online.has(index) ? index : -1))
+        .filter((index) => index >= 0);
 }
 
 // Ready is declared per client and covers every seat it holds at once, forced by the input
@@ -581,18 +611,11 @@ function admit(client, room, msg) {
     // Identity is a server-minted opaque token, per client rather than per participant: one
     // browser is one socket and one reconnect, so the token reclaims every seat that client
     // held. A username is guessable by anyone in the room and is never an identity (#7).
-    client.token = String(msg.token || "") || randomUUID();
+    client.token = token_of(msg) || randomUUID();
     // The repair allowance is the player's, not the socket's: a reconnect on the same token
     // comes back to what it has spent rather than to a fresh five (#93).
     client.allowance = allowance_of(room, client.token);
-    // A seat whose holder is connected is not reclaimable: duplicating a tab copies
-    // sessionStorage, and two sockets driving one seat is a desync, not a rejoin.
-    const online = online_seats(room);
-    client.seats = room.seats
-        .map((seat, index) =>
-            seat && seat.token === client.token && !online.has(index) ? index : -1,
-        )
-        .filter((index) => index >= 0);
+    client.seats = reserved_seats(room, client.token);
     // The names this client is waiting to sit down with, empty unless it asked for seats
     // in a room that had none (#44).
     client.queued = [];

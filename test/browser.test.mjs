@@ -69,6 +69,7 @@ const room_o = new_room_id();
 const room_p = new_room_id();
 const room_q = new_room_id();
 const room_r = new_room_id();
+const room_s = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -2982,6 +2983,86 @@ async function reload_into_a_dead_room() {
     await gone.close();
 }
 
+// --- a reload into a locked room (#117) -------------------------------------------------
+// The client half of #117, and the one the relay suite cannot reach: that `enter()` really
+// does come back with the token and no password, because the password is write-only (#38)
+// and was never in `sessionStorage` to survive the reload. Before the relay looked at the
+// token first, the refusal came back on the reload path rather than on a typed attempt, so
+// the player was not even offered the box: they landed on the title screen being told the
+// room would not have them back, with a minute to find a password they typed once.
+async function reload_into_a_locked_room() {
+    const locked = await (await make_context("reload_into_a_locked_room")).newPage();
+    const errors = [];
+    locked.on("pageerror", (error) => errors.push(error.message));
+
+    await locked.goto(origin + "/");
+    await click("Create a room", locked);
+    await on("create", locked);
+    await screen("create", locked).locator("input.code").fill(room_s);
+    await click("Create", locked);
+    await on("names", locked);
+    await locked.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(locked).count()) === 1);
+    await click("Take the seats", locked);
+    await on("room", locked);
+
+    // A node-side client, so the room outlives the reload: a room dies with its last client,
+    // and a reservation nobody can come back to is not one. Joined before the password, as
+    // a player who was already in the room when the host locked it would be.
+    const mate_saw = [];
+    const mate = relay_client({ type: "join", id: room_s }, mate_saw);
+    await until("the mate to join", () => mate_saw.some((msg) => msg.type === "joined"));
+
+    await open_settings(locked);
+    await password_box(locked).fill("hunter2");
+    await click("Set it now", locked);
+    await until("the confirmation", async () => (await notice(locked)) === "Password set.");
+
+    const view_before = await room_view(locked);
+    assert.ok(view_before.length, "a board with something on it to come back to");
+    await locked.reload();
+    // The reload's answer, whichever way it went -- the seat back on the room screen, or the
+    // flow walking out of it. Waiting for the answer rather than for the room screen is what
+    // keeps the claim in the assertion below instead of in a locator timeout: without the
+    // relay's fix this page lands on #landing saying the room would not have it back.
+    await until(
+        "the relay to answer the reload",
+        async () => (await hash(locked)) !== "#room" || (await lobby_rows(locked)).length > 0,
+    );
+    assert.equal(
+        await hash(locked),
+        "#room",
+        "a reload into a locked room lands back in the room and not at the door (#117)",
+    );
+    assert.deepEqual(
+        await room_view(locked),
+        view_before,
+        "and it reclaims the reserved seat on the token alone, with no password to retype " +
+            "and nothing of the one it set written down anywhere (#38, #117)",
+    );
+
+    // The other half of the same room: the door the page walked through is still shut to
+    // everyone else. Without this the assertions above would pass just as happily on a
+    // password that never took.
+    const barred_saw = [];
+    const barred = relay_client({ type: "join", id: room_s }, barred_saw);
+    // Whichever way the door went, so a room that turned out not to be locked fails this by
+    // name rather than by timing out on a refusal that never comes.
+    await until("the door's answer", () =>
+        barred_saw.some((msg) => msg.type === "error" || msg.type === "joined"),
+    );
+    assert.equal(
+        barred_saw[0].code,
+        "ROOM_UNAVAILABLE",
+        "the room was locked the whole way through: the reload was a reclaim, not a walk-in",
+    );
+    barred.close();
+
+    assert.deepEqual(errors, [], "and the page threw nothing");
+    mate.close();
+    await locked.close();
+}
+
 // --- the reservation window runs out (#42, #88) -----------------------------------------
 // The first of the three paths that end on the landing screen, and the one that has a
 // sentence of its own: the retries did not get back in before the seats stopped being this
@@ -3424,6 +3505,7 @@ try {
     await history_reload_in_match();
     await history_link_while_seated();
     await reload_into_a_dead_room();
+    await reload_into_a_locked_room();
     await sound();
     await browse();
     await queueing();
