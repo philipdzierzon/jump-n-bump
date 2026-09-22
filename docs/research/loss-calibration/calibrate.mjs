@@ -107,10 +107,10 @@ function summarise(arrivals, sent, one_way) {
         } else run = null;
     }
     const sorted = excess.filter(Number.isFinite).sort((a, b) => a - b);
-    const ticks_late = { 0: 0, 1: 0, 2: 0, 3: 0, "4-7": 0, "8-15": 0, "16+": 0 };
+    const ticks_late = { 0: 0, 1: 0, 2: 0, 3: 0, "4-7": 0, "8-15": 0, "16-29": 0, "30+": 0 };
     for (const e of sorted) {
         const t = Math.max(0, Math.floor(e / TICK));
-        ticks_late[t < 4 ? t : t < 8 ? "4-7" : t < 16 ? "8-15" : "16+"]++;
+        ticks_late[t < 4 ? t : t < 8 ? "4-7" : t < 16 ? "8-15" : t < 30 ? "16-29" : "30+"]++;
     }
     const r = (x) => (x === null ? null : Math.round(x * 10) / 10);
     return {
@@ -184,7 +184,7 @@ function markdown(report) {
             return (
                 `| ${c.one_way} | ${c.jitter} | ${c.loss} | ${dir} | ${d.excess_ms.p50} | ` +
                 `${d.excess_ms.p99} | ${d.excess_ms.p999} | ${d.excess_ms.max} | ` +
-                `${t[1] + t[2] + t[3]} | ${t["4-7"]} | ${t["8-15"]} | ${t["16+"]} | ` +
+                `${t[1] + t[2] + t[3]} | ${t["4-7"]} | ${t["8-15"]} | ${t["16-29"]} | ${t["30+"]} | ` +
                 `${d.undelivered} | ${d.stalls_per_minute} | ` +
                 `${Math.max(0, ...d.stalls.map((s) => s.frames))} |`
             );
@@ -206,8 +206,8 @@ function markdown(report) {
         `${SECONDS} s per cell. Excess is one-way latency over the configured delay, in ms. ` +
             "Ticks late counts frames, a stall is a run of consecutive frames each over a tick late.",
         "",
-        "| one-way ms | jitter ms | loss % | dir | p50 | p99 | p99.9 | max | 1-3 ticks | 4-7 | 8-15 | 16+ | lost | stalls/min | longest stall (frames) |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| one-way ms | jitter ms | loss % | dir | p50 | p99 | p99.9 | max | 1-3 ticks | 4-7 | 8-15 | 16-29 | 30+ | lost | stalls/min | longest stall (frames) |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ...rows,
         "",
         "## Which repair path TCP took (counter deltas per cell, both directions)",
@@ -245,15 +245,18 @@ const report = {
     },
     cells: [],
 };
-const total = ONE_WAY.length * JITTER.length * LOSS.length;
-for (const one_way of ONE_WAY)
-    for (const jitter of JITTER)
-        for (const loss of LOSS) {
-            console.log(
-                `[${report.cells.length + 1}/${total}] one-way ${one_way} ms, jitter ${jitter} ms, loss ${loss}%`,
-            );
-            report.cells.push(await cell(one_way, jitter, loss));
-        }
+// CELLS="50/0/1,50/0/3" runs only those one-way/jitter/loss cells, so the rare tail (a second
+// loss doubling the RTO past AI_AFTER's 30 ticks) can get long runs without the whole matrix.
+const cells = process.env.CELLS
+    ? process.env.CELLS.split(",").map((c) => c.split("/").map(Number))
+    : ONE_WAY.flatMap((o) => JITTER.flatMap((j) => LOSS.map((l) => [o, j, l])));
+report.env.cells = cells.map((c) => c.join("/"));
+for (const [one_way, jitter, loss] of cells) {
+    console.log(
+        `[${report.cells.length + 1}/${cells.length}] one-way ${one_way} ms, jitter ${jitter} ms, loss ${loss}%`,
+    );
+    report.cells.push(await cell(one_way, jitter, loss));
+}
 tc("qdisc", "del", "dev", "lo", "root");
 report.env.finished = new Date().toISOString();
 

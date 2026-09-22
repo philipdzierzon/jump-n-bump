@@ -19,6 +19,21 @@ every cell for a smoke run. When it finishes, `calibration/` holds:
 - `calibration.md`: the tables. Paste it into the issue.
 - `calibration.json`: the raw data, including every stall event. Attach it.
 
+### The long tail
+
+One minute at 0.5-3 % loss sees only a few dozen losses. The case that matters most is a second
+loss on a retransmit, which doubles the RTO: 200 + 400 ms is past `AI_AFTER` (30 ticks, 500 ms,
+`server/index.js`), which hands a connected player's seat to the AI. That case is rare, so run
+only the harsh cells, for longer, into a separate folder:
+
+```sh
+docker run --rm --cap-add NET_ADMIN -e CELLS=50/0/1,50/0/3,50/5/3 -e CELL_SECONDS=600 \
+  -v "$PWD/calibration-tail:/out" jnb-netem
+```
+
+`CELLS` takes `one-way/jitter/loss` triples. Three 10-minute cells take about 30 minutes.
+Anything in the `30+` column is a bug-tier finding.
+
 If `tc` cannot attach netem, the container says so and exits. On a Linux host, run
 `sudo modprobe sch_netem` first. Docker Desktop's VM kernel ships the module.
 
