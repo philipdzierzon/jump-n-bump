@@ -15,6 +15,7 @@ import { default_ban_map, LEVEL_WIDTH } from "../src/asset_data/default_levelmap
 import { BAN_ICE } from "../src/game/level.js";
 import { Renderer } from "../src/interaction/renderer.js";
 import { Room } from "../src/net/room.js";
+import { MAX_CATCH_UP } from "../src/net/room_config.js";
 import { Loopback_Transport } from "../src/net/loopback_transport.js";
 import {
     checksum_ban_map,
@@ -240,6 +241,23 @@ assert.deepEqual(
     { substituted: 2, arrived: 1, late: 1, worst_margin: -3, late_by: { "-3": 1 }, holes: 0 },
     "a frame arriving after the tick it was stamped for is counted, with its slack",
 );
+// And one for a tick this room could not reach if it replayed for a whole minute: refused
+// rather than scheduled, and counted all the same. `arrived` is what the wire delivered, so
+// it is counted above that guard rather than after it -- the relay counts its own refusal of
+// the same frame (`room.forged++`), and a client silent about what the relay is loud about
+// is the blind spot #118 closed one layer up (#126).
+const before_ceiling = delayed_room.gap();
+delayed_transport.to_client({ type: "input", t: MAX_CATCH_UP + 10, seats: { 1: { left: true } } });
+assert.deepEqual(
+    delayed_room.stats(),
+    { substituted: 2, arrived: 2, late: 1, worst_margin: -3, late_by: { "-3": 1 }, holes: 0 },
+    "a frame past the catch-up ceiling is counted as arrived, and measured as nothing else",
+);
+assert.equal(
+    delayed_room.gap(),
+    before_ceiling,
+    "and it is refused rather than scheduled: the room's position does not move with it",
+);
 
 // Input edge latch: a tap that begins and ends between two loop wakeups, and a key really
 // held across the same batch (#86). The pump steps a whole catch-up batch synchronously, so
@@ -333,6 +351,9 @@ const behind_transport = (ahead) => ({
         this.deliver({
             type: "start",
             t: 0,
+            // The relay stamps every `start` with the match it begins, and every frame this
+            // client sends carries it back (#122).
+            match: 1,
             d: 2,
             seed: msg.seed,
             settings: msg.settings,
@@ -401,8 +422,15 @@ const reused = new Room(new Loopback_Transport(), no_keys);
 reused.start({ seed: 1, settings: {}, held: [0] });
 for (let tick = 0; tick < 300; tick++) reused.step();
 assert.ok(reused.gap() <= 0, "a client alone in its room is never behind it");
+assert.equal(reused.match, 1, "the match this client is in, counted from one (#122)");
 reused.start({ seed: 2, settings: {}, held: [0] });
 assert.equal(reused.now(), 0, "a second match on a live room opens at tick 0");
+assert.equal(
+    reused.match,
+    2,
+    "and a number that says it is a different match: the one thing that tells a `start` " +
+        "beginning the next match from one for the match this client is already in (#122)",
+);
 assert.equal(
     reused.gap(),
     0,
@@ -419,6 +447,12 @@ ending.start({ seed: 1, settings: {}, held: [0] });
 assert.equal(ending.gap(), 38, "a client 38 ticks behind the match it is in");
 ending_transport.deliver({ type: "match_end", reason: "time", matrix: [] });
 assert.equal(ending.gap(), 0, "and behind nothing at all once that match is over");
+assert.equal(
+    ending.match,
+    1,
+    "which is still the match it was in: a match that is over is the one this client last " +
+        "played, and the number outlives it (#122)",
+);
 ending.catch_up(ending.step);
 assert.equal(ending.now(), 0, "so the replay stops at the end of the match, not past it");
 

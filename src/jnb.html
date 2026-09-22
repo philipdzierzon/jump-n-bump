@@ -24,14 +24,19 @@
         .eyebrow { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
         .muted { color: var(--muted); font-size: 13px; }
         .err { color: #e4572e; font-size: 13px; }
-        /* Laid out empty, both of them: a live region is announced on a change while it is
-           in the page, never on being revealed with the message already inside it (#88, #90). */
+        /* Laid out empty, every one of them: a live region is announced on a change while it
+           is in the page, never on being revealed with the message already inside it (#88,
+           #90, #120, #128). Zero-height is the same silence -- the box has to be laid out,
+           not merely present. */
         .err, .notice { min-height: 1em; }
-        /* ponytail: seven of the ten status lines (queued, both match_running copies,
-           pending_id, disconnected, staged_text, result_text) are still revealed with their
-           text already inside them -- role attributes only, no re-fire. upgrade path: the
-           same `observable.valueHasMutated()` once the pane is up that `apply_route` now
-           does for `error` (viewmodels.js), one call per observable that needs it. */
+        /* ponytail: five of the ten status lines (queued, both match_running copies,
+           disconnected, staged_text) are still revealed with their text already inside them
+           -- role attributes only, no re-fire. Connecting... and the last match's result
+           left this list in #120 and #128: one is bound to its text now instead of to its
+           visibility, and the other is laid out outside the panel it describes and
+           re-touched once the lobby is up. upgrade path: the same re-touch once the pane is
+           up that `apply_route` does for `error` and for `result_text` (viewmodels.js), one
+           call per observable that needs it. */
         /* A form here is the Enter key and nothing else: the screens lay their own controls
            out, so the wrapper must not become a flex item of its own (#90). */
         form { display: contents; }
@@ -40,7 +45,7 @@
         button { font: inherit; width: 100%; padding: 12px 14px; cursor: pointer; color: var(--ink); background: #252019; border: 1px solid var(--line); border-radius: 4px; }
         button.pri { font-weight: 600; color: #1a1200; background: var(--amber); border-color: var(--amber); }
         button.sm { width: auto; padding: 7px 10px; font-size: 13px; }
-        button:disabled { opacity: 0.5; cursor: default; }
+        button:disabled, button[aria-disabled="true"] { opacity: 0.5; cursor: default; }
         input { font: inherit; width: 100%; padding: 10px 12px; color: var(--ink); background: #0c0b0a; border: 1px solid var(--line); border-radius: 4px; }
         input.code { font-family: ui-monospace, monospace; font-size: 22px; text-align: center; text-transform: uppercase; letter-spacing: 0.35em; }
         .codebox { display: flex; gap: 6px; justify-content: center; }
@@ -162,13 +167,16 @@
         <form data-bind="submit: create_room">
             <input class="code" maxlength="5" placeholder="CODE" data-bind="value: code, valueUpdate: 'input'" />
             <label><input type="checkbox" data-bind="checked: listed" /> Show it in the public list</label>
-            <!-- ponytail: `enable: !connecting()` (here, Continue, Take the seats) drops a
-                 focused button from the tab order the instant a click opens a socket, so a
-                 keyboard player who just pressed it loses focus to <body> with nothing
-                 announced mid-connect (#89, #90). upgrade path: aria-disabled="true" plus a
-                 guarded submit handler, only once it costs no more than this binding and
-                 breaks no existing `disabled(button(...))` assertion. -->
-            <button class="pri" data-bind="enable: !connecting()">Create</button>
+            <!-- `aria-disabled`, not `enable:` (here, Continue, Take the seats): `enable`
+                 sets the DOM `disabled` property, which takes the control out of the tab
+                 order the instant a click opens a socket -- so the keyboard player who just
+                 pressed it loses their place mid-connect, with nothing announced. (Measured:
+                 Chromium leaves `activeElement` on it and tabs past it; Firefox and WebKit
+                 blur to <body>. Either way the next Tab lands somewhere else.) This says the
+                 same thing to a screen reader and keeps the control where it was; what stops
+                 a second socket is the guard at the top of the handler (viewmodels.js),
+                 which is where #89's property belongs anyway (#89, #90, #120). -->
+            <button class="pri" data-bind="attr: { 'aria-disabled': connecting }">Create</button>
         </form>
         <p class="err" role="alert" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Back</button>
@@ -176,7 +184,11 @@
 
     <div data-bind="visible: screen() === 'join'" class="kiosk">
         <div class="eyebrow">join a room</div>
-        <p class="muted" role="status" data-bind="visible: pending_id">Connecting&hellip;</p>
+        <!-- Laid out empty and filled in place: a live region is announced on a change while
+             it is in the page, never on being revealed with the message already inside it
+             (#88, #90). This is the announcement the two gating screens' controls cannot
+             make for themselves, so it is bound to the same in-flight state they are (#120). -->
+        <p class="muted notice" role="status" data-bind="text: connecting() ? 'Connecting&hellip;' : ''"></p>
         <form data-bind="submit: join_room">
             <input class="code" maxlength="5" placeholder="CODE" data-bind="value: code, valueUpdate: 'input'" />
             <button class="pri">Continue</button>
@@ -193,7 +205,7 @@
         <p class="muted centre">Enter the room's password, if it has one.</p>
         <form data-bind="submit: submit_password">
             <input type="password" placeholder="Password" data-bind="value: password, valueUpdate: 'input'" />
-            <button class="pri" data-bind="enable: !connecting()">Continue</button>
+            <button class="pri" data-bind="attr: { 'aria-disabled': connecting }">Continue</button>
         </form>
         <p class="err" role="alert" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Start over</button>
@@ -213,7 +225,7 @@
             <p class="muted" data-bind="visible: participants().length === 0">Nobody yet.</p>
             <p class="muted" data-bind="visible: seated">These seats are taken and keep their names for as long as you are in the room.</p>
             <p class="muted" role="status" data-bind="visible: match_running">A match is in progress; you are in for the next one.</p>
-            <button class="pri" data-bind="enable: participants().length > 0 &amp;&amp; !connecting(), text: seated() ? 'Back to the lobby' : 'Take the seats'"></button>
+            <button class="pri" data-bind="enable: participants().length > 0, attr: { 'aria-disabled': connecting }, text: seated() ? 'Back to the lobby' : 'Take the seats'"></button>
         </form>
         <p class="err" role="alert" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Start over</button>
@@ -288,9 +300,14 @@
         </details>
         <p class="muted notice" role="status" data-bind="text: notice"></p>
         <p class="err" role="alert" data-bind="text: error"></p>
+        <!-- Outside the panel, and laid out empty: the panel is revealed by the same board
+             this line is about, so a region inside it was hidden by its own wrapper at the
+             moment the text landed -- and a live region is announced on a change while it is
+             in the page, never on being revealed (#88, #90, #128). The `banner` box comes
+             with the text rather than standing empty above the seats. -->
+        <p class="notice" role="status" data-bind="text: result_text, css: { banner: result_text, alarm: board_reason() === 'desync' }"></p>
         <div data-bind="visible: board">
             <div class="eyebrow">last match</div>
-            <p class="banner" role="status" data-bind="text: result_text, visible: result_text, css: { alarm: board_reason() === 'desync' }"></p>
             <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->
         </div>
         <button class="sm" data-bind="click: go_landing">Leave</button>

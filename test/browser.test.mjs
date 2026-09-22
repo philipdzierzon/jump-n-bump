@@ -66,6 +66,12 @@ const room_l = new_room_id();
 const room_m = new_room_id();
 const room_n = new_room_id();
 const room_o = new_room_id();
+const room_p = new_room_id();
+const room_q = new_room_id();
+const room_r = new_room_id();
+const room_s = new_room_id();
+const room_t = new_room_id();
+const room_u = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -73,10 +79,10 @@ const browser = await chromium.launch();
 
 // Every <audio> the page plays, in the order it played them, and whether it is still
 // playing. Sound_Player creates them and keeps them to itself -- they are never in the
-// document -- so patching the prototype is the only way to see them from out here. A session
-// builds one Sound_Player, so a match being played sounds one looping track and a match
-// that is over sounds none; two loops at once was a session left running behind the one on
-// screen, which is how it was heard (#28, #40). The ordered list is the other half: a set
+// document -- so patching the prototype is the only way to see them from out here. A page
+// builds one Sound_Player and every session shares it (#123), so a match being played sounds
+// one looping track and a match that is over sounds none; two loops at once was a session
+// left running behind the one on screen, which is how it was heard (#28, #40). The ordered list is the other half: a set
 // says a sound was played at some point, and an order says which event played it (#66).
 function record_audio() {
     window.__audio = new Set();
@@ -85,8 +91,13 @@ function record_audio() {
     // nothing plays again, and Sound_Player keeps them out of the document, so there is
     // nothing to querySelectorAll for (#91).
     // ponytail: this counts elements made, not elements still alive -- it proves a repair
-    // makes none, which is the fix, rather than that a made one was freed. upgrade path: a
-    // heap snapshot through CDP if a leak ever survives this.
+    // makes none, which is the fix, rather than that a made one was freed. upgrade path:
+    // count the elements that have *played*, which `__audio` below holds a reference to, so
+    // one that is in it is one that exists. Not a heap snapshot: a `WeakRef` per element and
+    // a forced `HeapProfiler.collectGarbage` were measured against the leak in #123 and said
+    // six alive whether or not it was fixed, because the sets a retired session left behind
+    // are collectable the moment nothing reaches the session -- the cost is real between
+    // collections, and invisible to a count taken after one (#123).
     window.__audio_made = 0;
     const create = document.createElement.bind(document);
     document.createElement = function (tag) {
@@ -208,6 +219,16 @@ async function on(name, root = page) {
 }
 
 const hash = (root = page) => root.evaluate(() => window.location.hash);
+// Whether a page reaches a route, as a boolean rather than as a thrown timeout: where a
+// claim is "it gets there" the assertion should be the thing that goes red and say what was
+// expected, which a locator timeout never does.
+const reaches = (root, want, ms = 15000) =>
+    root
+        .waitForFunction((h) => window.location.hash === h, want, { timeout: ms })
+        .then(
+            () => true,
+            () => false,
+        );
 // Synchronous, unlike `__routes`: `apply_route` can replace the hash again before
 // `__routes`'s `setTimeout` push runs (a bounce), so that push always reads the hash
 // *after* the bounce, for both entries. This one lands in the same task as the
@@ -245,9 +266,11 @@ const music = (root = page) =>
     });
 
 // How far into the track this session is. `music` takes the first element it finds, which
-// on a page that has walked through several sessions is an old one, paused where its match
-// left it; the one playing now is the newest. Zero for a track that never played, so a poll
-// on this times out on its own wait rather than on a `TypeError` (#91).
+// on a page that has walked through several sessions used to be an old one, paused where
+// its match left it; the one playing now is the newest. A page holds one player and one
+// such element now, so the two agree (#123) -- what this still adds is a zero for a track
+// that never played, so a poll on it times out on its own wait rather than on a `TypeError`
+// (#91).
 const music_t = (root = page) =>
     root.evaluate(
         () => [...window.__audio].filter((a) => /bump\.\w+$/.test(a.src)).pop()?.currentTime ?? 0,
@@ -342,6 +365,11 @@ const err_on = (name, root = page) => text(screen(name, root).locator("p.err"));
 const banner = (root = page) => screen("room", root).locator("div.banner");
 const board_panel = (root = page) =>
     screen("room", root).locator('div[data-bind*="visible: board"]');
+// The line above that board: how the last match ended (#39). Outside the panel now, because
+// a live region hidden by its wrapper at the moment its text lands is never announced -- so
+// it is found by its own binding rather than by what it sits in (#128).
+const RESULT_LINE = 'div[data-bind*="screen() === \'room\'"] p[data-bind*="text: result_text"]';
+const result_line = (root = page) => root.locator(RESULT_LINE);
 const level_select = (root = page) => screen("room", root).locator("select");
 const level_options = (root = page) =>
     level_select(root)
@@ -367,6 +395,58 @@ const relay_client = (entry, seen) =>
         (msg) => seen.push(msg),
         (code) => seen.push({ type: "error", code }),
     );
+
+// Whether a live region really announced, which is not the same question as whether it is
+// there: a region is announced on a change while it is in the page, never on being revealed
+// with the message already inside it (#88, #90) -- and #90 found one that was present and
+// never announced. One write of the region, one entry: `[text now, in the page, what this
+// write replaced]`.
+//
+// Two of those three readings only mean something together with a fourth taken from outside:
+// `isVisible()` on the empty region at a moment the text demonstrably has not landed yet,
+// which is what rules the reveal case out. The `visible` flag here cannot do that job on its
+// own -- the observer's callback runs at the end of the turn, so a write that landed behind
+// a hidden pane and a write that landed in front of a player read the same when the write
+// and the reveal share a turn. What the write replaced does discriminate one case: a region
+// re-touched with the text it already had is a deliberate re-fire once the pane is up (#90's
+// `valueHasMutated` trick), and that never happens by accident.
+//
+// Installed on the page as it stands, or through `addInitScript` when the write is expected
+// during a load (#88, #120, #128).
+function record_region(selector) {
+    window.__said = window.__said || {};
+    const said = (window.__said[selector] = []);
+    const attach = () => {
+        const node = document.querySelector(selector);
+        if (!node) return false;
+        // Per record rather than per callback: two writes in one turn arrive in one callback,
+        // and "written again" is the whole claim in the re-fire case.
+        new MutationObserver((records) =>
+            records.forEach((record) =>
+                said.push([
+                    node.textContent.replace(/\s+/g, " ").trim(),
+                    !!node.offsetParent,
+                    record.oldValue,
+                ]),
+            ),
+        ).observe(node, {
+            childList: true,
+            characterData: true,
+            characterDataOldValue: true,
+            subtree: true,
+        });
+        return true;
+    };
+    // Scoped to the one node, never the document: an unrelated mutation elsewhere while the
+    // pane happens to be visible proves nothing about this region. The bootstrap is for the
+    // reload case alone, where the node is not parsed yet when this runs.
+    if (!attach()) {
+        const bootstrap = new MutationObserver(() => attach() && bootstrap.disconnect());
+        bootstrap.observe(document, { childList: true, subtree: true });
+    }
+}
+const watch_region = (root, selector) => root.evaluate(record_region, selector);
+const said_when = (root, selector) => root.evaluate((sel) => window.__said[sel] || [], selector);
 
 // What the next key would go to. `BODY` is the bug (#90): a screen change that leaves focus
 // on the document makes a keyboard player tab down from the top of the page again.
@@ -567,8 +647,26 @@ async function walk() {
     await page.keyboard.press("p");
     await until("the board to go", async () => !(await overlay().isVisible()));
 
+    // #128, the half this walk is in a position to see: the board of a match you played is
+    // counted on the way out of it (`end_match`), which is one route before the lobby that
+    // shows it -- so the text lands behind the play screen, where no live region can be
+    // heard. Both writes happen in the one `apply_route` turn, so the `visible` flag reads
+    // true for both; the second one is told by what it replaced, which is the text the first
+    // one had already put there.
+    await watch_region(page, RESULT_LINE);
     await click("Back to the lobby");
     await on("room");
+    const heard = await said_when(page, RESULT_LINE);
+    assert.ok(
+        heard.some(
+            ([what, visible, replaced]) =>
+                visible && what === "The host ended the match." && replaced === what,
+        ),
+        "the lobby gets a write of its own: the line is re-touched with the text it already " +
+            "had, once the pane that shows it is up -- without it the only time this region " +
+            "ever changed was behind the match screen (#90, #128): " +
+            JSON.stringify(heard),
+    );
     assert.ok(
         await board_panel().isVisible(),
         "the board of the match you just left is the lobby's, not a screen of its own (#13, #35)",
@@ -588,7 +686,7 @@ async function walk() {
         "the lobby's last-match board names every seat",
     );
     assert.equal(
-        await text(board_panel().locator("p.banner")),
+        await text(result_line()),
         "The host ended the match.",
         "with one line above it saying how it ended, and no end-of-match screen (#39)",
     );
@@ -874,7 +972,7 @@ async function walk() {
     });
     await until("the announced board", () => board_panel().isVisible());
     assert.equal(
-        await text(board_panel().locator("p.banner")),
+        await text(result_line()),
         "Chief wins with 1 bump.",
         "a client that never played the match still gets its board, because the host sent one",
     );
@@ -1049,6 +1147,12 @@ async function walk() {
     await until("the music to get going", async () => (await music_t()) > 0.4);
     const audio_before = await audio_made();
     const t_before = await music_t();
+    // Said out loud, because the relay cannot know: a desync line is a health signal, and
+    // the two this suite plants on purpose were told apart by their tick number until now.
+    // The relay's own line for them goes to the relay's stdout -- this process's when the
+    // suite booted it, the container's in CI -- so what ties the two together is the room
+    // id, not the order they print in (#126).
+    console.log("deliberate desync: room %s, ticks 30-240, the boss's forged hashes (#41)", room_d);
     for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", t, h: 1 });
     await until("the repair to land", () => page.locator(".reconnecting").isVisible());
     assert.equal(
@@ -1136,7 +1240,7 @@ async function self_ending_match() {
     // is `router.test.mjs`'s. What a browser is here to prove is that the match ended on its
     // own and the lobby said how.
     assert.match(
-        await text(board_panel(clock_page).locator("p.banner")),
+        await text(result_line(clock_page)),
         /^(Nobody scored\.|.+ (wins with \d+ bumps?|draw at \d+ bumps)\.)$/,
         "the time limit ends the match by itself, and the line above the board says how",
     );
@@ -1169,6 +1273,57 @@ async function self_ending_match() {
 
     assert.deepEqual(errors, [], "with nothing thrown on the way");
     await clock_page.close();
+}
+
+// A match that begins inside the last one's two-second hold (#39, #124). The hold is a
+// `go("room")` on a timer and `on_match_start` cancels it, which is the case that cancel was
+// written for: without it the client is walked out of the match it has just been handed, two
+// seconds in. Offline and on a fake clock, so those two seconds pass exactly when this says
+// they do -- against a relay the host would be sitting through a ten-second countdown, which
+// is longer than the hold the next match has to begin inside.
+async function new_match_outranks_the_hold() {
+    const held_page = await (await make_context("hold")).newPage();
+    const errors = [];
+    held_page.on("pageerror", (error) => errors.push(error.message));
+    await held_page.clock.install();
+    await held_page.goto(origin + "/");
+
+    await click("Play offline", held_page);
+    await on("names", held_page);
+    await held_page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(held_page).count()) === 1);
+    await click("Take the seats", held_page);
+    await on("room", held_page);
+    await open_settings(held_page);
+    await config_row("Minutes", "number", held_page).fill("1");
+    await click("Apply to the next match", held_page);
+
+    await click("Start the match", held_page);
+    await on("play", held_page);
+    // Exactly the limit, and not a millisecond of the hold that follows it: the walk is
+    // armed and has not been served.
+    await held_page.clock.fastForward("01:00");
+    // Back to the lobby inside the hold, which leaves it armed behind us -- only leaving the
+    // room itself clears it (#39) -- and is the one way to reach Start while it still runs.
+    await click("Back to the lobby", held_page);
+    await on("room", held_page);
+    await click("Start the match", held_page);
+    await on("play", held_page);
+
+    await held_page.clock.fastForward(2500);
+    await settle();
+    assert.equal(
+        await held_page.evaluate(() => window.location.hash),
+        "#play",
+        "a match that begins inside the last one's hold outranks it: the walk to the lobby " +
+            "is cancelled, not served two seconds into the new match (#39, #124)",
+    );
+    assert.ok(
+        (await chrome(held_page)).some((item) => /^\d+:\d\d$/.test(item)),
+        "and what it is looking at is the new match, still counting down",
+    );
+    assert.deepEqual(errors, [], "with nothing thrown on the way");
+    await held_page.close();
 }
 
 // --- two real pages in one room (#66) --------------------------------------------------
@@ -1326,6 +1481,10 @@ async function two_pages() {
     );
 
     // And the assertion can fail: one hash the guest gets wrong on purpose.
+    // The second of the two deliberate ones, announced before it is told rather than after:
+    // the tick is not known until the lie is on the wire, and the room id is what ties this
+    // to the relay's own line for it anyway (#126).
+    console.log("deliberate desync: room %s, the guest's next hash is a lie (#96)", room_e);
     await guest.evaluate(() => (window.__lie = true));
     await until("the lied tick to reach the host too", async () => {
         const t = await guest.evaluate(() => window.__lied_tick);
@@ -1436,7 +1595,7 @@ async function two_pages() {
         ["guest", guest],
     ])
         assert.equal(
-            await text(board_panel(root).locator("p.banner")),
+            await text(result_line(root)),
             "The host ended the match.",
             "and on one account of how it ended, the " + who + "'s included",
         );
@@ -1638,6 +1797,124 @@ async function sound() {
     assert.deepEqual(await sounding(sound_page), [], "a match that is over sounds nothing");
     assert.deepEqual(errors, [], "with nothing thrown on the way");
     await sound_page.close();
+}
+
+// --- the sound player outlives the room (#123) -------------------------------------------
+// #91 moved the six <audio> elements up from the match to the session, and stopped there.
+// Nothing ever released a session's set, and a session is rebuilt on every room entry *and*
+// every walk between the lobby and the match (`viewmodels.js:95`): browse in, play, browse
+// out, and two sets stay -- paused, decoded, and never asked for again. The fix is the same
+// move one level further up, to the page. What this walk counts is the laps, which is why it
+// takes four room entries and two matches rather than one of each.
+//
+// Offline rooms, and no clock to pin: nothing below turns on which bunny bumps which, only
+// on the music being asked for in two different sessions.
+//
+// The two counts are deliberately different questions. `audio_made` is every element this
+// page ever created, which is what says no new set was built. `__audio` is every element
+// that has ever been *played*, held in a Set by the recorder -- so an element in it exists,
+// and counting the ones that play the music says how many decoders of that file the page is
+// carrying, rather than how many it once made.
+async function sound_outlives_the_room() {
+    const hop = await (await make_context("sound-lifetime")).newPage();
+    const errors = [];
+    hop.on("pageerror", (error) => errors.push(error.message));
+    await hop.goto(origin + "/");
+
+    async function enter_lobby() {
+        await click("Play offline", hop);
+        await on("names", hop);
+        await hop.keyboard.press("ArrowUp");
+        await until("the participant", async () => (await seats(hop).count()) === 1);
+        await click("Take the seats", hop);
+        await on("room", hop);
+    }
+    async function leave_lobby() {
+        await click("Leave", hop);
+        await on("landing", hop);
+    }
+    // How many distinct elements carry the music's `src` among the ones that have played.
+    // Not a liveness check -- the recorder's Set is never pruned, so it is holding them
+    // itself -- but the question it does answer is the one worth asking: a page that decodes
+    // this file twice is a page carrying two of it, however the second one came to be. That
+    // cuts both ways round: a `dispose()` on the session would leave `audio_made` counting a
+    // set per session and report a leak that had been fixed, and this would still read 1.
+    const music_elements = (root) =>
+        root.evaluate(() => [...window.__audio].filter((a) => /bump\.\w+$/.test(a.src)).length);
+    // Whether anything is playing the music this instant. `sounding` rather than `music`,
+    // which takes the *first* element it ever saw play the file -- and that there is only
+    // one such element is the claim under test. A wait must not rest on it: a page that went
+    // back to a set per room entry would leave that first element paused for good, and the
+    // wait below would report the regression as a timeout of its own rather than letting the
+    // count that names it be what goes red.
+    const music_playing = async (root) =>
+        (await sounding(root)).some((name) => name.startsWith("bump."));
+
+    await enter_lobby();
+    // Six sounds plus the element `canPlayType` is probed on, which is one player's worth.
+    // Pinned to the number rather than merely remembered, because every comparison below is
+    // against it: a recorder that had stopped counting would hand them all a zero that
+    // agrees with itself.
+    const one_set = await audio_made(hop);
+    assert.equal(one_set, 7, "a room entry sounds six files, off one player (#91)");
+
+    await leave_lobby();
+    await enter_lobby();
+    await leave_lobby();
+    await enter_lobby();
+    assert.equal(
+        await audio_made(hop),
+        one_set,
+        "three room entries and still one set of <audio>: the player is the page's (#123)",
+    );
+
+    // Two matches, in two different room entries, with a walk back to the lobby between
+    // them -- which is itself a new session, and used to be a set of its own.
+    await click("Start the match", hop);
+    await on("play", hop);
+    await until("the music", async () => await music_playing(hop));
+    // Muted here and left muted, on purpose. The player carrying that mute out of this match
+    // is the same one the next room's session picks up, so a `set_muted(true)` that nothing
+    // spoke for again would leave the page silent for the rest of the tab -- which is the
+    // one thing a player shared between sessions could most plausibly break for a player who
+    // would never connect it to the room they muted in. Each session writes its own `muted`
+    // in on the way into a match, which is what takes it back off.
+    await hop.keyboard.press("m");
+    await until("the music to stop", async () => !(await music_playing(hop)));
+    await click("Back to the lobby", hop);
+    await on("room", hop);
+    await leave_lobby();
+    await enter_lobby();
+    // Forgotten here rather than read as `paused`: what is claimed is that this match asked
+    // the element to play, and a wait that timed out is the red -- a page still carrying the
+    // last room's mute never calls `play` at all, so nothing is ever recorded.
+    await forget_sounds(hop);
+    await click("Start the match", hop);
+    await on("play", hop);
+    await until("the music to come back in a match after a muted one (#123)", async () =>
+        (await sounds(hop)).some((name) => name.startsWith("bump.")),
+    );
+
+    assert.equal(
+        await music_elements(hop),
+        1,
+        "one <audio> is playing this file, not one per match: the second match picked up " +
+            "the first one's element rather than decoding 54.8 seconds again (#123)",
+    );
+    assert.equal(
+        await audio_made(hop),
+        one_set,
+        "and two matches in four room entries made no element the first lobby had not (#123)",
+    );
+    // And M still reaches it both ways round from a session that did not build it -- the
+    // mute above is only ever taken back off by `play`, so this is the other path.
+    await hop.keyboard.press("m");
+    await until("the music to stop", async () => !(await music_playing(hop)));
+    await hop.keyboard.press("m");
+    await until("the music to come back", async () => await music_playing(hop));
+
+    assert.deepEqual(errors, [], "with nothing thrown on the way");
+    await hop.close();
 }
 
 // --- a phone (#66) ---------------------------------------------------------------------
@@ -1875,9 +2152,13 @@ async function queueing() {
 // on answering the relay's pings, holding a room up in the public list with a host that
 // would never leave.
 async function double_click_create() {
-    // AC1's own claim, independent of the guard below: the button disables itself on the
-    // click that opens the socket, not on however long the answer takes -- Knockout's
-    // `enable` binding writes `disabled` synchronously inside the click handler's own turn.
+    // AC1's own claim, independent of the guard below: the button says it is unavailable on
+    // the click that opens the socket, not on however long the answer takes -- Knockout's
+    // `attr` binding writes `aria-disabled` synchronously inside the click handler's own
+    // turn. `aria-disabled` and not `disabled` since #120: a disabled control leaves the tab
+    // order and takes the keyboard player's focus with it. Reading the other attribute is
+    // not evidence the new behaviour works -- where the focus went is, and that is
+    // `connecting_keeps_focus` below.
     // Its own page: a single click here is a real room, left up rather than raced with the
     // double-click below.
     //
@@ -1895,9 +2176,9 @@ async function double_click_create() {
     await on("create", solo);
     await click("Create", solo);
     assert.equal(
-        await disabled(button("Create", solo)),
-        true,
-        "the button disables on the click itself, not on the relay's answer (#89)",
+        await button("Create", solo).getAttribute("aria-disabled"),
+        "true",
+        "the button reads as unavailable on the click itself, not on the relay's answer (#89)",
     );
     await on("names", solo);
 
@@ -1912,10 +2193,11 @@ async function double_click_create() {
     // relay generates one per create, so two clicks with a code of their own would collide
     // on the second rather than make a second room.
     await screen("create", dbl).locator('input[type="checkbox"]').check();
-    // Not two clicks: the second would fail Playwright's own enabled check and report a
-    // timeout instead of the thing under test. A double-click is what a player does, and it
-    // is dispatched without re-checking in between -- so the button really is asked twice,
-    // and what refuses the second one is the page.
+    // A double-click is what a player does, and it is dispatched without re-checking in
+    // between -- so the button really is asked twice, and what refuses the second one is the
+    // page. Since #120 it is the guard at the top of `create_room` that refuses it: an
+    // `aria-disabled` button is still a button as far as the DOM and Playwright are
+    // concerned, which is exactly why the guard had to move out of the binding.
     await button("Create", dbl).dblclick();
     await on("names", dbl);
     // Proving something did not happen, which is the one place a fixed wait is right.
@@ -2102,6 +2384,305 @@ async function rejoin_fails() {
     break_start = false;
     await click("Rejoin the match", guest);
     await on("play", guest);
+}
+
+// A resume that lands after the match it is for has ended (#124). The walk back to the lobby
+// is a two-second timer, and `on_match_start` cancels it -- rightly, for a match that is
+// beginning, which is the case its comment is about. A `resume` that arrives after
+// `match_end` walks into that same cancel and leaves the client on the match screen of a
+// match nobody else is still in, with nothing left to route it out.
+//
+// The guard that would have refused the build, `gap > MAX_CATCH_UP`, cannot fire any more:
+// #84 made `gap()` return 0 once the match is over, deliberately and correctly. What is left
+// to tell a `start` for the match this client has just watched end from one that begins the
+// next is the match number on it (#122), which `match_end` does not clear.
+//
+// Both routes into it are walked here. The guest joins the running match from the lobby,
+// which is AC3 and the second route the issue names, and the repair it is sent later is a
+// real one -- one lied-about checksum, exactly as two_pages() does. Only the delivery is
+// arranged: that repair frame is held at the socket until the `match_end` has gone past it,
+// which is the ordering the bug needs and the only way to get it on purpose.
+async function late_resume() {
+    const host = await (await make_context("late-host")).newPage();
+    const guest_context = await make_context("late-guest");
+    await guest_context.addInitScript(() => {
+        window.__lie = false;
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data) {
+            if (window.__lie && typeof data === "string" && data.includes('"checksum"')) {
+                const msg = JSON.parse(data);
+                if (msg.type === "checksum") {
+                    window.__lie = false;
+                    data = JSON.stringify({ type: "checksum", t: msg.t, h: (msg.h ^ 1) | 0 });
+                }
+            }
+            return send.call(this, data);
+        };
+    });
+    const guest = await guest_context.newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+    // `report_repair`'s line, printed by `build()` and by nothing else: it is what says a
+    // payload was built into a simulation rather than merely delivered to the page. Nothing
+    // on screen tells those two apart, and the screen is what the bug is about. Matched on
+    // the literal format string, because `ConsoleMessage.text()` does not do the browser's
+    // own `%s`/`%d` substitution -- see reconnect() for the same read.
+    const built = [];
+    guest.on("console", (msg) => {
+        if (msg.text().startsWith("%s at tick %d: gap %d ticks")) built.push(msg.text());
+    });
+
+    // The repair, held back until after the match it repairs has ended. Armed only once the
+    // guest is in the match, so the join below -- a `start` with a snapshot too -- goes
+    // through and gives `built` the one line the assertion at the end is measured against.
+    let hold = false;
+    let held = null;
+    let released = 0;
+    // Where the page was at the moment the frame went in. "Inside the hold" is the whole
+    // premise, and `released` alone cannot say it: a box slow enough to push the 100ms below
+    // past the two-second hold would have walked the client to the lobby by itself, and
+    // every other assertion here would pass with the bug still in place.
+    let at_release = null;
+    await guest.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        ws.onMessage((frame) => relay.send(frame));
+        relay.onMessage((frame) => {
+            const msg = JSON.parse(String(frame));
+            if (hold && msg.type === "start" && msg.snapshot) return void (held = frame);
+            ws.send(frame);
+            // A beat after the end, and well inside the two-second hold: released any later
+            // and the walk this is meant to cancel would already have happened by itself,
+            // which would pass whatever the client did with the frame.
+            if (msg.type === "match_end" && held)
+                setTimeout(async () => {
+                    at_release = await hash(guest).catch(() => null);
+                    released++;
+                    ws.send(held);
+                }, 100);
+        });
+    });
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_q);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    // Alone in the room, so Start begins the match on the press rather than on a countdown.
+    await click("Start the match", host);
+    await on("play", host);
+
+    await guest.goto(origin + "/#" + room_q);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    // Renamed: both couches call their first bunny Dott and the host holds it, so taking the
+    // seat unrenamed is a name collision rather than the mid-match join under test.
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    // AC3: a client that takes a seat from the lobby while the match runs is handed the
+    // match -- the `start` carrying the host's state is built, not refused.
+    assert.ok(
+        await reaches(guest, "#play"),
+        "a client that takes a seat from the lobby while a match runs is handed that match",
+    );
+    assert.equal(
+        built.length,
+        1,
+        "and it got there by building the state the relay sent it, not by any other route " +
+            "(#40)",
+    );
+
+    // One wrong hash, which is what makes the relay send a repair -- the payload nobody will
+    // have any use for by the time it is let through.
+    hold = true;
+    await guest.evaluate(() => (window.__lie = true));
+    await until("the relay's repair, held at the socket", () => held !== null);
+
+    await click("Back to the lobby", host);
+    await on("room", host);
+    // AC1: the guest is not leaving -- it is being told the match is over, and it walks
+    // itself back after the moment the last frame is held for (#39). The resume released
+    // inside that hold must not cancel the walk.
+    const walked = await reaches(guest, "#room");
+    assert.deepEqual(
+        [released, at_release],
+        [1, "#play"],
+        "the held resume really was delivered, after the match_end and while the client was " +
+            "still on the frozen frame -- which is the hold this is supposed to happen inside",
+    );
+    // Both halves of the criterion in one claim, because they are one: the build is what
+    // reaches `on_match_start`, and `on_match_start` is what cancels the walk. `built` is
+    // still at the one line the join above printed, and the client got to the lobby.
+    assert.deepEqual(
+        [walked, built.length],
+        [true, 1],
+        "a resume for a match that is already over neither builds nor cancels the walk to " +
+            "the lobby (#124, #39)",
+    );
+    assert.equal(
+        await err_on("room", guest),
+        "",
+        "and nothing is said to have gone wrong, because nothing did",
+    );
+    await until("the guest's board", () => board_panel(guest).isVisible());
+    const names = (await grid(board_panel(guest)))
+        .slice(1)
+        .map((row) => row[0].replace(" (AI)", ""));
+    assert.deepEqual(
+        [names.length, names.indexOf("Dott"), names.indexOf("Zip"), names[4]],
+        [5, 0, 1, "Total deaths"],
+        "and it ends up looking at the board of the match it played, not at a match screen " +
+            "nobody else is in (#124, #13)",
+    );
+
+    assert.deepEqual(errors, [], "with nothing thrown on either page");
+}
+
+// The other route into #124, and the other ordering. Here the `resume` arrives *before* the
+// `match_end` -- which is the only order the relay can actually produce, since `to_lobby()`
+// clears `room.started` before it broadcasts and `resume()` refuses on `!room.started`, over
+// one FIFO socket -- and what lands late is the *build*: `room.on_start` fetches the level
+// before it can build anything, and a cold `.dat` is the one thing in that path that takes
+// real time. The match ends inside the fetch.
+//
+// The client is the one the issue's second route names: it is in the lobby, not on the match
+// screen, so its `to_lobby_soon` returns early and it never arms a walk at all. It is also a
+// first-ever `start`, which is where reading the match number at `match_end` rather than at
+// `start` is what makes the guard fire: this page's `room.match` was 0 until the payload
+// arrived and set it to the match that is now over.
+//
+// What closes this route today is not the new guard. `match_end` on a lobby client routes
+// through `apply_route` -> `end_match` -> `Game_Session.stop()`, whose `starting++` cancels
+// the pending build outright, so the payload never reaches `build` at all. The guard is the
+// second line, and the mutation matrix in the PR body says which cell is which. This test
+// pins the route the issue asked to have confirmed either way.
+async function late_resume_from_the_lobby() {
+    const host = await (await make_context("cold-host")).newPage();
+    const guest = await (await make_context("cold-guest")).newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+    const built = [];
+    guest.on("console", (msg) => {
+        if (msg.text().startsWith("%s at tick %d: gap %d ticks")) built.push(msg.text());
+    });
+    // The two messages this is about, in the order the page was given them. Read off the
+    // wire rather than inferred, because the ordering *is* the claim.
+    const wire = [];
+    guest.on("websocket", (ws) =>
+        ws.on("framereceived", ({ payload }) => {
+            const msg = JSON.parse(String(payload));
+            if (msg.type === "start" && msg.snapshot) wire.push("start");
+            if (msg.type === "match_end") wire.push("match_end");
+        }),
+    );
+    // The level, held from before the page loads. `get_level` caches the promise, not the
+    // bytes, so the lobby's own `preload` and the `start`'s own ask are one pending fetch --
+    // which is why this stalls the build rather than merely delaying a second request. The
+    // archive alone, not `**/levels/**`: the default level's two PNGs are `<img>` tags in the
+    // page, and holding those holds the `load` event this test navigates through.
+    let thaw;
+    const frozen = new Promise((resolve) => (thaw = resolve));
+    await guest.route("**/caves.dat", async (route) => {
+        await frozen;
+        await route.continue();
+    });
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_r);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    // A `.dat`, because the default level resolves without a fetch and there would be
+    // nothing to stall.
+    await open_settings(host);
+    await level_select(host).selectOption("caves");
+    await click("Apply to the next match", host);
+    await click("Start the match", host);
+    await on("play", host);
+
+    await guest.goto(origin + "/#" + room_r);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    // #128: the client that watches a match end from the lobby is the one this region is
+    // for -- it never saw the match, and the result is the whole of what it is told. The
+    // panel around this line used to toggle with the board it describes, so the text landed
+    // inside a hidden wrapper and was never read out. Both halves of "announced" are read
+    // here and asserted together below: what the region was before the match ended -- empty
+    // and laid out, which is the half no write can supply -- and the write itself. Together,
+    // because neither half fails on its own: a region revealed with its message inside it
+    // still gets a write, and the `visible` flag on that write is read a microtask later,
+    // by which time the wrapper is open (#88, #90, #128).
+    const before_the_end = [await text(result_line(guest)), await result_line(guest).isVisible()];
+    await watch_region(guest, RESULT_LINE);
+    // Seated into a running match, so the page asks to be let into it by itself, and the
+    // answer walks straight into the frozen level fetch.
+    await until("the relay's resume, stuck on the level", () => wire.includes("start"));
+
+    await click("Back to the lobby", host);
+    await on("room", host);
+    await until("the guest's board", () => board_panel(guest).isVisible());
+    const told = await said_when(guest, RESULT_LINE);
+    assert.deepEqual(
+        [
+            ...before_the_end,
+            told.some(([what, visible]) => visible && what === "The host ended the match."),
+        ],
+        ["", true, true],
+        "it is told out loud how the match it never saw ended: a region that was laid out " +
+            "and empty while the match ran, written into once it was over, which is what a " +
+            "screen reader reads out (#128): " +
+            JSON.stringify(told),
+    );
+    assert.deepEqual(
+        wire,
+        ["start", "match_end"],
+        "the resume landed first and the end after it, which is the order the relay really " +
+            "sends them in -- what is late here is the build, not the payload (#124)",
+    );
+
+    // The bytes, at last. Awaited, so what follows is measured against a fetch that finished
+    // rather than one still hanging.
+    const served = guest.waitForResponse((res) => /caves\.dat/.test(res.url()));
+    thaw();
+    await served;
+    // Three seconds for a decode that takes milliseconds: with the payload built, the page
+    // routes itself to the match screen, and this is the wait that would see it.
+    const went_to_play = await reaches(guest, "#play", 3000);
+    assert.deepEqual(
+        [went_to_play, built.length, await hash(guest)],
+        [false, 0, "#room"],
+        "a resume whose level arrives after the match has ended builds nothing and moves " +
+            "this client nowhere: it is in the lobby it never left (#124)",
+    );
+    const names = (await grid(board_panel(guest)))
+        .slice(1)
+        .map((row) => row[0].replace(" (AI)", ""));
+    assert.deepEqual(
+        [names.length, names.indexOf("Dott"), names[4]],
+        [5, 0, "Total deaths"],
+        "and it is looking at the board of the match it was joining, which is where a " +
+            "client that watched one end from the lobby belongs (#13, #39)",
+    );
+
+    assert.deepEqual(errors, [], "with nothing thrown on either page");
 }
 
 async function phone() {
@@ -2586,26 +3167,8 @@ async function reload_into_a_dead_room() {
     // their own. Cheapest live-region observation point in the suite: a real reload, not the
     // #42 socket-drop rig. `addInitScript` because the reload below is a fresh document, so
     // anything attached after it would be gone before the mutation it is here to see.
-    await gone.addInitScript(() => {
-        window.__when = [];
-        const sel = "div[data-bind*=\"screen() === 'landing'\"] p.err";
-        // A bootstrap observer just to catch the node existing (it is static markup, present
-        // before Knockout binds anything), then the real one is scoped to that node alone --
-        // watching the whole document would also fire on an unrelated mutation elsewhere
-        // once the pane happens to be visible, which proves nothing about this node.
-        const attach = () => {
-            const p = document.querySelector(sel);
-            if (!p) return false;
-            new MutationObserver(() =>
-                window.__when.push([p.textContent, !!p.offsetParent]),
-            ).observe(p, { childList: true, characterData: true, subtree: true });
-            return true;
-        };
-        if (!attach()) {
-            const bootstrap = new MutationObserver(() => attach() && bootstrap.disconnect());
-            bootstrap.observe(document, { childList: true, subtree: true });
-        }
-    });
+    const landing_error = "div[data-bind*=\"screen() === 'landing'\"] p.err";
+    await gone.addInitScript(record_region, landing_error);
 
     await gone.goto(origin + "/");
     await gone.evaluate(
@@ -2621,7 +3184,7 @@ async function reload_into_a_dead_room() {
         "a reload into a room that will not have it back says so, rather than dropping the " +
             "player on a silent title screen (#88)",
     );
-    const when = await gone.evaluate(() => window.__when);
+    const when = await said_when(gone, landing_error);
     assert.ok(
         when.some(([shown, visible]) => visible && shown.includes("would not")),
         "the message is re-touched once its pane is visible, not left silent behind the " +
@@ -2630,6 +3193,86 @@ async function reload_into_a_dead_room() {
     );
     assert.deepEqual(errors, [], "and the page threw nothing on the way out");
     await gone.close();
+}
+
+// --- a reload into a locked room (#117) -------------------------------------------------
+// The client half of #117, and the one the relay suite cannot reach: that `enter()` really
+// does come back with the token and no password, because the password is write-only (#38)
+// and was never in `sessionStorage` to survive the reload. Before the relay looked at the
+// token first, the refusal came back on the reload path rather than on a typed attempt, so
+// the player was not even offered the box: they landed on the title screen being told the
+// room would not have them back, with a minute to find a password they typed once.
+async function reload_into_a_locked_room() {
+    const locked = await (await make_context("reload_into_a_locked_room")).newPage();
+    const errors = [];
+    locked.on("pageerror", (error) => errors.push(error.message));
+
+    await locked.goto(origin + "/");
+    await click("Create a room", locked);
+    await on("create", locked);
+    await screen("create", locked).locator("input.code").fill(room_s);
+    await click("Create", locked);
+    await on("names", locked);
+    await locked.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(locked).count()) === 1);
+    await click("Take the seats", locked);
+    await on("room", locked);
+
+    // A node-side client, so the room outlives the reload: a room dies with its last client,
+    // and a reservation nobody can come back to is not one. Joined before the password, as
+    // a player who was already in the room when the host locked it would be.
+    const mate_saw = [];
+    const mate = relay_client({ type: "join", id: room_s }, mate_saw);
+    await until("the mate to join", () => mate_saw.some((msg) => msg.type === "joined"));
+
+    await open_settings(locked);
+    await password_box(locked).fill("hunter2");
+    await click("Set it now", locked);
+    await until("the confirmation", async () => (await notice(locked)) === "Password set.");
+
+    const view_before = await room_view(locked);
+    assert.ok(view_before.length, "a board with something on it to come back to");
+    await locked.reload();
+    // The reload's answer, whichever way it went -- the seat back on the room screen, or the
+    // flow walking out of it. Waiting for the answer rather than for the room screen is what
+    // keeps the claim in the assertion below instead of in a locator timeout: without the
+    // relay's fix this page lands on #landing saying the room would not have it back.
+    await until(
+        "the relay to answer the reload",
+        async () => (await hash(locked)) !== "#room" || (await lobby_rows(locked)).length > 0,
+    );
+    assert.equal(
+        await hash(locked),
+        "#room",
+        "a reload into a locked room lands back in the room and not at the door (#117)",
+    );
+    assert.deepEqual(
+        await room_view(locked),
+        view_before,
+        "and it reclaims the reserved seat on the token alone, with no password to retype " +
+            "and nothing of the one it set written down anywhere (#38, #117)",
+    );
+
+    // The other half of the same room: the door the page walked through is still shut to
+    // everyone else. Without this the assertions above would pass just as happily on a
+    // password that never took.
+    const barred_saw = [];
+    const barred = relay_client({ type: "join", id: room_s }, barred_saw);
+    // Whichever way the door went, so a room that turned out not to be locked fails this by
+    // name rather than by timing out on a refusal that never comes.
+    await until("the door's answer", () =>
+        barred_saw.some((msg) => msg.type === "error" || msg.type === "joined"),
+    );
+    assert.equal(
+        barred_saw[0].code,
+        "ROOM_UNAVAILABLE",
+        "the room was locked the whole way through: the reload was a reclaim, not a walk-in",
+    );
+    barred.close();
+
+    assert.deepEqual(errors, [], "and the page threw nothing");
+    mate.close();
+    await locked.close();
 }
 
 // --- the reservation window runs out (#42, #88) -----------------------------------------
@@ -2885,7 +3528,7 @@ async function keyboard_only() {
     // covers the other eight.
     const LIVE = [
         "text: connection_text", // the match's reconnect line
-        "visible: pending_id", // Connecting...
+        "text: connecting()", // Connecting...
         "visible: match_running", // the names screen's
         "visible: disconnected", // connection lost
         "visible: staged_text", // the host staged a change
@@ -2946,11 +3589,452 @@ async function keyboard_only() {
     keeper.close();
 }
 
+// --- a seat granted from the waitlist mid-match (#119, #116) ----------------------------
+//
+// The third tap boundary. #86 gave the keyboard a latch so a key pressed between ticks is
+// not lost inside a catch-up batch, and cleared it at the two boundaries it owned: a match
+// being built, and a local board being hidden. The third is a seat arriving mid-match --
+// a spectator presses a key with no seat to read it on, and that latch must not steer the
+// bunny it is handed on its first tick, because that frame goes on the wire and every
+// other client replays it.
+//
+// Both doors into a seat land on the same boundary, which is why one walk covers them: the
+// only place `Room` is ever given a seat list is `start` (`src/net/room.js`, the `held =
+// msg.held` line), and `build` clears the latch before the tick that follows. So this walk
+// takes the door that had no coverage at all -- the waitlist, where the client sits in the
+// lobby holding nothing while the relay decides -- rather than the Take-seat button, which
+// `two_pages` already walks.
+//
+// Two keys, because `clear_taps` and `release_all` differ only here: Left is tapped and
+// gone, Up is still held when the seat lands. The tap must not arrive and the held key
+// must, which is #86's own reason for having two methods -- wiping `keys_pressed` would
+// strand a key nobody has let go of, with no keydown left to set it again.
+async function waitlisted_seat() {
+    const host = await (await make_context("waitlist-host")).newPage();
+    const spectator = await (await make_context("waitlist-spectator")).newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    spectator.on("pageerror", (error) => errors.push("spectator: " + error.message));
+    // This page's own frames, read off the wire: what it puts in the room's input stream is
+    // the thing under test, and the canvas cannot say whether a bunny stepped because it
+    // was told to or because the AI did it.
+    let sent = [];
+    spectator.on("websocket", (ws) =>
+        ws.on("framesent", ({ payload }) => {
+            const msg = JSON.parse(String(payload));
+            if (msg.type === "input") sent.push(msg);
+        }),
+    );
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_p);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+
+    // The other three seats on clients of their own, so the room is full when the spectator
+    // asks and there is exactly one seat to free later.
+    const fillers = [];
+    for (const name of ["Ann", "Ben", "Cid"]) {
+        const seen = [];
+        const client = relay_client({ type: "join", id: room_p }, seen);
+        await until("the room to take " + name, async () =>
+            seen.some((msg) => msg.type === "joined"),
+        );
+        client.send({ type: "seats", names: [name] });
+        await until(name + "'s seat", async () =>
+            seen.some((msg) => msg.type === "room" && msg.held.length === 1),
+        );
+        client.send({ type: "ready", ready: true });
+        fillers.push(client);
+    }
+    await click("Start the match", host);
+    await on("play", host);
+
+    // A full room in the middle of a match: the answer is "not yet", and the lobby is where
+    // it is waited in (#44).
+    await spectator.goto(origin + "/");
+    await click("Join with a room code", spectator);
+    await on("join", spectator);
+    await screen("join", spectator).locator("input").fill(room_p);
+    await click("Continue", spectator);
+    await on("names", spectator);
+    await spectator.keyboard.press("ArrowUp");
+    await until("the spectator's participant", async () => (await seats(spectator).count()) === 1);
+    await seats(spectator).nth(0).locator("input").fill("Zip");
+    await seats(spectator).nth(0).locator("input").blur();
+    await click("Take the seats", spectator);
+    await on("room", spectator);
+
+    // Watching a match it holds no seat in, and pressing keys at it. `document.onkeydown` is
+    // wired for the whole session, so both of these reach the keyboard and neither has a
+    // seat to be read on.
+    await spectator.keyboard.down("ArrowLeft");
+    await spectator.keyboard.up("ArrowLeft");
+    await spectator.keyboard.down("ArrowUp");
+    sent = [];
+
+    // Ann gives her seat up. It stays her bunny's as far as the room is concerned until
+    // thirty missing ticks hand it to the AI, which is the moment it becomes a seat the
+    // waitlist can be given (#116) -- so this is a grant the spectator asked for long
+    // before, and did not press anything to get.
+    fillers[0].send({ type: "leave" });
+    await on("play", spectator);
+    const frames_of = (seat) => sent.filter((msg) => msg.seats && msg.seats[seat]).slice(0, 10);
+    const mine = frames_of(1);
+    assert.ok(mine.length, "the seat it waited for is one it drives: it stamps frames for it");
+    assert.equal(
+        mine.some((msg) => msg.seats["1"].left),
+        false,
+        "a key tapped before the seat arrived is not in the frames that seat starts with (#119)",
+    );
+    assert.equal(
+        mine.some((msg) => msg.seats["1"].up),
+        true,
+        "and a key still held when it arrives is: `clear_taps`, never `release_all` (#86)",
+    );
+
+    await spectator.keyboard.up("ArrowUp");
+    for (const filler of fillers) filler.close();
+    assert.deepEqual(errors, [], "and neither page threw");
+}
+
+// --- an error belongs to the route it was set on (#127) ---------------------------------
+// Two halves of one line, and they pull against each other. Six FLOW_TEXT messages
+// (dropped/room_gone/gave_up -> landing, vacated -> names, unavailable/not_accepted ->
+// browse/password) are set one route *before* the screen that shows them, so `apply_route`
+// cannot answer this by clearing the error on every route change -- that deletes all six.
+// And an error the flow did not carry to a screen describes a route that is over: every
+// button out of one clears it (`go_landing` and its neighbours) and the browser's own Back
+// did not, so Back landed on a screen still holding the last one's failure.
+//
+// `not_accepted` is the message walked here, set on the join screen and read on the password
+// screen that replaces it. The other five are asserted where they already live:
+// `room_gone` in reload_into_a_dead_room(), `gave_up` in reconnect_gives_up(), `vacated` in
+// two_pages(), `not_accepted` again in browse() and keyboard_only(). `dropped` and
+// `unavailable` have no walk of their own in this suite, and they are the two that do *not*
+// take the plain `self.error(...); go(...)` shape: `unavailable` is set in place on the
+// password screen with no `go` at all, and `dropped` navigates only from play or room. Both
+// land on the same rule anyway -- a message set without a `go` leaves `carried` untouched,
+// shows where it was set, and is cleared by the next route change, which is the second half
+// above. Argued, not asserted: the thinnest corner of this fix's coverage.
+async function error_dies_with_its_route() {
+    const back = await (await make_context("error_dies_with_its_route")).newPage();
+    const errors = [];
+    back.on("pageerror", (error) => errors.push(error.message));
+
+    // A code no room has: refused, and the refusal is written on the join screen for the
+    // password screen it is redirected to.
+    await back.goto(origin + "/");
+    await click("Join with a room code", back);
+    await on("join", back);
+    await screen("join", back).locator("input").fill(new_room_id());
+    await click("Continue", back);
+    await on("password", back);
+    assert.equal(
+        await err_on("password", back),
+        FLOW_TEXT.not_accepted,
+        "a refusal set one route before the screen that shows it survives that route change",
+    );
+
+    // The browser's own way out, not the button's. Continue pushes the room-code hash and
+    // `go("password", true)` replaces that, so the first Back is the join screen and the
+    // second is the landing screen the flow started on.
+    await back.goBack();
+    await on("join", back);
+    assert.equal(
+        await err_on("join", back),
+        "",
+        "and Back out of that screen leaves the refusal behind with it, exactly as the " +
+            "Start over button does (#127)",
+    );
+    // #127's own wording, one route further on. Downstream of the assertion above -- the
+    // clear it names has already happened -- and here because the landing screen is where
+    // the issue saw the stale text.
+    await back.goBack();
+    await until("the landing screen", async () => (await hash(back)) === "");
+    assert.equal(await err_on("landing", back), "", "and the landing screen behind it is clean");
+    assert.deepEqual(errors, [], "and the page threw nothing on the way through");
+    await back.close();
+}
+
+// --- an error belongs to the match it was set in (#127) ---------------------------------
+// The other half of #127. `on_match_start` zeroes the last match's board, its reason and the
+// resume latch, and left `self.error` standing: "Getting back into the match did not work"
+// was still on screen through the next match and into the lobby after it, describing a match
+// nobody is in any more.
+//
+// The failure is rejoin_fails()'s failure 2 -- a `start` whose snapshot will not decode --
+// because it is the cheapest route to that exact sentence.
+//
+// Cleared for a client that is taking the match, below the seat guard, not for every client
+// the `start` reaches: countdown zero takes an un-ready client's seats and begins the match
+// in the same breath, and that client's session hears the `start` too, so a clear above the
+// guard would wipe FLOW_TEXT.vacated off the names screen it had just been written to
+// (two_pages()).
+async function error_dies_with_its_match() {
+    const host = await (await make_context("error-match-host")).newPage();
+    const guest = await (await make_context("error-match-guest")).newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+
+    // Corrupts the snapshot on the `start` that answers this guest's resume, and only that
+    // one: the next match begins at tick 0 and carries none, and the flag is off by then
+    // regardless.
+    let break_start = true;
+    await guest.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        ws.onMessage((frame) => relay.send(frame));
+        relay.onMessage((frame) => {
+            const msg = JSON.parse(String(frame));
+            if (break_start && msg.type === "start" && msg.snapshot) msg.snapshot = "not one";
+            ws.send(JSON.stringify(msg));
+        });
+    });
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_t);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    await click("Start the match", host);
+    await on("play", host);
+
+    // Seated into the running match, so the page asks to be let into it by itself -- and is
+    // answered with the snapshot broken above.
+    await guest.goto(origin + "/#" + room_t);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    // Both couches default their first bunny to Dott and the host holds it, so an unrenamed
+    // seat is a name collision rather than the mid-match join this walk is about.
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    const said = () => text(screen("room", guest).locator("p.err"));
+    await until("the failed rejoin on screen", async () => /did not work/.test(await said()));
+
+    // The next match, with that failure behind it. Ready first: "start counts as readying"
+    // is the host's own seat only, and a countdown here would take the guest's seats
+    // instead of handing it the match.
+    break_start = false;
+    await click("Back to the lobby", host);
+    await on("room", host);
+    await click("Ready", guest);
+    await until(
+        "the room to read the guest as ready",
+        async () => (await room_view(host))[1][1] === "ready",
+    );
+    await click("Start the match", host);
+    await on("play", guest);
+    assert.equal(
+        await said(),
+        "",
+        "the match that began is not the match that failed, so its message goes with it (#127)",
+    );
+
+    // And it is still gone in the lobby that match walks back to, which is where #127 saw it.
+    await click("Back to the lobby", guest);
+    await on("room", guest);
+    assert.equal(await said(), "", "and the lobby after it is clean too");
+    assert.deepEqual(errors, [], "and neither page threw on the way through");
+}
+
+// --- a connect keeps the focus it was given (#120) ---------------------------------------
+// The three controls that open a socket gated themselves with Knockout's `enable`, which is
+// the DOM `disabled` property -- and a disabled element leaves the tab order, so the
+// keyboard player who had just pressed it lost their place mid-connect with nothing
+// announced. They say `aria-disabled` now, which reads as unavailable and keeps the control
+// where the player left it, and the in-flight guard that #89 spelled as a binding moved into
+// the handler. What "lost their place" means is browser-specific, and the assertions below
+// are written against what this one does -- see `activate`.
+//
+// Last in the run: the names screen's button only gates a socket on the Quick Join path, and
+// Quick Join sits down in the tightest room on the relay -- which by this point is some
+// other section's. Nothing here asserts which room it landed in, and nothing after it
+// asserts on a room it may have taken a seat in.
+async function connecting_keeps_focus() {
+    const slow = await (await make_context("connecting")).newPage();
+    const errors = [];
+    slow.on("pageerror", (error) => errors.push(error.message));
+    // Every handshake this page sends, one per socket it opens (`WebSocket_Transport` sends
+    // its entry message on open): an activation that opened a second socket shows up here as
+    // a second entry whether or not the relay would have answered it, which is the #89
+    // property read at the wire rather than off the public room list.
+    const entries = [];
+    slow.on("websocket", (ws) =>
+        ws.on("framesent", ({ payload }) => {
+            try {
+                const msg = JSON.parse(String(payload));
+                if (["create", "join", "quick"].includes(msg.type)) entries.push(msg.type);
+            } catch (e) {
+                // Not an entry message. The relay's own parse guards the same way.
+            }
+        }),
+    );
+    // double_click_create's stall, a second longer: the relay is in-process and local, so an
+    // unslowed round trip answers before the test can look inside the window under test --
+    // and every assertion below is made while the socket is still opening.
+    await slow.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        relay.onMessage((frame) => setTimeout(() => ws.send(frame), 2000));
+    });
+
+    // One control, pressed by key with the focus on it, and read while its socket is opening.
+    const activate = async (label) => {
+        await tab_to(label, slow);
+        const was = await focused(slow);
+        const before = entries.length;
+        await slow.keyboard.press("Enter");
+        assert.equal(
+            await button(label, slow).getAttribute("aria-disabled"),
+            "true",
+            label + " reads as unavailable while its socket opens (#120)",
+        );
+        assert.equal(
+            await focused(slow),
+            was,
+            "and the player who pressed " + label + " still has the focus (#120)",
+        );
+        // The greyed look used to come from `:disabled`, which the browser styles for you.
+        assert.equal(
+            await button(label, slow).evaluate((el) => getComputedStyle(el).opacity),
+            "0.5",
+            label + " looks unavailable too, and that style now hangs off `aria-disabled`",
+        );
+        // The reading that actually tells the two states apart in this browser. Measured:
+        // Chromium does *not* blur an element that becomes `disabled` -- `activeElement`
+        // stays on it, unlike Firefox and WebKit -- so the assertion above passes either way
+        // here and is a guard against something else stealing the focus, not evidence for
+        // this fix. What Chromium does do is take a disabled control out of the tab order:
+        // tab off it and back, and the focus lands past it, one control further on, which is
+        // the keyboard player losing their place mid-connect (#120).
+        await slow.keyboard.press("Shift+Tab");
+        await slow.keyboard.press("Tab");
+        assert.equal(
+            await focused(slow),
+            was,
+            label +
+                " keeps its place in the tab order while its socket opens: a disabled " +
+                "control is skipped, so the next Tab goes past it (#120)",
+        );
+        // The other half, and the reason the binding could not simply be dropped: with the
+        // control still live, a second press has to be refused by the handler (#89). Two
+        // readings, because the three handlers do different damage when they run twice: a
+        // second `create` or `submit_password` opens a second socket, while a second
+        // `take_seats` finds `quick` already spent and walks the client into a local room of
+        // its own instead -- no socket, and the wrong lobby.
+        const where = await hash(slow);
+        await slow.keyboard.press("Enter");
+        await settle();
+        assert.equal(
+            entries.length - before,
+            1,
+            "a second press of " + label + " while connecting opens no second socket (#89)",
+        );
+        assert.equal(
+            await hash(slow),
+            where,
+            "and a second press of " +
+                label +
+                " moves this client nowhere: what moves it is the answer to the first (#89)",
+        );
+    };
+
+    // 1. Take the seats, on the one path where it opens a socket of its own (#44).
+    await slow.goto(origin + "/");
+    await click("Quick Join", slow);
+    await on("names", slow);
+    await slow.keyboard.press("ArrowUp");
+    await until("a participant to join with", async () => (await seats(slow).count()) === 1);
+    // A name of its own: the room Quick Join picks is whichever one is tightest, and a
+    // default bunny name already taken in it is a refusal rather than a connect.
+    await seats(slow).nth(0).locator("input").fill("Quik");
+    await seats(slow).nth(0).locator("input").blur();
+    await activate("Take the seats");
+    await on("room", slow);
+
+    // 2. Create, in a room of this section's own -- and the password it is given below is
+    //    what makes the password screen's Continue reachable at step 4.
+    await click("Leave", slow);
+    await on("landing", slow);
+    await click("Create a room", slow);
+    await on("create", slow);
+    await slow.keyboard.type(room_u);
+    await activate("Create");
+    await on("names", slow);
+    await slow.keyboard.press("ArrowUp");
+    await until("a participant", async () => (await seats(slow).count()) === 1);
+    await click("Take the seats", slow);
+    await on("room", slow);
+
+    // A keeper, so the room outlives the Leave below: a room dies with its last client.
+    const keeper_saw = [];
+    const keeper = relay_client({ type: "join", id: room_u }, keeper_saw);
+    await until("the keeper in the room", () => keeper_saw.some((msg) => msg.type === "joined"));
+    await open_settings(slow);
+    await password_box(slow).fill("hunter2");
+    await click("Set it now", slow);
+    await until("the password to be set", async () => (await notice(slow)) === "Password set.");
+    await click("Leave", slow);
+    await on("landing", slow);
+
+    // 3. The Connecting... line, which is the announcement the two gating screens' controls
+    //    do not make for themselves. It was revealed with its text already inside it, which
+    //    is the one thing a live region is never announced on (#88, #90).
+    await click("Join with a room code", slow);
+    await on("join", slow);
+    const connecting_line = 'div[data-bind*="screen() === \'join\'"] p[role="status"]';
+    const line = screen("join", slow).locator('p[role="status"]');
+    assert.equal(await text(line), "", "nothing said yet");
+    assert.ok(
+        await line.isVisible(),
+        "and the Connecting... region is already in the page, laid out empty: a live region " +
+            "is announced on a change while it is there, never on being revealed with the " +
+            "message already inside it (#88, #90, #120)",
+    );
+    await watch_region(slow, connecting_line);
+    await slow.keyboard.type(room_u);
+    await slow.keyboard.press("Enter");
+    await on("password", slow);
+    const said = await said_when(slow, connecting_line);
+    assert.ok(
+        said.some(([what, visible]) => what === "Connecting…" && visible),
+        "and the connect is announced through it -- the text lands in a region that was " +
+            "already there, which is what a screen reader reads out (#120): " +
+            JSON.stringify(said),
+    );
+
+    // 4. Continue, on the password screen, with a password that is right: the relay's answer
+    //    is what ends the window the assertions above are made inside.
+    assert.equal(await err_on("password", slow), FLOW_TEXT.not_accepted);
+    await slow.keyboard.type("hunter2");
+    await activate("Continue");
+    await on("names", slow);
+
+    assert.deepEqual(errors, [], "and the page threw nothing on the way through");
+    keeper.close();
+    await slow.close();
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
     await walk();
     await self_ending_match();
+    await new_match_outranks_the_hold();
     await two_pages();
     await reconnect();
     await reconnect_gives_up();
@@ -2958,14 +4042,22 @@ try {
     await history_reload_in_match();
     await history_link_while_seated();
     await reload_into_a_dead_room();
+    await reload_into_a_locked_room();
     await sound();
+    await sound_outlives_the_room();
     await browse();
     await queueing();
+    await waitlisted_seat();
     await double_click_create();
     await superseded_create_closes();
     await rejoin_fails();
+    await error_dies_with_its_route();
+    await error_dies_with_its_match();
+    await late_resume();
+    await late_resume_from_the_lobby();
     await phone();
     await keyboard_only();
+    await connecting_keeps_focus();
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
             "two pages agree on one room, the mp3s really play, and the page fits a phone",
@@ -2973,31 +4065,47 @@ try {
 } catch (error) {
     // Where the page actually was, which a locator timeout never says: "not visible" reads
     // the same whether the flow went nowhere or went somewhere else entirely.
-    const where = await page
-        .evaluate(() => ({
-            hash: window.location.hash,
-            showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
-                .filter((el) => el.offsetParent !== null)
-                .map((el) => el.getAttribute("data-bind").match(/screen\(\) === '(\w+)'/)[1]),
-            // Every `p.err`, not just the first in document order, now that every screen has
-            // one: an empty one contributes nothing, so this is never longer than it needs
-            // to be for whichever screen the page was actually on.
-            error: [...document.querySelectorAll("p.err")]
-                .map((el) => el.textContent.trim())
-                .filter(Boolean)
-                .join(" | "),
-            // The participant rows are the `participants` array, and an empty one is what
-            // bounces the lobby back to the names screen.
-            participants: document.querySelectorAll("div[data-bind*=\"screen() === 'names'\"] li")
-                .length,
-        }))
-        .catch(() => null);
-    // The main page, which is not the failing one when the fake-clock section is what broke.
-    console.error("main page was at:", JSON.stringify(where));
-    const routes = await page.evaluate(() => window.__routes || []).catch(() => []);
-    console.error("routes the page took (last 20):");
-    for (const route of routes.slice(-20)) console.error("  " + route);
-    console.error("last frames the page was sent:");
+    const state = (open) =>
+        open
+            .evaluate(() => ({
+                hash: window.location.hash,
+                showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
+                    .filter((el) => el.offsetParent !== null)
+                    .map((el) => el.getAttribute("data-bind").match(/screen\(\) === '(\w+)'/)[1]),
+                // Every `p.err`, not just the first in document order, now that every screen
+                // has one: an empty one contributes nothing, so this is never longer than it
+                // needs to be for whichever screen the page was actually on.
+                error: [...document.querySelectorAll("p.err")]
+                    .map((el) => el.textContent.trim())
+                    .filter(Boolean)
+                    .join(" | "),
+                // The participant rows are the `participants` array, and an empty one is what
+                // bounces the lobby back to the names screen.
+                participants: document.querySelectorAll(
+                    "div[data-bind*=\"screen() === 'names'\"] li",
+                ).length,
+            }))
+            .catch(() => null);
+    // The newest pages still open, which is where the failure is: only three of the
+    // nineteen sections close their pages when they pass, so by the end of a run nearly
+    // every page ever opened is still there and the failing one is the *last* of them.
+    // Three deep, because the widest thing asserted across pages is #113's host-against-
+    // guest comparison and the flow page behind it. The flow page alone used to be the
+    // whole dump, so that comparison failing printed a third page's screen and routes
+    // (#126).
+    let dumped = 0;
+    for (const [name, made] of [...contexts].reverse()) {
+        if (dumped >= 3) break;
+        for (const open of made.pages()) {
+            if (dumped++ >= 3) break;
+            // Printed even when it is null: a page that died is exactly the case where its
+            // absence is the thing worth saying.
+            console.error(name + " page was at:", JSON.stringify(await state(open)));
+            const routes = await open.evaluate(() => window.__routes || []).catch(() => []);
+            for (const route of routes.slice(-20)) console.error("  " + name + ": " + route);
+        }
+    }
+    console.error("last frames the flow page was sent:");
     for (const frame of frames.slice(-25)) console.error("  " + frame);
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
     // nothing to read.

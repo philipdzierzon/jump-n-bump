@@ -3,7 +3,7 @@ import { Objects } from "../game/objects.js";
 import { Keyboard } from "../game/keyboard.js";
 import { AI } from "../game/ai.js";
 import { Animation } from "../game/animation.js";
-import { Sound_Player } from "../resource_loading/sound_player.js";
+import { shared_sound_player } from "../resource_loading/sound_player.js";
 import { Sfx } from "../game/sfx.js";
 import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
@@ -89,11 +89,14 @@ export function Game_Session(get_level, config, muted, transport) {
 
     var game = null;
     var sfx = null;
-    // One per session, which is one per lobby visit: the six elements hold nothing to do
-    // with a match, so `build` making a set per match left the outgoing set paused, decoded
-    // and alive -- ninety of them a minute on a client being repaired every two seconds,
-    // which is exactly the client that could least afford them (#30, #91).
-    var sound_player = new Sound_Player(muted);
+    // The page's, not this session's. The six elements hold nothing to do with a match, so
+    // `build` making a set per match left the outgoing set paused, decoded and alive --
+    // ninety of them a minute on a client being repaired every two seconds, which is exactly
+    // the client that could least afford them (#30, #91). They hold nothing to do with a
+    // room either, and a session is rebuilt on every room entry and on every walk between
+    // the lobby and the match (`viewmodels.js`): owning them here left a set behind for each
+    // of those, so a browse in, a match and a browse out cost two (#123).
+    var sound_player = shared_sound_player();
     // The two halves of the simulation a snapshot is packed from and unpacked into: the
     // objects and the RNG's own state. The players are the `player` array, which is the
     // module's rather than this session's (#5).
@@ -153,6 +156,12 @@ export function Game_Session(get_level, config, muted, transport) {
     // A limit the simulation reached. Every client reaches it on the same tick and stops
     // there; only the host announces it, which is what the others leave the match on (#22).
     this.on_limit = null;
+    // The match this client last watched end, by the room's own count of its matches
+    // (#122). Zero until one does, which is a number no `start` ever carries. `room.match`
+    // is not cleared by `match_end` -- it outlives the match it names, which is the whole
+    // reason it can be read here at all -- so a `start` arriving with this number, or with
+    // one below it, is for a match this client has already seen out (#124).
+    var ended_match = 0;
 
     // The relay cannot read the simulation, so the host announces the end and the final
     // board travels with it (#22, #19). It comes back to the announcer too, which is what
@@ -162,6 +171,10 @@ export function Game_Session(get_level, config, muted, transport) {
         // message, so this is the one place both readers of the flag agree on: the way out
         // of the match screen, and the announcement that way out makes (#87).
         self.in_match = false;
+        // Read at the end and not at the next `start`, because a `start` is where the
+        // number is overwritten: by the time `build` runs, `room.match` is already the
+        // arriving payload's (#124).
+        ended_match = room.match;
         if (self.on_match_end) self.on_match_end(msg);
     };
     // A client that stops simulating hands its seats over rather than leaving them frozen.
@@ -279,20 +292,53 @@ export function Game_Session(get_level, config, muted, transport) {
     }
 
     function build(level) {
-        // Two ways a match already running cannot be joined: a body that does not decode,
-        // and a gap too big to replay. Either one means this client would be playing a
-        // state it knows is wrong, so it stays in the lobby and plays the next match
-        // instead of half-joining this one (#40).
+        // Three ways a match already running cannot be joined: a body that does not decode,
+        // a gap too big to replay, and a match that is not running any more. The first two
+        // mean this client would be playing a state it knows is wrong; the third means
+        // there is nothing left to join. All three leave it in the lobby to play the next
+        // match rather than half-joining this one (#40).
+        //
+        // The third is #124. The relay serves no resume for a match that is over
+        // (`server/index.js`'s `if (!room.started || !room.snapshot) return`), so a payload
+        // naming a match this client has watched end was sent before it ended -- whether it
+        // crossed the `match_end` on the wire or was still fetching its level when it
+        // landed. Building it anyway put the client back on the match screen of a match
+        // nobody else was in, and `on_match_start` cancelled the walk to the lobby that
+        // `match_end` had armed, which was the only thing left to route it out (#39). The
+        // gap guard beside it cannot catch this: #84 made `gap()` return 0 past a match end
+        // on purpose, so it reads 0 here and always will. A `start` that begins the next
+        // match carries a higher number and is refused by none of this (#122).
+        //
+        // A `match_end` does not always mean the room's match is over, mind: the relay sends
+        // one to a single client when it gives up repairing it (`desync` in
+        // `server/index.js`), while everybody else plays on. Refusing that client a resume
+        // for this match is right anyway -- it is the one the relay has stopped repairing,
+        // and `resume()` returns early for it from then on -- and the lobby it walks back to
+        // builds it a session of its own, counting from zero again (#41).
         var t0 = performance.now();
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
         var gap = room.gap();
-        if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return start_failed();
+        if (room.resume && (!resumed || gap > MAX_CATCH_UP || room.match <= ended_match))
+            return start_failed();
         // A key tapped in the lobby has no tick to be read on yet -- it would otherwise sit
         // latched and land on this match's first tick, a spurious jump/step nobody pressed
         // just then (#86). `clear_taps`, not `release_all`: a key held into the countdown
         // is this match's real tick-0 input (a level sample, not a latch), and wiping
         // `keys_pressed` too would strand it with no keydown left to set it again --
         // including on a repair, where the player never stopped holding it.
+        //
+        // It is the mid-match seat boundary as well, and the only call needed for it: a
+        // `Room` is handed a seat list nowhere but `start` (`room.js`'s `held = msg.held`),
+        // so a seat granted while a match runs -- by the Take-seat button, or off the
+        // waitlist -- is driven no earlier than the `start` that answers the resume it asks
+        // for, which is this build. A spectator's stray keypress therefore cannot reach the
+        // bunny it is handed (#119, #42).
+        //
+        // The invariant to keep is "cleared exactly when the seat becomes drivable", not
+        // "cleared on every start": the two guards above return before this line, and a
+        // client that refuses the `start` drives nothing, so the latch it keeps is a latch
+        // no tick will read. Moving this call above them would clear taps for a match this
+        // client never joins, and moving it below the build would clear the tick-0 input.
         keyboard.clear_taps();
         var t1 = performance.now();
         // After the guards above: a `start` this client refuses to build must leave the

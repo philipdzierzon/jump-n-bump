@@ -99,6 +99,11 @@ function broadcast_frame(room, msg, except) {
 // Absent, empty or null is no password at all, which is also how a host clears one.
 const password_of = (msg) => (msg.password == null ? null : String(msg.password) || null);
 
+// The client's claimed identity, coerced once: the door and `admit` have to agree on what
+// the token is, or a token could open a door it then reclaims nothing through (#7, #117).
+// Empty is no claim at all, and `admit` mints one instead.
+const token_of = (msg) => String(msg.token || "");
+
 function create(client, msg) {
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
     if (!id) return send(client, { type: "error", code: "BAD_ID" });
@@ -127,6 +132,12 @@ function create(client, msg) {
         drivers: new Array(SEATS).fill(null),
         tick: 0,
         d: 2,
+        // Which match the room is on, counted from 1 at the first `begin`. It rides on every
+        // `start` and comes back on every frame, and that is the whole of it: the room's two
+        // clocks below are both zeroed at `begin`, so they cannot tell a frame still in
+        // flight from the last match from one for this one, and `started` cannot either --
+        // the room *is* started when that frame lands (#122).
+        match: 0,
         // The seed the running match was started on, and the host's last snapshot with the
         // frames since it: the three things a client joining that match needs on top of
         // what a `start` already carries (#40).
@@ -141,6 +152,9 @@ function create(client, msg) {
         // nobody else's: a client cannot push an entry in here, so it cannot flush the
         // reference out of it either (#41). `desyncs` is the room's own counter, which is
         // how a determinism defect gets noticed in the wild -- it is the number in the log.
+        // It counts mismatches *seen*, not repairs sent: the three branches in `desync()`
+        // that can repair nothing are detections all the same, and a counter that skipped
+        // them read zero for exactly the desyncs nobody could see (#118, #126).
         checksums: [],
         desyncs: 0,
         // Driver changes stamped for a tick nobody has stepped yet. The table above is
@@ -152,14 +166,22 @@ function create(client, msg) {
         // The relay's own deadline, and what it has spent on it (#42). `due` is the tick
         // every client's frame for was needed by, and is where substitution has got to;
         // `missing` counts, per seat, how many ticks in a row the relay has had to put a
-        // released frame in for -- thirty of them hands that seat to the AI. `late` and
-        // `forged` are the two ways a frame is dropped silently, counted per room and read
-        // from the log line the match ends on.
+        // released frame in for -- thirty of them hands that seat to the AI. `late`,
+        // `forged` and `stale` are the three ways a frame is dropped silently, counted per
+        // room and read from the log line the match ends on. All are incremented where the
+        // frame is refused, which is the same rule `desyncs` above keeps: a counter counts
+        // what the relay saw, and the log line says what it did about it. A counter added
+        // here goes at its own refusal site, not after whatever the refusal led to
+        // (#118, #126).
         due: 0,
         missing: new Array(SEATS).fill(0),
         substituted: 0,
         late: 0,
         forged: 0,
+        // Frames stamped for another match than the one running, counted in the match that
+        // refused them: the stale frame arrives after `begin`, so the match it lands in is
+        // the one whose log line says how many there were (#122).
+        stale: 0,
         // What each token has spent of its repair allowance, and whether the relay has given
         // up repairing it this match (#41, #93). Keyed by token, not kept on the socket: the
         // socket is what a reload replaces, so a counter on it counts reloads, not repairs.
@@ -168,10 +190,14 @@ function create(client, msg) {
         // admitted. Bounded with the rest of abuse (#47).
         //
         // ponytail: the token is accepted from the client verbatim (`admit`), so a client that
-        // wants a fresh allowance sends a fresh one and re-takes the seat it just gave up
-        // (`leave` frees it now, `take_seats` re-grants it mid-match). Closes the accidental
-        // reload, deters nothing deliberate. upgrade path: an identity the client cannot choose
-        // (#7), or rate limiting (#47).
+        // wants a fresh allowance sends a fresh one. The seat no longer comes back with it:
+        // both doors into one refuse a seat the AI is not driving mid-match, so a `leave`
+        // costs the thirty missing ticks it takes the room to hand that bunny over rather
+        // than a round trip (#116). Closes the accidental reload, deters nothing deliberate.
+        // The ceiling grew with #117: the verbatim token now also gets past a locked room's
+        // password while it holds a reserved seat there, so this is no longer only about
+        // allowances -- see the note at `join`'s door.
+        // upgrade path: an identity the client cannot choose (#7), or rate limiting (#47).
         allowances: new Map(),
         // The whole phase model: a room is in lobby or in-game, and there is no third
         // (#21). The countdown is part of the lobby, not a phase of its own.
@@ -198,8 +224,21 @@ function join(client, msg) {
     const room = rooms[normalise_room_id(msg.id)];
     // One opaque code for a wrong password and a missing room alike: telling them apart is
     // what would turn an unlisted room's id into something worth guessing at (#8). No
-    // profanity blocklist, and no second failure code to leak the difference.
-    if (!room || room.password !== password_of(msg))
+    // profanity blocklist, and no second failure code to leak the difference -- and none
+    // for the third way past this line either: a token holding a reserved seat here is
+    // admitted without the password, and one holding none is refused in the same word as
+    // the other two. The reload the reservation window exists for is the one that cannot
+    // carry a password, because the password is write-only and was never written down
+    // (#38, #42, #117). This is exactly the set of seats `admit` is about to hand back, so
+    // the door cannot admit somebody it then seats as nobody.
+    //
+    // The cost is #7's, knowingly taken: tokens are client-verbatim, so a forged one now
+    // skips the password too -- but only one forged onto a seat this room is reserving in
+    // this minute, and guessing that is already the whole of taking the seat.
+    if (
+        !room ||
+        (room.password !== password_of(msg) && !reserved_seats(room, token_of(msg)).length)
+    )
         return send(client, { type: "error", code: "ROOM_UNAVAILABLE" });
     // After the password, so a refusal still says nothing about a room the client could not
     // have joined anyway (#8). A client that declares no build is not checked: the headless
@@ -309,6 +348,18 @@ function online_seats(room) {
     return online;
 }
 
+// The seats this token may still reclaim: held by it, and held by nobody connected. Held is
+// not reserved -- duplicating a tab copies `sessionStorage`, and two sockets driving one
+// seat is a desync rather than a rejoin. One definition, asked by `admit` on the way in and
+// by `join` at the door, so the seats the password is skipped for are the seats that come
+// back (#7, #42, #117).
+function reserved_seats(room, token) {
+    const online = online_seats(room);
+    return room.seats
+        .map((seat, index) => (seat && seat.token === token && !online.has(index) ? index : -1))
+        .filter((index) => index >= 0);
+}
+
 // Ready is declared per client and covers every seat it holds at once, forced by the input
 // surface: a participant presses left, right and up and nothing else, so a second player on
 // one couch has no key of its own to ready with (#7, #37). An AI-filled seat is implicitly
@@ -372,11 +423,12 @@ function reset_ready(room) {
 function report_match(room) {
     if (!room.started) return;
     console.log(
-        "room %s match over: %d frames substituted, %d late, %d forged",
+        "room %s match over: %d frames substituted, %d late, %d forged, %d stale",
         room.id,
         room.substituted,
         room.late,
         room.forged,
+        room.stale,
     );
 }
 
@@ -424,10 +476,23 @@ function broadcast_state(room) {
 
 // A client is atomic: its seat count is fixed at the names screen and granted
 // all-or-nothing, so a couch pair stays together and keeps every seat (#14).
-// The seats nobody is holding. A reserved seat is not one of them: its holder's token owns
-// it until the window runs out, which is the same reason `/api/rooms` counts it as occupied.
+// The seats this room could hand to a client right now. Nobody holding it is most of the
+// answer: a reserved seat is not one of them, because its holder's token owns it until the
+// window runs out, which is the same reason `/api/rooms` counts it as occupied.
+//
+// Mid-match there is a second half, and it is the rule `claim_seat` has always applied to
+// the other door (#7, #37, #116): only a seat the AI is driving. One a client is steering
+// is not free; one its holder let go is still that bunny's driver until thirty missing
+// ticks hand it over; and one the room disabled stays disabled for the match it was
+// disabled in. It belongs here rather than at either caller, because the two ask one
+// question in one synchronous step and `quick_join` leans on them agreeing: `best_room`
+// picks the room and `seat_client` seats the client in it, so a room ranked on seats that
+// cannot be granted is a client landing in a stranger's room holding nothing instead of in
+// a room of its own (#44).
 function free_seats(room) {
-    return room.seats.map((seat, index) => (seat ? -1 : index)).filter((index) => index >= 0);
+    return room.seats
+        .map((seat, index) => (seat || (room.started && room.drivers[index] !== "ai") ? -1 : index))
+        .filter((index) => index >= 0);
 }
 
 // Seats a whole client or none of it, which is the one rule every way into a seat obeys: a
@@ -436,6 +501,9 @@ function free_seats(room) {
 // waited.
 function seat_client(client, names) {
     const room = client.room;
+    // Mid-match `free_seats` is narrower than "unheld", so this is also where a seat the
+    // room is still driving for its old holder is refused (#116). The fit test is the same
+    // one it always was: a couch that no longer fits waitlists rather than splitting.
     const free = free_seats(room);
     if (free.length < names.length || name_taken(room, names)) return false;
     client.seats = free.slice(0, names.length);
@@ -546,18 +614,11 @@ function admit(client, room, msg) {
     // Identity is a server-minted opaque token, per client rather than per participant: one
     // browser is one socket and one reconnect, so the token reclaims every seat that client
     // held. A username is guessable by anyone in the room and is never an identity (#7).
-    client.token = String(msg.token || "") || randomUUID();
+    client.token = token_of(msg) || randomUUID();
     // The repair allowance is the player's, not the socket's: a reconnect on the same token
     // comes back to what it has spent rather than to a fresh five (#93).
     client.allowance = allowance_of(room, client.token);
-    // A seat whose holder is connected is not reclaimable: duplicating a tab copies
-    // sessionStorage, and two sockets driving one seat is a desync, not a rejoin.
-    const online = online_seats(room);
-    client.seats = room.seats
-        .map((seat, index) =>
-            seat && seat.token === client.token && !online.has(index) ? index : -1,
-        )
-        .filter((index) => index >= 0);
+    client.seats = reserved_seats(room, client.token);
     // The names this client is waiting to sit down with, empty unless it asked for seats
     // in a room that had none (#44).
     client.queued = [];
@@ -777,6 +838,11 @@ function substitute(room) {
                     AI_AFTER,
                 );
                 stamp_driver(room, seat, "ai");
+                // The one moment mid-match a free seat becomes grantable, now that a seat
+                // is only grantable while the AI drives it: a `leave` frees seats the room
+                // goes on driving for their holder, so a client that waitlisted against
+                // them is served here rather than on a `leave` that may never come (#44).
+                seat_queue(room);
             }
         }
         if (!Object.keys(seats).length) continue;
@@ -904,6 +970,10 @@ function resume(client) {
         // every client in the room does for a client more than d ticks behind, joiner or
         // no joiner (#6, #17).
         t: room.snapshot.t,
+        // The match in progress, which is the match this payload is a resume of: one
+        // payload, two triggers, and both of them join the match the room is on right now
+        // (#122, #40).
+        match: room.match,
         until,
         d: room.d,
         seed: room.seed,
@@ -930,6 +1000,11 @@ function keep_checksum(client, msg) {
     if (!room.started) return;
     if (!Number.isInteger(msg.t) || !Number.isInteger(msg.h)) return;
     if (!client.host) {
+        // `resync_t` is the guard here: a hash the client had already sent when the repair
+        // was decided on belongs to the state being replaced. `dropped` beside it is a fast
+        // path and not the rule -- `desync()` owns that one and checks it again -- worth its
+        // half of the line for skipping the lookup and not parking a `pending` on a client
+        // nobody is going to repair (#126).
         if (client.allowance.dropped || msg.t <= (client.resync_t || 0)) return;
         const reference = room.checksums.find((one) => one.t === msg.t);
         // Held one deep rather than queued: a client has one tick in flight at a time, and
@@ -949,6 +1024,21 @@ function keep_checksum(client, msg) {
     }
 }
 
+// Detected, and answerable with nothing: the three branches in `desync()` below repair no
+// one, and until #118 each of them said so in the log nowhere and in the counter nowhere.
+// #110 hid behind that silence for months. One helper for all three, so the shape cannot
+// drift between them.
+function unrepairable(client, t, why) {
+    client.waiting = true;
+    console.log(
+        "room %s desync %d at tick %d, nothing to repair with (%s)",
+        client.room.id,
+        client.room.desyncs,
+        t,
+        why,
+    );
+}
+
 // A mismatch is the desync -- the relay substitutes a missing frame, so every client's input
 // stream is identical and a divergence is a determinism bug rather than routine drift (#17,
 // #41). Recovery is the payload the join path already sends, and there is no new UI for it:
@@ -961,29 +1051,38 @@ function desync(client, t) {
     // A hash held for a host hash that arrived after its sender went is nobody's
     // disagreement any more, and must not spend a repair.
     if (!room.clients.has(client) || spent.dropped) return;
+    // Counted at detection rather than beside the repair: the counter says what the relay
+    // saw, the log line beneath it says what the relay did about it (#118).
+    room.desyncs++;
     // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
     // and the first hashes are half a second in, so the whole allowance would be spent
     // before a single repair could be sent. Marked instead, and answered by that first
     // snapshot exactly as a mid-match joiner's ask is (#40).
-    if (!room.snapshot) return void (client.waiting = true);
+    if (!room.snapshot) return unrepairable(client, t, "no snapshot yet");
     // Same shape, one snapshot later: a resume `room.tick - room.snapshot.t` this far past
     // cannot be served either, and spending a repair on an ask that comes back with nothing
     // is how a client starves its way to `drop_from_match` without ever having been repaired
     // (#92).
-    if (room.tick - room.snapshot.t > MAX_CATCH_UP) return void (client.waiting = true);
+    if (room.tick - room.snapshot.t > MAX_CATCH_UP)
+        return unrepairable(client, t, "snapshot is past the catch-up ceiling");
     // Same reason, same shape: the ring's count cap can evict past this snapshot's tick
     // before the ceiling above even trips, and spending a repair on that is spending it on
     // nothing (#92 review).
-    if (room.snapshot.t <= room.holed) return void (client.waiting = true);
+    if (room.snapshot.t <= room.holed)
+        return unrepairable(client, t, "the frames behind the snapshot are gone");
     const now = Date.now();
     const since = now - spent.at;
     // Quiet for long enough: the run this client was in is over, and the repair that ended
     // it worked. What is starting now gets the whole allowance.
     if (since > repair_reset_ms()) spent.repairs = 0;
     // Still the same unrepaired desync, seen again 30 ticks later: the last repair has not
-    // had a fresh snapshot to have worked from yet, so this is not a second one.
+    // had a fresh snapshot to have worked from yet, so this is not a second one. Silent on
+    // purpose, and the one branch in here that has to be: a client hashes every 30 ticks and
+    // a divergence lasts until something repairs it, so a line here is a line every half
+    // second for as long as the fault runs. It is still counted -- the count is sightings --
+    // and the repair line below prints that count, so a count running ahead of the repair
+    // number is how often this branch was taken (#118).
     else if (since < repair_cooldown_ms()) return;
-    room.desyncs++;
     if (spent.repairs >= MAX_REPAIRS) {
         console.log(
             "room %s desync %d at tick %d, dropped after %d repairs with no let-up",
@@ -1040,6 +1139,10 @@ function begin(room, msg) {
         room.staged = null;
     }
     room.tick = 0;
+    // Before the clocks are zeroed under it: from here on a frame stamped for the match
+    // that just ended names a match the room is no longer on, which is the one thing that
+    // tells it apart from a frame for this one (#122).
+    room.match++;
     room.d = input_delay(room);
     room.started = true;
     // The match that is beginning is not the one the cached state belongs to.
@@ -1054,7 +1157,7 @@ function begin(room, msg) {
     // one's (#42).
     room.due = 0;
     room.missing = new Array(SEATS).fill(0);
-    room.substituted = room.late = room.forged = 0;
+    room.substituted = room.late = room.forged = room.stale = 0;
     // A fresh match is a legitimately fresh allowance -- for every token in the room, dropped
     // or not (#41, #93). Cleared before the walk below, or the re-point it does is thrown
     // away again.
@@ -1100,6 +1203,12 @@ function begin(room, msg) {
             send(other, {
                 type: "start",
                 t: 0,
+                // Which match this is. Stamped back on every frame the client sends, so a
+                // frame that crossed the start of this one is refused rather than believed
+                // (#122). A client keeps it for as long as it keeps the match, `match_end`
+                // included: what tells a `start` for the match it is already in from one
+                // that begins the next is this number and nothing else.
+                match: room.match,
                 d: room.d,
                 seed: msg.seed,
                 // The room's, never the proposer's: a client that configured itself -- an
@@ -1202,6 +1311,35 @@ function relay(client, msg) {
             // move the room's clock on: `tick` is taken before any seat is looked at, so a
             // queued client could make every real client's frames late (#44).
             if (client.queued.length) return;
+            // A frame for another match than the one being played. `begin` zeroes both the
+            // clock bounds below, so a frame stamped in match 1 and still in flight when it
+            // ran is measured against match 2's fresh clock: for tick 2700 it is not late
+            // (`2700 < 0`) and not forged (a match is capped well inside MAX_CATCH_UP, so
+            // the gap from tick 0 never trips it), and the line below would raise the room's
+            // clock to 2701 -- `substitute` then walks every tick in between, broadcasting
+            // one frame each, and drags every client's high-water mark after it. One round
+            // trip at the moment the host presses Start is the whole window, and an honest
+            // room reaches it (#122, and #84 from the client side).
+            //
+            // `started` beside it is the guard `keep_snapshot` and `keep_checksum` already
+            // open with, and it is the half the counter cannot cover: between matches the
+            // room is still on the match that ended, so its number alone would let a frame
+            // from it move a lobby's clock -- `substitute` walking a lobby, handing seats to
+            // the AI and ringing invented frames at clients picking a level. `input` is the
+            // one message that moves that clock, and it was the one without the guard.
+            //
+            // Counted either way, but only the in-match half is ever reported: `report_match`
+            // returns early while the room is not started, and `begin` zeroes the count, so a
+            // refusal between matches goes into a number no log line prints. The same is
+            // already true of `late` and `forged`, which can only happen in a match at all.
+            //
+            // ponytail: a frame with no `match` on it is refused like any other, and a page
+            // on a bundle that predates this field sends nothing else -- a match that never
+            // moves rather than the `OUT_OF_DATE` it deserves. `join` compares builds only
+            // when both ends declared one and `create` never compares at all, so the tab that
+            // slips through is one that *creates* a room during a relay upgrade. upgrade path:
+            // compare the build on the way in for real (#29).
+            if (!room.started || msg.match !== room.match) return void room.stale++;
             // Past its deadline: the relay already put a released frame in for this tick and
             // the room stepped it, so the real one is for a tick that never comes round
             // again. Dropped silently and counted, because a client cannot be told to send

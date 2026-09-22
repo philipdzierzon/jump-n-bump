@@ -3,6 +3,7 @@
 // test and a fake of it would be the thing under test instead. Run with `npm test`.
 import assert from "node:assert";
 import fs from "node:fs";
+import { format } from "node:util";
 
 import { normalise_room_id } from "../src/net/room_id.js";
 import { LEVELS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/room_config.js";
@@ -258,8 +259,22 @@ late.socket.close();
 
 // The host announces the end -- the relay cannot read the simulation, so the final board
 // travels with the message -- and the announcement is over with it (#22).
+// Under the capture, because the line the match ends on is also where this room says
+// whether the relay took the 41 frames the `Room` above sent it. A client that stamped the
+// wrong match -- or none -- has every frame refused in silence, and the only place that is
+// visible is this count (#122).
+const qmftx_said = [];
+const qmftx_spoke = console.log;
+console.log = (...args) => qmftx_said.push(format(...args));
 host_room.end_match("lobby", [[0, 1]]);
 await new Promise((resolve) => setTimeout(resolve, 100));
+console.log = qmftx_spoke;
+assert.ok(
+    qmftx_said.some((line) => /^room QMFTX match over: .*, 0 stale$/.test(line)),
+    "the relay took every frame the client sent: a real `Room` stamps the match it is in " +
+        "(#122) -- said instead: " +
+        qmftx_said.join(" | "),
+);
 const ended = seen.find((msg) => msg.type === "match_end");
 assert.equal(ended.reason, "lobby", "the reason is relayed verbatim");
 assert.deepEqual(ended.matrix, [[0, 1]], "and so is the board the host counted");
@@ -290,12 +305,19 @@ const other_saw = [];
 sender.socket.receive((msg) => sender_saw.push(msg));
 other.socket.receive((msg) => other_saw.push(msg));
 const pressed = { left: false, right: true, up: false };
-sender.socket.send({ type: "input", t: 7, seats: { 0: pressed, 1: pressed } });
+// A match, because a frame belongs to one: the relay takes input only while the room is
+// playing, and only for the match the frame names (#122).
+other.socket.send({ type: "ready", ready: true });
+sender.socket.send({ type: "start", seed: 5, settings: {} });
+await awaited_where(other_saw, (msg) => msg.type === "start", "the match to begin");
+// Tick 0, so the room's clock does not run far enough ahead for the relay to start
+// covering the seat nobody has sent a frame for: what is fanned out here is this frame.
+sender.socket.send({ type: "input", match: 1, t: 0, seats: { 0: pressed, 1: pressed } });
 await new Promise((resolve) => setTimeout(resolve, 100));
 const relayed = other_saw.filter((msg) => msg.type === "input");
 assert.deepEqual(
     relayed.map((msg) => msg.t),
-    [7],
+    [0],
     "the other client in the room sees the input",
 );
 assert.deepEqual(
@@ -303,7 +325,14 @@ assert.deepEqual(
     { 0: pressed },
     "for the seat the sender holds, and not for the one it forged",
 );
-assert.deepEqual(sender_saw, [], "and the sender is never echoed its own");
+assert.deepEqual(
+    sender_saw.filter((msg) => msg.type === "input"),
+    [],
+    "and the sender is never echoed its own",
+);
+// Back to the lobby, which is where the rest of this room's assertions live.
+sender.socket.send({ type: "match_end", reason: "lobby", matrix: null });
+await other.until((msg) => msg.type === "room" && !msg.started);
 
 // A client that walks back to the lobby keeps its seats and hands its bunnies to the AI, so
 // the seat is held by somebody who is still in the room and driven by nobody. The board says
@@ -646,10 +675,10 @@ assert.ok(snap_start, "the host starts the match it will be the reference state 
 const matrix = new Array(16).fill(0);
 // A frame the snapshot already accounts for, then the snapshot, then two it does not: the
 // ring is the gap between that state and now, so the first one is dropped by the second.
-snap_host.socket.send({ type: "input", t: 1, seats: { 0: pressed } });
+snap_host.socket.send({ type: "input", match: 1, t: 1, seats: { 0: pressed } });
 snap_host.socket.send({ type: "snapshot", t: 3, matrix, body: "SNAPSHOT-BODY" });
-snap_host.socket.send({ type: "input", t: 5, seats: { 0: pressed } });
-snap_host.socket.send({ type: "input", t: 6, seats: { 0: pressed } });
+snap_host.socket.send({ type: "input", match: 1, t: 5, seats: { 0: pressed } });
+snap_host.socket.send({ type: "input", match: 1, t: 6, seats: { 0: pressed } });
 await new Promise((resolve) => setTimeout(resolve, 100));
 
 const late_joiner = connect({ type: "join", id: "SNAPX" });
@@ -667,6 +696,11 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 const payload = late_saw.find((msg) => msg.type === "start");
 assert.ok(payload, "a client that asks is handed the match in progress");
 assert.equal(payload.t, 3, "on the tick the host's snapshot was taken");
+assert.equal(
+    payload.match,
+    1,
+    "and the match it is a resume of: a joiner stamps its frames for the match it landed in (#122)",
+);
 assert.equal(payload.snapshot, "SNAPSHOT-BODY", "with the host's body, opaque and unread");
 assert.deepEqual(
     payload.inputs.map((frame) => frame.t),
@@ -699,7 +733,8 @@ assert.equal(
 // replay starts at the snapshot, so it has to be handed down as a change too. Baking it
 // into the table would apply it from the snapshot's tick on, which is 30-odd ticks before
 // every other client applied it.
-for (let t = 10; t <= 40; t++) snap_host.socket.send({ type: "input", t, seats: { 0: pressed } });
+for (let t = 10; t <= 40; t++)
+    snap_host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed } });
 const third = connect({ type: "join", id: "SNAPX" });
 await lobby(third);
 const third_saw = [];
@@ -740,6 +775,27 @@ assert.equal(
     undefined,
     "a room whose host has not snapshotted yet has nothing to hand over",
 );
+// A mismatch the relay can repair nothing with is still a mismatch it detected, and this
+// is the branch that covers the first two seconds of every match -- the silence #110 hid in
+// for months, logged nowhere and counted nowhere (#118). The line is the whole fix, so the
+// line is what is asserted: the relay runs in this process, so its own `console.log` is
+// readable from here.
+const said = [];
+const spoke = console.log;
+console.log = (...args) => said.push(format(...args));
+early_host.socket.send({ type: "checksum", t: 30, h: 111 });
+early_guest.socket.send({ type: "checksum", t: 30, h: 222 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+console.log = spoke;
+assert.ok(
+    said.some((line) =>
+        /^room SNPZX desync 1 at tick 30, nothing to repair with \(no snapshot yet\)$/.test(line),
+    ),
+    "a desync the relay has no snapshot to repair from names the branch, the tick and its " +
+        "place in the room's count (#118) -- said instead: " +
+        said.join(" | "),
+);
+
 const early_matrix = new Array(16).fill(0);
 early_matrix[1] = 2;
 early_host.socket.send({ type: "snapshot", t: 0, matrix: early_matrix, body: "FIRST-BODY" });
@@ -812,7 +868,8 @@ thr_host.socket.send({ type: "snapshot", t: 0, matrix, body: "THROTTLED-BODY" })
 // prune correctly rather than being vacuously empty.
 thr_host.socket.send({ type: "driver", seat: 0, driver: "ai" });
 const FRAMES = 2200; // past the 2000 the ring used to cap at
-for (let t = 1; t <= FRAMES; t++) thr_host.socket.send({ type: "input", t, seats: { 0: pressed } });
+for (let t = 1; t <= FRAMES; t++)
+    thr_host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed } });
 // Waited on rather than slept off: the relay handles one socket's messages in order and fans
 // each frame out as it goes, so the guest seeing the last one proves every one before it was
 // rung too.
@@ -837,7 +894,7 @@ assert.deepEqual(
 // host's next snapshot answers it -- which is what a room that had not snapshotted yet
 // already does (#40, #92). The client keeps its seat and its place in the room throughout.
 const before_resync = thr_saw.length;
-thr_host.socket.send({ type: "input", t: MAX_CATCH_UP + 1, seats: { 0: pressed } });
+thr_host.socket.send({ type: "input", match: 1, t: MAX_CATCH_UP + 1, seats: { 0: pressed } });
 await awaited_where(
     thr_saw,
     (msg) => msg.type === "input" && msg.t === MAX_CATCH_UP + 1,
@@ -918,14 +975,15 @@ await lobby(flood_guest);
 const flood_saw = [];
 flood_guest.socket.receive((msg) => flood_saw.push(msg));
 flood_host.socket.send({ type: "snapshot", t: 0, matrix, body: "FLOOD-BODY" });
-for (let t = 1; t <= 200; t++) flood_host.socket.send({ type: "input", t, seats: { 0: pressed } });
+for (let t = 1; t <= 200; t++)
+    flood_host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed } });
 await awaited_where(flood_saw, (msg) => msg.type === "input" && msg.t === 200, "the 200th frame");
 for (let i = 0; i < MAX_RING + 200; i++)
-    flood_host.socket.send({ type: "input", t: 200, seats: { 0: pressed } });
+    flood_host.socket.send({ type: "input", match: 1, t: 200, seats: { 0: pressed } });
 // A marker after the flood, waited on rather than counted: one socket's messages land in the
 // order they were sent, so the marker arriving proves every flood frame ahead of it already
 // did too.
-flood_host.socket.send({ type: "input", t: 201, seats: { 0: pressed } });
+flood_host.socket.send({ type: "input", match: 1, t: 201, seats: { 0: pressed } });
 await awaited_where(
     flood_saw,
     (msg) => msg.type === "input" && msg.t === 201,
@@ -1011,7 +1069,7 @@ const recovered = () => new Promise((resolve) => setTimeout(resolve, 500));
 // The host's first, then the client's: the mismatch is the desync, and the answer is the
 // same payload a mid-match joiner gets. The frame is what puts a tick on the room, which is
 // the tick the repair below is measured from.
-chk_host.socket.send({ type: "input", t: 500, seats: {} });
+chk_host.socket.send({ type: "input", match: 1, t: 500, seats: {} });
 chk_host.socket.send({ type: "checksum", t: 600, h: 111 });
 chk_guest.socket.send({ type: "checksum", t: 600, h: 222 });
 const repaired = await awaited(chk_saw, "start");
@@ -1298,13 +1356,14 @@ const gap = await two_seats("GAPXZ");
 // One frame and then nothing, because that is what a drop looks like: a client that has not
 // sent anything at all is still arriving -- fetching the room's level, most likely -- and
 // the relay covers its seat without ever taking it away.
-gap.guest.socket.send({ type: "input", t: 0, seats: { 1: pressed_key } });
+gap.guest.socket.send({ type: "input", match: 1, t: 0, seats: { 1: pressed_key } });
 await until_seen(
     gap.host_saw,
     (msg) => msg.type === "input" && msg.t === 0,
     "the quiet client's one frame",
 );
-for (let t = 0; t <= 34; t++) gap.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+for (let t = 0; t <= 34; t++)
+    gap.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
 const covered = await until_seen(
     gap.host_saw,
     (msg) => msg.type === "input" && msg.t > 0 && msg.seats["1"],
@@ -1339,7 +1398,7 @@ assert.ok(
 // A frame that turns up after its tick was covered for is dropped where it lands: the room
 // stepped that tick, and handing it on now is input for a tick that never comes round
 // again. Counted per room, and the match's log line is where that count is read.
-gap.guest.socket.send({ type: "input", t: 1, seats: { 1: pressed_key } });
+gap.guest.socket.send({ type: "input", match: 1, t: 1, seats: { 1: pressed_key } });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.ok(
     !gap.host_saw.some(
@@ -1354,14 +1413,14 @@ gap.guest.socket.close();
 // than asking a fresh scan every tick: a change that lands mid-run must flip the table on
 // the tick it lands on -- not a tick early, and not never.
 const walk = await two_seats("WALKX");
-walk.guest.socket.send({ type: "input", t: 0, seats: { 1: pressed_key } });
+walk.guest.socket.send({ type: "input", match: 1, t: 0, seats: { 1: pressed_key } });
 await until_seen(
     walk.host_saw,
     (msg) => msg.type === "input" && msg.t === 0,
     "the quiet client's one frame",
 );
 for (let t = 0; t <= 34; t++)
-    walk.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+    walk.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
 const took_over = await until_seen(
     walk.host_saw,
     (msg) => msg.type === "driver" && msg.seat === 1,
@@ -1371,7 +1430,7 @@ const land = took_over.t;
 // One frame far enough ahead that the room's clock jumps the whole distance to the landing
 // tick and past it in a single catch-up run -- the shape this file's other cases, one tick
 // per message, never exercise.
-walk.host.socket.send({ type: "input", t: land + 10, seats: { 0: pressed_key } });
+walk.host.socket.send({ type: "input", match: 1, t: land + 10, seats: { 0: pressed_key } });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.ok(
     walk.host_saw.some((msg) => msg.type === "input" && msg.t === land - 1 && msg.seats["1"]),
@@ -1389,7 +1448,7 @@ walk.guest.socket.close();
 // it. A socket that closed is the other half of that rule, and does lose the seat.
 const arriving = await two_seats("ARRVE");
 for (let t = 0; t <= 40; t++)
-    arriving.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+    arriving.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
 await until_seen(
     arriving.host_saw,
     (msg) => msg.type === "input" && msg.seats["1"],
@@ -1411,13 +1470,13 @@ arriving.guest.socket.close();
 // match before the other's first frame is a gap in the wire, not one in the room.
 const idle = await two_seats("STLLQ");
 for (let t = 0; t <= 40; t++) {
-    idle.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+    idle.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
     await until_seen(
         idle.guest_saw,
         (msg) => msg.type === "input" && msg.t === t && msg.seats["0"],
         "the busy client's frame for tick " + t,
     );
-    idle.guest.socket.send({ type: "input", t, seats: { 1: no_key } });
+    idle.guest.socket.send({ type: "input", match: 1, t, seats: { 1: no_key } });
     await until_seen(
         idle.host_saw,
         (msg) => msg.type === "input" && msg.t === t && msg.seats["1"],
@@ -1523,6 +1582,69 @@ assert.deepEqual(
 delete process.env.RESERVE_MS;
 bystander.socket.close();
 
+// --- a reload into a locked room (#117) -------------------------------------------------
+//
+// Nothing of the password survives a reload: it is write-only (#38) and was never written
+// down client-side, so the page comes back with the token alone. Compared against the
+// password first, that made the one reload the reservation window exists for the one reload
+// it could not reach. A token that owns a *reserved* seat in *this* room is let past the
+// password now -- and nothing wider than that is.
+const holder = connect({ type: "create", id: "LCKDZ", password: "hunter2" });
+const holder_token = (await lobby(holder)).token;
+await holder.seats(["Reloader"]);
+// Somebody else in the room, because a room dies with its last client and a reservation
+// nobody can come back to is not one.
+const roommate = connect({ type: "join", id: "LCKDZ", password: "hunter2" });
+await lobby(roommate);
+const away = () =>
+    roommate.until((msg) => msg.type === "room" && msg.labels[0] === "Reloader (AI)");
+
+const outsider = connect({ type: "join", id: "LCKDZ", token: "a-token-of-its-own" });
+assert.equal(
+    (await lobby(outsider)).code,
+    "ROOM_UNAVAILABLE",
+    "a token holding no seat here is refused in the one word a wrong password and a " +
+        "room that is not there are both refused in (#8)",
+);
+outsider.socket.close();
+
+// Held is not reserved. The holder is still connected, so its own token opens nothing:
+// copying `sessionStorage` into a second tab is a desync and not a rejoin, and the door
+// agrees with `admit` about which seats are reclaimable because both ask `reserved_seats`.
+const copycat = connect({ type: "join", id: "LCKDZ", token: holder_token });
+assert.equal(
+    (await lobby(copycat)).code,
+    "ROOM_UNAVAILABLE",
+    "a token whose seat is still online holds no reservation, and buys nothing at the door",
+);
+copycat.socket.close();
+
+holder.socket.close();
+await away();
+const reclaimed = connect({ type: "join", id: "LCKDZ", token: holder_token });
+assert.deepEqual(
+    (await lobby(reclaimed)).held,
+    [0],
+    "the token that reserved a seat here reclaims it with no password typed a second time",
+);
+
+// A reservation is one room's. Reserved again -- and refused at the door of a different
+// locked room, which is what keeps this from being a skeleton key for every locked room in
+// the process.
+reclaimed.socket.close();
+await away();
+const elsewhere = connect({ type: "create", id: "ZEBRA", password: "hunter2" });
+await lobby(elsewhere);
+const crosser = connect({ type: "join", id: "ZEBRA", token: holder_token });
+assert.equal(
+    (await lobby(crosser)).code,
+    "ROOM_UNAVAILABLE",
+    "a reservation opens the door of the room that granted it and of no other room",
+);
+crosser.socket.close();
+elsewhere.socket.close();
+roommate.socket.close();
+
 // --- message authorisation (#82) -------------------------------------------------------
 //
 // Four message types the relay used to take from any client without asking who sent them.
@@ -1535,8 +1657,13 @@ const forged = await two_seats("FRGZX");
 // A tick further ahead than any client could catch up to is not a frame. Unchecked it raised
 // the room's clock to itself, and substitution then walked every tick in between -- a scan
 // per seat per tick, a broadcast each -- which is the single process and every room on it.
-forged.guest.socket.send({ type: "input", t: MAX_CATCH_UP + 1, seats: { 1: pressed_key } });
-forged.guest.socket.send({ type: "input", t: 0, seats: { 1: pressed_key } });
+forged.guest.socket.send({
+    type: "input",
+    match: 1,
+    t: MAX_CATCH_UP + 1,
+    seats: { 1: pressed_key },
+});
+forged.guest.socket.send({ type: "input", match: 1, t: 0, seats: { 1: pressed_key } });
 const after_forged = await until_seen(
     forged.host_saw,
     (msg) => msg.type === "input" && msg.t === 0,
@@ -1583,6 +1710,107 @@ assert.equal(
 );
 forged.host.socket.close();
 forged.guest.socket.close();
+
+// --- match identity on the wire (#122) -------------------------------------------------
+//
+// A frame stamped in one match and still in flight when the next one begins. `begin` zeroes
+// both of the clock bounds above it, so a match-1 frame for tick 2700 landing after it is
+// neither late (`2700 < 0`) nor forged (a match is capped well inside MAX_CATCH_UP): it
+// raised the room's clock to 2701, and `substitute` then walked every tick in between. One
+// round trip at the moment the host presses Start is the whole window, and no misbehaviour
+// is needed to reach it -- #84 fixed the mirror image of this on the client side.
+const relit = await two_seats("STALE");
+const first_start = await awaited(relit.host_saw, "start");
+assert.equal(first_start.match, 1, "a room's first match is match 1, and its `start` says so");
+// Match 1 really played, so the room's clock really ran: the frame below is stamped the way
+// a client holding a seat near the end of a long match stamps one.
+for (let t = 0; t <= 40; t++)
+    relit.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
+relit.host.socket.send({ type: "match_end", reason: "bumps", matrix: null });
+// On the broadcast rather than on a room update: this client's buffered updates go back to
+// before the match began, and `!started` matches one of those the moment it is asked.
+await until_seen(
+    relit.guest_saw,
+    (msg) => msg.type === "match_end" && msg.reason === "bumps",
+    "the first match to end",
+);
+// The other half of the guard, and the half the counter cannot cover: between matches the
+// room is still on the match that ended, so its number alone would let that match's frames
+// move a *lobby* room's clock -- `substitute` walking a lobby, handing seats to the AI and
+// ringing invented frames at clients who are picking a level. It is the frame a client left
+// on the match screen goes on sending (#124), and it cannot be asserted through the counter:
+// `report_match` returns early while the room is not started and `begin` zeroes the count,
+// so a lobby refusal is counted into a number no log line ever prints. Fan-out is the whole
+// of what is observable.
+const lobby_before = relit.guest_saw.filter((msg) => msg.type === "input").length;
+relit.host.socket.send({ type: "input", match: 1, t: 2800, seats: { 0: pressed_key } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    relit.guest_saw.filter((msg) => msg.type === "input").length,
+    lobby_before,
+    "a frame arriving between matches moves nothing: there is no match for it to belong to",
+);
+// The lobby un-readies every client, so the second match begins the way the first did.
+relit.guest.socket.send({ type: "ready", ready: true });
+// Two sockets, so the ready has to have landed before the start asks whether everybody is:
+// a start that arrives first arms a countdown instead of beginning the match.
+await new Promise((resolve) => setTimeout(resolve, 100));
+relit.host.socket.send({ type: "start", seed: 43, settings: {} });
+const second_start = await awaited_where(
+    relit.host_saw,
+    (msg) => msg.type === "start" && msg.seed === 43,
+    "the second match",
+);
+assert.equal(second_start.match, 2, "and the match after it is match 2");
+
+const seen_before = relit.guest_saw.filter((msg) => msg.type === "input").length;
+// A recorder of its own for the match that just began: the relay covered the quiet seat all
+// through match 1, so match 1's frames are still in `host_saw` and a search of it answers
+// with one of those whatever match 2 does.
+const after_begin = [];
+relit.host.socket.receive((msg) => after_begin.push(msg));
+// The frame that crossed the start: stamped in match 1, arriving in match 2.
+relit.host.socket.send({ type: "input", match: 1, t: 2700, seats: { 0: pressed_key } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    relit.guest_saw.filter((msg) => msg.type === "input").length,
+    seen_before,
+    "a frame stamped in the match that ended is not fanned out into the one that began",
+);
+// The clock is what it moved, so the clock is what is asserted: it is not readable from
+// here, but a frame for tick 0 is -- had the stale frame been believed, the room would be
+// at tick 2701, `substitute` would have walked to its deadline, and this frame would be
+// long past it and dropped as late.
+relit.guest.socket.send({ type: "input", match: 2, t: 0, seats: { 1: pressed_key } });
+const relit_frame = await until_seen(
+    after_begin,
+    (msg) => msg.type === "input" && msg.seats["1"],
+    "the new match's first frame",
+);
+assert.deepEqual(
+    { t: relit_frame.t, seats: relit_frame.seats },
+    { t: 0, seats: { 1: pressed_key } },
+    "the room's clock stayed at the new match's tick 0, so a frame for it is not already late",
+);
+// Counted where it was refused, and said in the line the match it landed in ends on: the
+// stale frame arrives after `begin`, so it is match 2 that saw it (#118, #126).
+const said_stale = [];
+const spoke_stale = console.log;
+console.log = (...args) => said_stale.push(format(...args));
+relit.host.socket.send({ type: "match_end", reason: "lobby", matrix: null });
+await until_seen(
+    relit.guest_saw,
+    (msg) => msg.type === "match_end" && msg.reason === "lobby",
+    "the second match to end",
+);
+console.log = spoke_stale;
+assert.ok(
+    said_stale.some((line) => /^room STALE match over: .*, 1 stale$/.test(line)),
+    "the frame the relay refused is counted rather than dropped in silence -- said instead: " +
+        said_stale.join(" | "),
+);
+relit.host.socket.close();
+relit.guest.socket.close();
 
 // The delay the whole match is played at is derived from the trips the relay measured and
 // fixed at `begin`, so a pong it could not read used to fix it at `NaN`: no substitution for
@@ -1758,6 +1986,89 @@ assert.equal(
 four_up.socket.close();
 stuck.socket.close();
 
+// Both doors into a seat ask the same question mid-match (#116). `claim_seat` has always
+// refused a seat the room is not driving with the AI; `take_seats` took whatever nobody
+// held, so a client could give a seat up and be handed it straight back -- a round trip,
+// rather than the thirty missing ticks it takes the room to hand that bunny over. That is
+// the fast path under #93's allowance: a `leave`, a fresh token and a `seats` message
+// bought a fresh five repairs on the same bunny.
+const guard = connect({ type: "create", id: "MDGRD", listed: true });
+await lobby(guard);
+await guard.seats(["Ann", "Bea"]);
+const quitter = connect({ type: "join", id: "MDGRD" });
+await lobby(quitter);
+await quitter.seats(["Cid", "Dot"]);
+const guard_saw = [];
+guard.socket.receive((msg) => guard_saw.push(msg));
+// Every seat is held when the match begins, so the AI is driving none of them.
+quitter.socket.send({ type: "ready", ready: true });
+guard.socket.send({ type: "start", seed: 5, settings: {} });
+await awaited(guard_saw, "start");
+quitter.socket.send({ type: "leave" });
+await quitter.until((msg) => msg.type === "room" && !msg.held.length);
+
+// The same seats, asked for again on the next message: free, because their holder let them
+// go, and still that holder's bunnies as far as the room is concerned.
+quitter.socket.send({ type: "seats", names: ["Cid", "Dot"] });
+const refused_mid = await quitter.until(
+    (msg) => msg.type === "error" || (msg.type === "room" && (msg.queued || msg.held.length)),
+);
+assert.deepEqual(
+    refused_mid.held,
+    [],
+    "a seat mid-match is grantable only while the AI drives it, whichever door asks (#116)",
+);
+assert.equal(
+    refused_mid.queued,
+    true,
+    "and a client that cannot fit waits rather than being refused",
+);
+
+// Quick Join ranks rooms with the same function, which is why the rule lives in it: a room
+// whose free seats cannot be granted does not fit, and the client gets one of its own
+// rather than landing in this one holding nothing and never being told why (#44, #116).
+const passer_by = connect({ type: "quick", names: ["Nix"] });
+const passer_joined = await lobby(passer_by);
+assert.notEqual(passer_joined.id, "MDGRD", "a room it could not be seated in is not one that fits");
+assert.deepEqual(passer_joined.held, [0], "so Quick Join answers with a room of its own, seated");
+passer_by.socket.close();
+
+// Thirty missing ticks later those bunnies really are the AI's, which is the one moment
+// mid-match a seat becomes grantable: the queue is served there rather than left waiting
+// for a `leave` that may never come (#44).
+for (let t = 0; t <= 34; t++)
+    guard.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key, 1: pressed_key } });
+await until_seen(
+    guard_saw,
+    (msg) => msg.type === "driver" && msg.seat === 3 && msg.driver === "ai",
+    "the seats their holder let go to become the AI's",
+);
+await new Promise((resolve) => setTimeout(resolve, 100));
+// The room as this client was last told it, rather than the next update that happens to
+// mention it: a waitlist left unserved goes on broadcasting, and waiting for a grant that
+// never comes is a timeout rather than an answer.
+const served_mid = quitter.events.filter((msg) => msg.type === "room").pop();
+assert.deepEqual(
+    served_mid.held,
+    [2, 3],
+    "and the waitlist is served the moment they are: the seats go to the client that waited",
+);
+assert.equal(served_mid.queued, false, "which is what takes it out of the queue");
+
+// And the table that match leaves behind says nothing about the lobby: there is no match
+// to be a bunny's driver in, so every seat nobody holds is grantable again.
+guard.socket.send({ type: "match_end", reason: "host_left", matrix: new Array(16).fill(0) });
+await quitter.until((msg) => msg.type === "room" && !msg.started);
+quitter.socket.send({ type: "leave" });
+await quitter.until((msg) => msg.type === "room" && !msg.held.length);
+quitter.socket.send({ type: "seats", names: ["Cid", "Dot"] });
+const relobbied = await quitter.until(
+    (msg) => msg.type === "error" || (msg.type === "room" && (msg.queued || msg.held.length)),
+);
+assert.deepEqual(relobbied.held, [2, 3], "in the lobby, every free seat is grantable as before");
+guard.socket.close();
+quitter.socket.close();
+
 // Quick Join: one round trip, and the answer is a seat. The room it picks is the listed,
 // unlocked one with the fewest free seats that still takes the whole client -- a match in
 // progress before a lobby, oldest breaking ties -- and when nothing fits, a room of its own
@@ -1888,7 +2199,7 @@ globalThis.WebSocket = class extends Native_WebSocket {
 const parse = await two_seats("PARSE");
 globalThis.WebSocket = Native_WebSocket;
 raw.onmessage({ data: "{" });
-parse.host.socket.send({ type: "input", t: 9, seats: { 0: pressed_key } });
+parse.host.socket.send({ type: "input", match: 1, t: 9, seats: { 0: pressed_key } });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.ok(
     parse.guest_saw.some((msg) => msg.type === "input" && msg.t === 9),

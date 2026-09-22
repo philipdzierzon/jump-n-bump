@@ -70,6 +70,18 @@ export function Room(transport, read_input) {
     // on the first kill (#12, #5).
     this.d = 0;
     this.seed = 0;
+    // Which match of the room this is, counted by the relay from 1 and stamped back on
+    // every frame this client sends: a frame that crossed the start of the next match is
+    // refused there rather than believed (#122). Kept across `match_end`, because a match
+    // that is over is still the match this client was last in -- which is what tells a
+    // `start` for it from one that begins the next.
+    //
+    // Two things it does not say. Zero until the first `start`, so a page that opens into a
+    // match already running sees a number above its own on the first `start` it ever gets:
+    // "not the match I am in" rather than "the match after it". And the relay counts one per
+    // `begin` while the loopback counts one per `start` it is sent, which are the same number
+    // only because a local room has no countdown to begin a match without one.
+    this.match = 0;
     this.settings = {};
     // The host's packed simulation state, when this `start` is one that joins a match
     // already running or replaces a state that has gone wrong -- one payload, two
@@ -107,6 +119,7 @@ export function Room(transport, read_input) {
                 // for that same tick is a message for a tick already stepped past (#34).
                 drivers = msg.drivers.slice();
                 self.d = msg.d;
+                self.match = msg.match;
                 self.seed = msg.seed;
                 self.settings = msg.settings;
                 held = msg.held;
@@ -129,6 +142,19 @@ export function Room(transport, read_input) {
                 if (self.on_start) self.on_start(msg);
                 break;
             case "input":
+                // Above the guard below, not after it: `arrived` is what the wire delivered
+                // to this client, so a frame that guard refuses is counted here and
+                // scheduled nowhere -- the relay counts its own refusal of that same frame
+                // as `forged`, and a client that counted it nowhere would be silent about
+                // what the relay is loud about. Measured on arrival rather than on use for
+                // the reason #70 gives: this is the only moment the wire trip and the
+                // sender's own lateness are both visible. So it counts what was seen, which
+                // is the convention the relay's `desyncs` keeps (#118, #126) -- a frame for
+                // a seat the room has since handed to the AI is counted here and deleted in
+                // `step()` (#110) too. `late` and `late_by` below are strict subsets of it,
+                // counted on the same arrival; `substituted` and `holes` are measured on
+                // use in `step()` and are not fractions of it at all.
+                stats.arrived++;
                 // A tick this client could not reach if it replayed for a whole minute, so
                 // it is not a frame. `newest` is what `gap()` reads as the room's position,
                 // and `pump` sprints while that gap is positive, so one client stamping a
@@ -136,9 +162,6 @@ export function Room(transport, read_input) {
                 // match (#51, #71). The relay bounds the same frame since #82; this bound
                 // stays because the loopback transport has no relay in front of it.
                 if ((msg.t | 0) - tick > MAX_CATCH_UP) break;
-                // Measured on arrival rather than on use: this is the only moment the wire
-                // trip and the sender's own lateness are both visible (#70).
-                stats.arrived++;
                 var margin = (msg.t | 0) - tick;
                 if (margin < 0) {
                     stats.late++;
@@ -289,7 +312,7 @@ export function Room(transport, read_input) {
             // trip; never echoed back to its sender, so this client schedules its own
             // (#12, #6).
             schedule_input(tick + self.d, seats);
-            transport.send({ type: "input", t: tick + self.d, seats: seats });
+            transport.send({ type: "input", match: self.match, t: tick + self.d, seats: seats });
             // On the same tick on every client, and from the same point in it: the state
             // hashed here is every tick before this one applied and none of this one, which
             // is a state each client reaches in its own time and all of them agree on. Not
