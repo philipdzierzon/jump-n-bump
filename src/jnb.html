@@ -142,6 +142,7 @@
             <button class="sm grow" data-bind="click: go_browse">Browse rooms</button>
             <button class="sm grow" data-bind="click: play_offline">Play offline</button>
         </div>
+        <p class="err" data-bind="text: error"></p>
     </div>
 
     <div data-bind="visible: screen() === 'create'" class="kiosk">
@@ -224,7 +225,7 @@
         <p class="muted" data-bind="visible: countdown">Starting in <span data-bind="text: countdown"></span>s. Anyone not ready by then gives up their seats.</p>
         <button class="pri" data-bind="visible: is_host, click: start_match, enable: !loading_level() &amp;&amp; !countdown()">Start the match</button>
         <button class="sm" data-bind="visible: is_host() &amp;&amp; countdown(), click: cancel_countdown">Cancel the countdown</button>
-        <p class="muted" data-bind="visible: !is_host()">Waiting for the host to start.</p>
+        <p class="muted" data-bind="text: waiting_text, visible: !is_host()"></p>
         <details>
             <summary class="muted">Room settings</summary>
             <fieldset data-bind="enable: is_host">
@@ -278,8 +279,8 @@
                 <button class="sm" data-bind="click: $parent.join_listed">Join</button>
             </li>
         </ul>
-        <p class="muted" data-bind="visible: !rooms().length">Nothing public right now &mdash; make one, or join by its code.</p>
-        <p class="err" data-bind="text: error"></p>
+        <p class="muted" data-bind="visible: !rooms().length &amp;&amp; !rooms_error()">Nothing public right now &mdash; make one, or join by its code.</p>
+        <p class="err" data-bind="text: rooms_error() || error()"></p>
         <button class="pri" data-bind="click: go_create">Create a room</button>
         <button class="sm" data-bind="click: refresh_rooms">Refresh</button>
         <button class="sm" data-bind="click: go_landing">Back</button>

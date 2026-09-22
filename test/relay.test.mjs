@@ -491,6 +491,12 @@ assert.deepEqual(
     "but the board keeps the name of whoever last held it: a seat-keyed column of bumps " +
         "still needs a heading, and a seat nobody ever took has none of its own (#13, #39)",
 );
+assert.equal(
+    vacated.host_seat,
+    0,
+    "and the room names the seat its host is on, so a client that is not the host can say " +
+        "which of four names it is waiting for (#88)",
+);
 await new Promise((resolve) => setTimeout(resolve, 100));
 const short_handed = gate_saw.filter((msg) => msg.type === "start").pop();
 assert.deepEqual(
