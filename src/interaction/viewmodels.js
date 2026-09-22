@@ -1086,6 +1086,16 @@ function ViewModel() {
         if (self.error() !== carried) self.error("");
         else if (carried) self.error.valueHasMutated();
         carried = "";
+        // The lobby's own line gets the same re-touch, for the client walking out of the
+        // match it played: that board is counted by `end_match` above, one route before the
+        // pane that reports it, so the text lands behind the match screen where no live
+        // region can be heard. (A client that watched the match end from the lobby takes no
+        // route at all and is already looking at the region -- that one is the markup's to
+        // answer, jnb.html.) `result_text` is a computed whose value has not changed by now,
+        // so the notification is the whole of what this does: there is nothing new to write,
+        // and re-writing the same text is what re-fires the region (#90, #128).
+        if (route.screen === "room" && self.board())
+            self.result_text.notifySubscribers(self.result_text());
         if (route.screen === "browse") self.refresh_rooms();
         if (route.screen === "password" && !self.pending_id()) return go("landing", true);
         if (route.screen === "room" || route.screen === "play")
@@ -1191,6 +1201,11 @@ function ViewModel() {
     // `create` with a blank id asks the relay to generate one, and is refused honestly if
     // the id the host chose is already taken (#8).
     this.create_room = function () {
+        // The in-flight guard #89 spelled as a binding on the button. Here rather than
+        // there because a `disabled` button is out of the tab order, and leaving it there
+        // cost the keyboard player the focus mid-connect (#120); the room above still only
+        // ever gets one socket per press.
+        if (self.connecting()) return;
         var id = self.code() ? normalise_room_id(self.code()) : "";
         if (self.code() && !id) return self.error(CODE_HINT);
         connect({ type: "create", id: id, listed: self.listed() });
@@ -1203,6 +1218,7 @@ function ViewModel() {
         go(id);
     };
     this.submit_password = function () {
+        if (self.connecting()) return;
         connect({
             type: "join",
             id: self.pending_id(),
@@ -1234,6 +1250,7 @@ function ViewModel() {
     // Offline the seats are simply the ones on this keyboard; online they are the relay's
     // to grant, all-or-nothing, against names it checks for collisions (#7, #14).
     this.take_seats = function () {
+        if (self.connecting()) return;
         // Back onto the names screen and forward again: the seats are already granted, and
         // a client's count is fixed for the room's lifetime (#14).
         if (granted().length) return go("room");

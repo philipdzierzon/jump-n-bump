@@ -71,6 +71,7 @@ const room_q = new_room_id();
 const room_r = new_room_id();
 const room_s = new_room_id();
 const room_t = new_room_id();
+const room_u = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -357,6 +358,11 @@ const err_on = (name, root = page) => text(screen(name, root).locator("p.err"));
 const banner = (root = page) => screen("room", root).locator("div.banner");
 const board_panel = (root = page) =>
     screen("room", root).locator('div[data-bind*="visible: board"]');
+// The line above that board: how the last match ended (#39). Outside the panel now, because
+// a live region hidden by its wrapper at the moment its text lands is never announced -- so
+// it is found by its own binding rather than by what it sits in (#128).
+const RESULT_LINE = 'div[data-bind*="screen() === \'room\'"] p[data-bind*="text: result_text"]';
+const result_line = (root = page) => root.locator(RESULT_LINE);
 const level_select = (root = page) => screen("room", root).locator("select");
 const level_options = (root = page) =>
     level_select(root)
@@ -382,6 +388,58 @@ const relay_client = (entry, seen) =>
         (msg) => seen.push(msg),
         (code) => seen.push({ type: "error", code }),
     );
+
+// Whether a live region really announced, which is not the same question as whether it is
+// there: a region is announced on a change while it is in the page, never on being revealed
+// with the message already inside it (#88, #90) -- and #90 found one that was present and
+// never announced. One write of the region, one entry: `[text now, in the page, what this
+// write replaced]`.
+//
+// Two of those three readings only mean something together with a fourth taken from outside:
+// `isVisible()` on the empty region at a moment the text demonstrably has not landed yet,
+// which is what rules the reveal case out. The `visible` flag here cannot do that job on its
+// own -- the observer's callback runs at the end of the turn, so a write that landed behind
+// a hidden pane and a write that landed in front of a player read the same when the write
+// and the reveal share a turn. What the write replaced does discriminate one case: a region
+// re-touched with the text it already had is a deliberate re-fire once the pane is up (#90's
+// `valueHasMutated` trick), and that never happens by accident.
+//
+// Installed on the page as it stands, or through `addInitScript` when the write is expected
+// during a load (#88, #120, #128).
+function record_region(selector) {
+    window.__said = window.__said || {};
+    const said = (window.__said[selector] = []);
+    const attach = () => {
+        const node = document.querySelector(selector);
+        if (!node) return false;
+        // Per record rather than per callback: two writes in one turn arrive in one callback,
+        // and "written again" is the whole claim in the re-fire case.
+        new MutationObserver((records) =>
+            records.forEach((record) =>
+                said.push([
+                    node.textContent.replace(/\s+/g, " ").trim(),
+                    !!node.offsetParent,
+                    record.oldValue,
+                ]),
+            ),
+        ).observe(node, {
+            childList: true,
+            characterData: true,
+            characterDataOldValue: true,
+            subtree: true,
+        });
+        return true;
+    };
+    // Scoped to the one node, never the document: an unrelated mutation elsewhere while the
+    // pane happens to be visible proves nothing about this region. The bootstrap is for the
+    // reload case alone, where the node is not parsed yet when this runs.
+    if (!attach()) {
+        const bootstrap = new MutationObserver(() => attach() && bootstrap.disconnect());
+        bootstrap.observe(document, { childList: true, subtree: true });
+    }
+}
+const watch_region = (root, selector) => root.evaluate(record_region, selector);
+const said_when = (root, selector) => root.evaluate((sel) => window.__said[sel] || [], selector);
 
 // What the next key would go to. `BODY` is the bug (#90): a screen change that leaves focus
 // on the document makes a keyboard player tab down from the top of the page again.
@@ -582,8 +640,26 @@ async function walk() {
     await page.keyboard.press("p");
     await until("the board to go", async () => !(await overlay().isVisible()));
 
+    // #128, the half this walk is in a position to see: the board of a match you played is
+    // counted on the way out of it (`end_match`), which is one route before the lobby that
+    // shows it -- so the text lands behind the play screen, where no live region can be
+    // heard. Both writes happen in the one `apply_route` turn, so the `visible` flag reads
+    // true for both; the second one is told by what it replaced, which is the text the first
+    // one had already put there.
+    await watch_region(page, RESULT_LINE);
     await click("Back to the lobby");
     await on("room");
+    const heard = await said_when(page, RESULT_LINE);
+    assert.ok(
+        heard.some(
+            ([what, visible, replaced]) =>
+                visible && what === "The host ended the match." && replaced === what,
+        ),
+        "the lobby gets a write of its own: the line is re-touched with the text it already " +
+            "had, once the pane that shows it is up -- without it the only time this region " +
+            "ever changed was behind the match screen (#90, #128): " +
+            JSON.stringify(heard),
+    );
     assert.ok(
         await board_panel().isVisible(),
         "the board of the match you just left is the lobby's, not a screen of its own (#13, #35)",
@@ -603,7 +679,7 @@ async function walk() {
         "the lobby's last-match board names every seat",
     );
     assert.equal(
-        await text(board_panel().locator("p.banner")),
+        await text(result_line()),
         "The host ended the match.",
         "with one line above it saying how it ended, and no end-of-match screen (#39)",
     );
@@ -889,7 +965,7 @@ async function walk() {
     });
     await until("the announced board", () => board_panel().isVisible());
     assert.equal(
-        await text(board_panel().locator("p.banner")),
+        await text(result_line()),
         "Chief wins with 1 bump.",
         "a client that never played the match still gets its board, because the host sent one",
     );
@@ -1157,7 +1233,7 @@ async function self_ending_match() {
     // is `router.test.mjs`'s. What a browser is here to prove is that the match ended on its
     // own and the lobby said how.
     assert.match(
-        await text(board_panel(clock_page).locator("p.banner")),
+        await text(result_line(clock_page)),
         /^(Nobody scored\.|.+ (wins with \d+ bumps?|draw at \d+ bumps)\.)$/,
         "the time limit ends the match by itself, and the line above the board says how",
     );
@@ -1512,7 +1588,7 @@ async function two_pages() {
         ["guest", guest],
     ])
         assert.equal(
-            await text(board_panel(root).locator("p.banner")),
+            await text(result_line(root)),
             "The host ended the match.",
             "and on one account of how it ended, the " + who + "'s included",
         );
@@ -1951,9 +2027,13 @@ async function queueing() {
 // on answering the relay's pings, holding a room up in the public list with a host that
 // would never leave.
 async function double_click_create() {
-    // AC1's own claim, independent of the guard below: the button disables itself on the
-    // click that opens the socket, not on however long the answer takes -- Knockout's
-    // `enable` binding writes `disabled` synchronously inside the click handler's own turn.
+    // AC1's own claim, independent of the guard below: the button says it is unavailable on
+    // the click that opens the socket, not on however long the answer takes -- Knockout's
+    // `attr` binding writes `aria-disabled` synchronously inside the click handler's own
+    // turn. `aria-disabled` and not `disabled` since #120: a disabled control leaves the tab
+    // order and takes the keyboard player's focus with it. Reading the other attribute is
+    // not evidence the new behaviour works -- where the focus went is, and that is
+    // `connecting_keeps_focus` below.
     // Its own page: a single click here is a real room, left up rather than raced with the
     // double-click below.
     //
@@ -1971,9 +2051,9 @@ async function double_click_create() {
     await on("create", solo);
     await click("Create", solo);
     assert.equal(
-        await disabled(button("Create", solo)),
-        true,
-        "the button disables on the click itself, not on the relay's answer (#89)",
+        await button("Create", solo).getAttribute("aria-disabled"),
+        "true",
+        "the button reads as unavailable on the click itself, not on the relay's answer (#89)",
     );
     await on("names", solo);
 
@@ -1988,10 +2068,11 @@ async function double_click_create() {
     // relay generates one per create, so two clicks with a code of their own would collide
     // on the second rather than make a second room.
     await screen("create", dbl).locator('input[type="checkbox"]').check();
-    // Not two clicks: the second would fail Playwright's own enabled check and report a
-    // timeout instead of the thing under test. A double-click is what a player does, and it
-    // is dispatched without re-checking in between -- so the button really is asked twice,
-    // and what refuses the second one is the page.
+    // A double-click is what a player does, and it is dispatched without re-checking in
+    // between -- so the button really is asked twice, and what refuses the second one is the
+    // page. Since #120 it is the guard at the top of `create_room` that refuses it: an
+    // `aria-disabled` button is still a button as far as the DOM and Playwright are
+    // concerned, which is exactly why the guard had to move out of the binding.
     await button("Create", dbl).dblclick();
     await on("names", dbl);
     // Proving something did not happen, which is the one place a fixed wait is right.
@@ -2415,6 +2496,19 @@ async function late_resume_from_the_lobby() {
     await seats(guest).nth(0).locator("input").blur();
     await click("Take the seats", guest);
     await on("room", guest);
+    // #128: the client that watches a match end from the lobby is the one this region is
+    // for -- it never saw the match, and the result is the whole of what it is told. Read
+    // here, before the match it will describe has ended: empty, and already laid out, which
+    // is the half a live region cannot be announced without. The panel around it used to
+    // toggle with the board, so the text landed inside a hidden wrapper and was never read
+    // out (#88, #90, #128).
+    assert.equal(await text(result_line(guest)), "", "no last match to report yet");
+    assert.ok(
+        await result_line(guest).isVisible(),
+        "and the region is already in the page: a live region is announced on a change while " +
+            "it is there, never on being revealed with the message already inside it (#128)",
+    );
+    await watch_region(guest, RESULT_LINE);
     // Seated into a running match, so the page asks to be let into it by itself, and the
     // answer walks straight into the frozen level fetch.
     await until("the relay's resume, stuck on the level", () => wire.includes("start"));
@@ -2422,6 +2516,13 @@ async function late_resume_from_the_lobby() {
     await click("Back to the lobby", host);
     await on("room", host);
     await until("the guest's board", () => board_panel(guest).isVisible());
+    const told = await said_when(guest, RESULT_LINE);
+    assert.ok(
+        told.some(([what, visible]) => visible && what === "The host ended the match."),
+        "and it is told so out loud: the result lands in a region that was already there, " +
+            "which is what a screen reader reads out (#128): " +
+            JSON.stringify(told),
+    );
     assert.deepEqual(
         wire,
         ["start", "match_end"],
@@ -2938,26 +3039,8 @@ async function reload_into_a_dead_room() {
     // their own. Cheapest live-region observation point in the suite: a real reload, not the
     // #42 socket-drop rig. `addInitScript` because the reload below is a fresh document, so
     // anything attached after it would be gone before the mutation it is here to see.
-    await gone.addInitScript(() => {
-        window.__when = [];
-        const sel = "div[data-bind*=\"screen() === 'landing'\"] p.err";
-        // A bootstrap observer just to catch the node existing (it is static markup, present
-        // before Knockout binds anything), then the real one is scoped to that node alone --
-        // watching the whole document would also fire on an unrelated mutation elsewhere
-        // once the pane happens to be visible, which proves nothing about this node.
-        const attach = () => {
-            const p = document.querySelector(sel);
-            if (!p) return false;
-            new MutationObserver(() =>
-                window.__when.push([p.textContent, !!p.offsetParent]),
-            ).observe(p, { childList: true, characterData: true, subtree: true });
-            return true;
-        };
-        if (!attach()) {
-            const bootstrap = new MutationObserver(() => attach() && bootstrap.disconnect());
-            bootstrap.observe(document, { childList: true, subtree: true });
-        }
-    });
+    const landing_error = "div[data-bind*=\"screen() === 'landing'\"] p.err";
+    await gone.addInitScript(record_region, landing_error);
 
     await gone.goto(origin + "/");
     await gone.evaluate(
@@ -2973,7 +3056,7 @@ async function reload_into_a_dead_room() {
         "a reload into a room that will not have it back says so, rather than dropping the " +
             "player on a silent title screen (#88)",
     );
-    const when = await gone.evaluate(() => window.__when);
+    const when = await said_when(gone, landing_error);
     assert.ok(
         when.some(([shown, visible]) => visible && shown.includes("would not")),
         "the message is re-touched once its pane is visible, not left silent behind the " +
@@ -3317,7 +3400,7 @@ async function keyboard_only() {
     // covers the other eight.
     const LIVE = [
         "text: connection_text", // the match's reconnect line
-        "visible: pending_id", // Connecting...
+        "text: connecting()", // Connecting...
         "visible: match_running", // the names screen's
         "visible: disconnected", // connection lost
         "visible: staged_text", // the host staged a change
@@ -3641,6 +3724,177 @@ async function error_dies_with_its_match() {
     assert.deepEqual(errors, [], "and neither page threw on the way through");
 }
 
+// --- a connect keeps the focus it was given (#120) ---------------------------------------
+// The three controls that open a socket gated themselves with Knockout's `enable`, which is
+// the DOM `disabled` property -- and a disabled element leaves the tab order, so the
+// keyboard player who had just pressed it lost their place mid-connect with nothing
+// announced. They say `aria-disabled` now, which reads as unavailable and keeps the control
+// where the player left it, and the in-flight guard that #89 spelled as a binding moved into
+// the handler. What "lost their place" means is browser-specific, and the assertions below
+// are written against what this one does -- see `activate`.
+//
+// Last in the run: the names screen's button only gates a socket on the Quick Join path, and
+// Quick Join sits down in the tightest room on the relay -- which by this point is some
+// other section's. Nothing here asserts which room it landed in, and nothing after it
+// asserts on a room it may have taken a seat in.
+async function connecting_keeps_focus() {
+    const slow = await (await make_context("connecting")).newPage();
+    const errors = [];
+    slow.on("pageerror", (error) => errors.push(error.message));
+    // Every handshake this page sends, one per socket it opens (`WebSocket_Transport` sends
+    // its entry message on open): an activation that opened a second socket shows up here as
+    // a second entry whether or not the relay would have answered it, which is the #89
+    // property read at the wire rather than off the public room list.
+    const entries = [];
+    slow.on("websocket", (ws) =>
+        ws.on("framesent", ({ payload }) => {
+            try {
+                const msg = JSON.parse(String(payload));
+                if (["create", "join", "quick"].includes(msg.type)) entries.push(msg.type);
+            } catch (e) {
+                // Not an entry message. The relay's own parse guards the same way.
+            }
+        }),
+    );
+    // double_click_create's stall, a second longer: the relay is in-process and local, so an
+    // unslowed round trip answers before the test can look inside the window under test --
+    // and every assertion below is made while the socket is still opening.
+    await slow.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        relay.onMessage((frame) => setTimeout(() => ws.send(frame), 2000));
+    });
+
+    // One control, pressed by key with the focus on it, and read while its socket is opening.
+    const activate = async (label) => {
+        await tab_to(label, slow);
+        const was = await focused(slow);
+        const before = entries.length;
+        await slow.keyboard.press("Enter");
+        assert.equal(
+            await button(label, slow).getAttribute("aria-disabled"),
+            "true",
+            label + " reads as unavailable while its socket opens (#120)",
+        );
+        assert.equal(
+            await focused(slow),
+            was,
+            "and the player who pressed " + label + " still has the focus (#120)",
+        );
+        // The reading that actually tells the two states apart in this browser. Measured:
+        // Chromium does *not* blur an element that becomes `disabled` -- `activeElement`
+        // stays on it, unlike Firefox and WebKit -- so the assertion above passes either way
+        // here and is a guard against something else stealing the focus, not evidence for
+        // this fix. What Chromium does do is take a disabled control out of the tab order:
+        // tab off it and back, and the focus lands past it, one control further on, which is
+        // the keyboard player losing their place mid-connect (#120).
+        await slow.keyboard.press("Shift+Tab");
+        await slow.keyboard.press("Tab");
+        assert.equal(
+            await focused(slow),
+            was,
+            label +
+                " keeps its place in the tab order while its socket opens: a disabled " +
+                "control is skipped, so the next Tab goes past it (#120)",
+        );
+        // The other half, and the reason the binding could not simply be dropped: with the
+        // control still live, a second press has to be refused by the handler (#89). Two
+        // readings, because the three handlers do different damage when they run twice: a
+        // second `create` or `submit_password` opens a second socket, while a second
+        // `take_seats` finds `quick` already spent and walks the client into a local room of
+        // its own instead -- no socket, and the wrong lobby.
+        const where = await hash(slow);
+        await slow.keyboard.press("Enter");
+        await settle();
+        assert.equal(
+            entries.length - before,
+            1,
+            "a second press of " + label + " while connecting opens no second socket (#89)",
+        );
+        assert.equal(
+            await hash(slow),
+            where,
+            "and a second press of " +
+                label +
+                " moves this client nowhere: what moves it is the answer to the first (#89)",
+        );
+    };
+
+    // 1. Take the seats, on the one path where it opens a socket of its own (#44).
+    await slow.goto(origin + "/");
+    await click("Quick Join", slow);
+    await on("names", slow);
+    await slow.keyboard.press("ArrowUp");
+    await until("a participant to join with", async () => (await seats(slow).count()) === 1);
+    // A name of its own: the room Quick Join picks is whichever one is tightest, and a
+    // default bunny name already taken in it is a refusal rather than a connect.
+    await seats(slow).nth(0).locator("input").fill("Quik");
+    await seats(slow).nth(0).locator("input").blur();
+    await activate("Take the seats");
+    await on("room", slow);
+
+    // 2. Create, in a room of this section's own -- and the password it is given below is
+    //    what makes the password screen's Continue reachable at step 4.
+    await click("Leave", slow);
+    await on("landing", slow);
+    await click("Create a room", slow);
+    await on("create", slow);
+    await slow.keyboard.type(room_u);
+    await activate("Create");
+    await on("names", slow);
+    await slow.keyboard.press("ArrowUp");
+    await until("a participant", async () => (await seats(slow).count()) === 1);
+    await click("Take the seats", slow);
+    await on("room", slow);
+
+    // A keeper, so the room outlives the Leave below: a room dies with its last client.
+    const keeper_saw = [];
+    const keeper = relay_client({ type: "join", id: room_u }, keeper_saw);
+    await until("the keeper in the room", () => keeper_saw.some((msg) => msg.type === "joined"));
+    await open_settings(slow);
+    await password_box(slow).fill("hunter2");
+    await click("Set it now", slow);
+    await until("the password to be set", async () => (await notice(slow)) === "Password set.");
+    await click("Leave", slow);
+    await on("landing", slow);
+
+    // 3. The Connecting... line, which is the announcement the two gating screens' controls
+    //    do not make for themselves. It was revealed with its text already inside it, which
+    //    is the one thing a live region is never announced on (#88, #90).
+    await click("Join with a room code", slow);
+    await on("join", slow);
+    const connecting_line = 'div[data-bind*="screen() === \'join\'"] p[role="status"]';
+    const line = screen("join", slow).locator('p[role="status"]');
+    assert.equal(await text(line), "", "nothing said yet");
+    assert.ok(
+        await line.isVisible(),
+        "and the Connecting... region is already in the page, laid out empty: a live region " +
+            "is announced on a change while it is there, never on being revealed with the " +
+            "message already inside it (#88, #90, #120)",
+    );
+    await watch_region(slow, connecting_line);
+    await slow.keyboard.type(room_u);
+    await slow.keyboard.press("Enter");
+    await on("password", slow);
+    const said = await said_when(slow, connecting_line);
+    assert.ok(
+        said.some(([what, visible]) => what === "Connecting…" && visible),
+        "and the connect is announced through it -- the text lands in a region that was " +
+            "already there, which is what a screen reader reads out (#120): " +
+            JSON.stringify(said),
+    );
+
+    // 4. Continue, on the password screen, with a password that is right: the relay's answer
+    //    is what ends the window the assertions above are made inside.
+    assert.equal(await err_on("password", slow), FLOW_TEXT.not_accepted);
+    await slow.keyboard.type("hunter2");
+    await activate("Continue");
+    await on("names", slow);
+
+    assert.deepEqual(errors, [], "and the page threw nothing on the way through");
+    keeper.close();
+    await slow.close();
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -3668,6 +3922,7 @@ try {
     await late_resume_from_the_lobby();
     await phone();
     await keyboard_only();
+    await connecting_keeps_focus();
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
             "two pages agree on one room, the mp3s really play, and the page fits a phone",
