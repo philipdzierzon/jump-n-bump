@@ -68,6 +68,7 @@ const room_n = new_room_id();
 const room_o = new_room_id();
 const room_p = new_room_id();
 const room_q = new_room_id();
+const room_r = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -2230,6 +2231,11 @@ async function late_resume() {
     let hold = false;
     let held = null;
     let released = 0;
+    // Where the page was at the moment the frame went in. "Inside the hold" is the whole
+    // premise, and `released` alone cannot say it: a box slow enough to push the 100ms below
+    // past the two-second hold would have walked the client to the lobby by itself, and
+    // every other assertion here would pass with the bug still in place.
+    let at_release = null;
     await guest.routeWebSocket(/\/ws/, (ws) => {
         const relay = ws.connectToServer();
         ws.onMessage((frame) => relay.send(frame));
@@ -2241,7 +2247,8 @@ async function late_resume() {
             // and the walk this is meant to cancel would already have happened by itself,
             // which would pass whatever the client did with the frame.
             if (msg.type === "match_end" && held)
-                setTimeout(() => {
+                setTimeout(async () => {
+                    at_release = await hash(guest).catch(() => null);
                     released++;
                     ws.send(held);
                 }, 100);
@@ -2296,7 +2303,12 @@ async function late_resume() {
     // itself back after the moment the last frame is held for (#39). The resume released
     // inside that hold must not cancel the walk.
     const walked = await reaches(guest, "#room");
-    assert.equal(released, 1, "the held resume really was delivered, and after the match_end");
+    assert.deepEqual(
+        [released, at_release],
+        [1, "#play"],
+        "the held resume really was delivered, after the match_end and while the client was " +
+            "still on the frozen frame -- which is the hold this is supposed to happen inside",
+    );
     // Both halves of the criterion in one claim, because they are one: the build is what
     // reaches `on_match_start`, and `on_match_start` is what cancels the walk. `built` is
     // still at the one line the join above printed, and the client got to the lobby.
@@ -2320,6 +2332,123 @@ async function late_resume() {
         [5, 0, 1, "Total deaths"],
         "and it ends up looking at the board of the match it played, not at a match screen " +
             "nobody else is in (#124, #13)",
+    );
+
+    assert.deepEqual(errors, [], "with nothing thrown on either page");
+}
+
+// The other route into #124, and the other ordering. Here the `resume` arrives *before* the
+// `match_end` -- which is the only order the relay can actually produce, since `to_lobby()`
+// clears `room.started` before it broadcasts and `resume()` refuses on `!room.started`, over
+// one FIFO socket -- and what lands late is the *build*: `room.on_start` fetches the level
+// before it can build anything, and a cold `.dat` is the one thing in that path that takes
+// real time. The match ends inside the fetch.
+//
+// The client is the one the issue's second route names: it is in the lobby, not on the match
+// screen, so its `to_lobby_soon` returns early and it never arms a walk at all. It is also a
+// first-ever `start`, which is where reading the match number at `match_end` rather than at
+// `start` is what makes the guard fire: this page's `room.match` was 0 until the payload
+// arrived and set it to the match that is now over.
+//
+// What closes this route today is not the new guard. `match_end` on a lobby client routes
+// through `apply_route` -> `end_match` -> `Game_Session.stop()`, whose `starting++` cancels
+// the pending build outright, so the payload never reaches `build` at all. The guard is the
+// second line, and the mutation matrix in the PR body says which cell is which. This test
+// pins the route the issue asked to have confirmed either way.
+async function late_resume_from_the_lobby() {
+    const host = await (await make_context("cold-host")).newPage();
+    const guest = await (await make_context("cold-guest")).newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+    const built = [];
+    guest.on("console", (msg) => {
+        if (msg.text().startsWith("%s at tick %d: gap %d ticks")) built.push(msg.text());
+    });
+    // The two messages this is about, in the order the page was given them. Read off the
+    // wire rather than inferred, because the ordering *is* the claim.
+    const wire = [];
+    guest.on("websocket", (ws) =>
+        ws.on("framereceived", ({ payload }) => {
+            const msg = JSON.parse(String(payload));
+            if (msg.type === "start" && msg.snapshot) wire.push("start");
+            if (msg.type === "match_end") wire.push("match_end");
+        }),
+    );
+    // The level, held from before the page loads. `get_level` caches the promise, not the
+    // bytes, so the lobby's own `preload` and the `start`'s own ask are one pending fetch --
+    // which is why this stalls the build rather than merely delaying a second request. The
+    // archive alone, not `**/levels/**`: the default level's two PNGs are `<img>` tags in the
+    // page, and holding those holds the `load` event this test navigates through.
+    let thaw;
+    const frozen = new Promise((resolve) => (thaw = resolve));
+    await guest.route("**/caves.dat", async (route) => {
+        await frozen;
+        await route.continue();
+    });
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_r);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    // A `.dat`, because the default level resolves without a fetch and there would be
+    // nothing to stall.
+    await open_settings(host);
+    await level_select(host).selectOption("caves");
+    await click("Apply to the next match", host);
+    await click("Start the match", host);
+    await on("play", host);
+
+    await guest.goto(origin + "/#" + room_r);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    // Seated into a running match, so the page asks to be let into it by itself, and the
+    // answer walks straight into the frozen level fetch.
+    await until("the relay's resume, stuck on the level", () => wire.includes("start"));
+
+    await click("Back to the lobby", host);
+    await on("room", host);
+    await until("the guest's board", () => board_panel(guest).isVisible());
+    assert.deepEqual(
+        wire,
+        ["start", "match_end"],
+        "the resume landed first and the end after it, which is the order the relay really " +
+            "sends them in -- what is late here is the build, not the payload (#124)",
+    );
+
+    // The bytes, at last. Awaited, so what follows is measured against a fetch that finished
+    // rather than one still hanging.
+    const served = guest.waitForResponse((res) => /caves\.dat/.test(res.url()));
+    thaw();
+    await served;
+    // Three seconds for a decode that takes milliseconds: with the payload built, the page
+    // routes itself to the match screen, and this is the wait that would see it.
+    const went_to_play = await reaches(guest, "#play", 3000);
+    assert.deepEqual(
+        [went_to_play, built.length, await hash(guest)],
+        [false, 0, "#room"],
+        "a resume whose level arrives after the match has ended builds nothing and moves " +
+            "this client nowhere: it is in the lobby it never left (#124)",
+    );
+    const names = (await grid(board_panel(guest)))
+        .slice(1)
+        .map((row) => row[0].replace(" (AI)", ""));
+    assert.deepEqual(
+        [names.length, names.indexOf("Dott"), names[4]],
+        [5, 0, "Total deaths"],
+        "and it is looking at the board of the match it was joining, which is where a " +
+            "client that watched one end from the lobby belongs (#13, #39)",
     );
 
     assert.deepEqual(errors, [], "with nothing thrown on either page");
@@ -3303,6 +3432,7 @@ try {
     await superseded_create_closes();
     await rejoin_fails();
     await late_resume();
+    await late_resume_from_the_lobby();
     await phone();
     await keyboard_only();
     console.log(

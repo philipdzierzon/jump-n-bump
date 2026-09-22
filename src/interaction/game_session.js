@@ -305,6 +305,13 @@ export function Game_Session(get_level, config, muted, transport) {
         // gap guard beside it cannot catch this: #84 made `gap()` return 0 past a match end
         // on purpose, so it reads 0 here and always will. A `start` that begins the next
         // match carries a higher number and is refused by none of this (#122).
+        //
+        // A `match_end` does not always mean the room's match is over, mind: the relay sends
+        // one to a single client when it gives up repairing it (`desync` in
+        // `server/index.js`), while everybody else plays on. Refusing that client a resume
+        // for this match is right anyway -- it is the one the relay has stopped repairing,
+        // and `resume()` returns early for it from then on -- and the lobby it walks back to
+        // builds it a session of its own, counting from zero again (#41).
         var t0 = performance.now();
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
         var gap = room.gap();
