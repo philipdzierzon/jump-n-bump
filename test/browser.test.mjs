@@ -65,6 +65,7 @@ const room_k = new_room_id();
 const room_l = new_room_id();
 const room_m = new_room_id();
 const room_n = new_room_id();
+const room_o = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -136,6 +137,13 @@ async function make_context(name, options) {
                 0,
             ),
         );
+    });
+    // A real mouse click reports `detail >= 1`; a button activated by Enter or Space reports
+    // 0. This is what keeps the keyboard-only walk a keyboard walk after somebody edits it
+    // (#90).
+    await made.addInitScript(() => {
+        window.__mouse = 0;
+        addEventListener("click", (event) => event.detail > 0 && window.__mouse++, true);
     });
     contexts.push([name, made]);
     return made;
@@ -359,6 +367,29 @@ const relay_client = (entry, seen) =>
         (msg) => seen.push(msg),
         (code) => seen.push({ type: "error", code }),
     );
+
+// What the next key would go to. `BODY` is the bug (#90): a screen change that leaves focus
+// on the document makes a keyboard player tab down from the top of the page again.
+const focused = (root = page) =>
+    root.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return "BODY";
+        const name = el.tagName + (el.className ? "." + el.className.split(" ")[0] : "");
+        // A button by its label, an input by its type: what a player would call the thing
+        // they are about to press or type into.
+        if (el.tagName === "BUTTON" || el.tagName === "SUMMARY")
+            return name + ":" + el.textContent.replace(/\s+/g, " ").trim();
+        return el.tagName === "INPUT" ? name + ":" + el.type : name;
+    });
+// Tab until the label has focus, which is the reach assertion itself: a control no number of
+// Tabs arrives at is a control the flow cannot be driven to.
+async function tab_to(label, root = page, key = "Tab") {
+    for (let i = 0; i < 30; i++) {
+        if ((await focused(root)).endsWith(label)) return;
+        await root.keyboard.press(key);
+    }
+    assert.fail(key + " 30 times never reached " + label + ", stopped on " + (await focused(root)));
+}
 
 // --- the walk --------------------------------------------------------------------------
 
@@ -2453,6 +2484,32 @@ async function reload_into_a_dead_room() {
     gone.on("pageerror", (error) => errors.push(error.message));
     const dead = new_room_id();
 
+    // MF3 (#90 review): `room_gone` is one of six FLOW_TEXT messages set a route before the
+    // pane they land in is revealed -- the reveal-case AC3's live regions cannot announce on
+    // their own. Cheapest live-region observation point in the suite: a real reload, not the
+    // #42 socket-drop rig. `addInitScript` because the reload below is a fresh document, so
+    // anything attached after it would be gone before the mutation it is here to see.
+    await gone.addInitScript(() => {
+        window.__when = [];
+        const sel = "div[data-bind*=\"screen() === 'landing'\"] p.err";
+        // A bootstrap observer just to catch the node existing (it is static markup, present
+        // before Knockout binds anything), then the real one is scoped to that node alone --
+        // watching the whole document would also fire on an unrelated mutation elsewhere
+        // once the pane happens to be visible, which proves nothing about this node.
+        const attach = () => {
+            const p = document.querySelector(sel);
+            if (!p) return false;
+            new MutationObserver(() =>
+                window.__when.push([p.textContent, !!p.offsetParent]),
+            ).observe(p, { childList: true, characterData: true, subtree: true });
+            return true;
+        };
+        if (!attach()) {
+            const bootstrap = new MutationObserver(() => attach() && bootstrap.disconnect());
+            bootstrap.observe(document, { childList: true, subtree: true });
+        }
+    });
+
     await gone.goto(origin + "/");
     await gone.evaluate(
         (id) => sessionStorage.setItem("jnb:room", JSON.stringify({ id: id })),
@@ -2466,6 +2523,13 @@ async function reload_into_a_dead_room() {
         FLOW_TEXT.room_gone,
         "a reload into a room that will not have it back says so, rather than dropping the " +
             "player on a silent title screen (#88)",
+    );
+    const when = await gone.evaluate(() => window.__when);
+    assert.ok(
+        when.some(([shown, visible]) => visible && shown.includes("would not")),
+        "the message is re-touched once its pane is visible, not left silent behind the " +
+            "screen it was set on one route earlier (#90): " +
+            JSON.stringify(when),
     );
     assert.deepEqual(errors, [], "and the page threw nothing on the way out");
     await gone.close();
@@ -2544,6 +2608,247 @@ async function reconnect_gives_up() {
     await abandoned.close();
 }
 
+// --- keyboard only, and announced (#90) -------------------------------------------------
+// Driven by keys and nothing else: every screen change asserts where focus landed, every
+// text box is submitted with Enter, and a mouse click anywhere in it fails the last
+// assertion. The role sweep at the end is markup-presence, not audibility -- it proves every
+// live-region node the flow reports through carries the attribute, not that a screen reader
+// speaks it (no AT runs in CI).
+async function keyboard_only() {
+    const kb = await (await make_context("keyboard")).newPage();
+    const errors = [];
+    kb.on("pageerror", (error) => errors.push(error.message));
+    // Playwright's role engine skips hidden elements, so this resolves only while the
+    // region really is in the page and carrying the text -- a `visible:`-toggled paragraph
+    // and a paragraph with no `role` both match nothing.
+    const said = (name, root = kb) => screen(name, root).getByRole("alert").allInnerTexts();
+
+    // 1. Load: focus on a cold load, through the `queueMicrotask` ordering. Not `on()` -- a
+    // cold load never writes the hash, so it stays "" rather than becoming "#landing".
+    await kb.goto(origin + "/");
+    await screen("landing", kb).waitFor({ state: "visible" });
+    assert.equal(await focused(kb), "BUTTON.pri:Quick Join", "focus on a cold load");
+    await kb.evaluate(() => (window.__same_page = true));
+
+    // 2. Landing -> create by key.
+    await tab_to("Create a room", kb);
+    await kb.keyboard.press("Enter");
+    await on("create", kb);
+    assert.equal(await focused(kb), "INPUT.code:text");
+
+    // 3. AC1 in place, AC3 in place. The empty-region assertion runs *before* the Enter --
+    // Knockout's `text` binding writes synchronously, so asserting it after would only prove
+    // the refusal landed, not that the region was there to hear it in.
+    assert.deepEqual(
+        await said("create", kb),
+        [""],
+        "the alert region is in the page, empty, before anything is typed into it",
+    );
+    await kb.keyboard.type("ABC");
+    await kb.keyboard.press("Enter");
+    await until("the refusal", async () =>
+        (await said("create", kb)).some((line) => line.includes("5 letters")),
+    );
+
+    // 4. Create for real.
+    await kb.keyboard.press("Control+A");
+    await kb.keyboard.type(room_o);
+    await kb.keyboard.press("Enter");
+    await on("names", kb);
+
+    // 5. The names exception: focus lands on the pane, not a control, or the couch keys
+    // below would be swallowed by a focused text box (`is_typing`, game_session.js).
+    assert.equal(await focused(kb), "DIV.kiosk");
+    await kb.keyboard.press("ArrowUp");
+    await until("the first participant", async () => (await seats(kb).count()) === 1);
+
+    // 6. AC1 on the names form.
+    await kb.keyboard.press("Tab");
+    assert.equal(await focused(kb), "INPUT.grow:text");
+    await kb.keyboard.press("Enter");
+    await on("room", kb);
+
+    // 7. Lobby focus.
+    assert.equal(await focused(kb), "BUTTON.sm:Copy join link");
+
+    // 8. A keeper client so the room outlives this walk's own `Leave` at step 12. No seats,
+    // so it neither readies nor blocks a start.
+    const keeper_saw = [];
+    const keeper = relay_client({ type: "join", id: room_o }, keeper_saw);
+    await until("the keeper in the room", () => keeper_saw.some((msg) => msg.type === "joined"));
+
+    // 9. AC1 on the settings form, AC3 on the staged banner. "Bumps to win" gets a value
+    // past its `max="99"` on purpose (review MUST FIX 3): a blank number box is valid and
+    // submits, so only an out-of-range one makes the `novalidate` mutation fail. "Minutes"
+    // carries a real, in-range change so the staged banner has something to stage even
+    // though the relay's own `config_diff` drops the out-of-range field silently.
+    await tab_to("Room settings", kb);
+    await kb.keyboard.press("Enter"); // native <details>
+    await tab_to(":number", kb);
+    await kb.keyboard.press("Control+A");
+    await kb.keyboard.type("999");
+    await kb.keyboard.press("Tab");
+    await kb.keyboard.press("Control+A");
+    await kb.keyboard.type("3");
+    await kb.keyboard.press("Enter");
+    await until(
+        "the staged change",
+        async () =>
+            (await screen("room", kb)
+                .getByRole("status")
+                .filter({ hasText: "Host staged" })
+                .count()) > 0,
+    );
+
+    // 10. AC1 on the password form, AC3 on the notice -- #88's review item. The `isVisible()`
+    // before the Enter is the whole point: false the moment anybody restores `visible:
+    // notice`, and false if the `.notice` min-height rule is dropped.
+    await tab_to(":password", kb);
+    await kb.keyboard.type("hunter2");
+    const live = screen("room", kb).locator('p[data-bind*="text: notice"]');
+    assert.equal(await text(live), "", "nothing said yet");
+    assert.ok(
+        await live.isVisible(),
+        "and the region is already in the page: a live region is announced on a change while " +
+            "it is there, never on being revealed with the message already inside it (#88, #90)",
+    );
+    await kb.keyboard.press("Enter");
+    await until("password set", async () => (await notice(kb)) === "Password set.");
+    assert.equal(
+        await screen("room", kb).getByRole("status").filter({ hasText: "Password set." }).count(),
+        1,
+        "said through a live region, not just rendered",
+    );
+
+    // Review MUST FIX 4: a route onto the screen already showing must not steal focus from a
+    // box somebody is typing in. Deleting the `activeElement` early return in `focus_screen`
+    // turns this red -- focus would jump to `Copy join link` instead.
+    await kb.evaluate(() => window.dispatchEvent(new HashChangeEvent("hashchange")));
+    assert.equal(
+        await focused(kb),
+        "INPUT:password",
+        "a route onto the screen already showing does not steal the box",
+    );
+
+    // 11. AC4 to a match. Ready is *above* the settings in document order, so backwards --
+    // and it reads "Ready", not "Not ready", because step 9's staged change just cleared
+    // everyone's ready flag, this client's included.
+    await tab_to("Ready", kb, "Shift+Tab");
+    await kb.keyboard.press("Enter");
+    const ready_button = screen("room", kb).locator('button[data-bind*="toggle_ready"]');
+    await until("ready", async () => (await text(ready_button)) === "Not ready");
+    await tab_to("Start the match", kb);
+    await kb.keyboard.press("Enter");
+    await on("play", kb);
+
+    // 12. AC2's deliberate no-op, and out again.
+    assert.equal(await focused(kb), "BODY", "the match screen focuses nothing of its own");
+    await tab_to("Back to the lobby", kb);
+    await kb.keyboard.press("Enter");
+    await on("room", kb);
+    await tab_to("Leave", kb);
+    await kb.keyboard.press("Enter");
+    await on("landing", kb);
+    assert.equal(await focused(kb), "BUTTON.pri:Quick Join");
+
+    // 13. AC1 on the join and password screens -- the room now has a password, so the relay
+    // refuses and the flow lands on the password screen rather than straight into names.
+    await tab_to("Join with a room code", kb);
+    await kb.keyboard.press("Enter");
+    await on("join", kb);
+    assert.equal(await focused(kb), "INPUT.code:text");
+    await kb.keyboard.type(room_o);
+    await kb.keyboard.press("Enter");
+    await on("password", kb);
+    assert.equal(await focused(kb), "INPUT:password");
+    // Reveal-case, not a second in-place refusal like step 3's: `not_accepted` is set on the
+    // join screen (viewmodels.js:952) one route before `go("password", true)` shows the
+    // pane it lands in, so this only proves the text arrives -- it is not peer evidence for
+    // AC3's announce-case, which step 3's create refusal is the walk's one instance of.
+    await until("the refusal", async () =>
+        (await said("password", kb)).some((line) => line.includes("not accepted")),
+    );
+    await kb.keyboard.type("hunter2");
+    await kb.keyboard.press("Enter");
+    await on("names", kb);
+
+    // 14. The two sweeps, because AC3 is an "every" criterion.
+    const unroled = await kb.evaluate(
+        () =>
+            [...document.querySelectorAll('div[data-bind*="screen() ==="] p.err')].filter(
+                (el) => el.getAttribute("role") !== "alert",
+            ).length,
+    );
+    assert.equal(unroled, 0, "every screen's error line is an alert region (#90)");
+
+    // The paragraphs the flow reports an outcome through, each found by its own binding.
+    // Presence, not audibility: a change-detector on the markup shape (edit this list when a
+    // line's data-bind changes), not an invariant on behaviour -- two of these ten roles are
+    // checked in place above too (staged_text at step 9, notice at step 10); this is what
+    // covers the other eight.
+    const LIVE = [
+        "text: connection_text", // the match's reconnect line
+        "visible: pending_id", // Connecting...
+        "visible: match_running", // the names screen's
+        "visible: disconnected", // connection lost
+        "visible: staged_text", // the host staged a change
+        "visible: match_running() &&", // the lobby's
+        "visible: queued", // the queue
+        "text: waiting_text", // who the room waits on
+        "text: notice", // ready cleared, password set
+        "text: result_text", // how the last match ended
+    ];
+    const roles = await kb.evaluate(
+        (binds) =>
+            binds.map((bind) => {
+                const el = document.querySelector('[data-bind*="' + bind + '"]');
+                return el ? el.getAttribute("role") : "missing";
+            }),
+        LIVE,
+    );
+    assert.deepEqual(
+        roles,
+        [
+            "status",
+            "status",
+            "status",
+            "alert",
+            "status",
+            "status",
+            "status",
+            "status",
+            "status",
+            "status",
+        ],
+        "every line the flow reports an outcome through is a live region (#90)",
+    );
+
+    // 15. The two guards.
+    assert.ok(await kb.evaluate(() => window.__same_page === true), "no form ever navigated");
+    assert.equal(await kb.evaluate(() => window.__mouse), 0, "and no step used the mouse");
+    assert.deepEqual(errors, [], "and the page threw nothing");
+
+    // 16. Browse: names' first control is already pinned exactly by step 5's `focused`
+    // assertion, but browse's is whatever rooms the rest of the suite left up, so this is
+    // "somewhere in the pane" rather than a named target. Also closes §4.3's unwalked-path
+    // gap: AC4's walk otherwise never sets a keyboard foot on the browse screen.
+    await tab_to("Start over", kb);
+    await kb.keyboard.press("Enter");
+    await on("landing", kb);
+    await tab_to("Browse rooms", kb);
+    await kb.keyboard.press("Enter");
+    await on("browse", kb);
+    assert.ok(
+        await screen("browse", kb).evaluate(
+            (pane) =>
+                pane.contains(document.activeElement) && document.activeElement !== document.body,
+        ),
+        "focus landed somewhere inside the browse pane",
+    );
+
+    keeper.close();
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -2563,6 +2868,7 @@ try {
     await superseded_create_closes();
     await rejoin_fails();
     await phone();
+    await keyboard_only();
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
             "two pages agree on one room, the mp3s really play, and the page fits a phone",
