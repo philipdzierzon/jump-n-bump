@@ -391,6 +391,31 @@ async function tab_to(label, root = page, key = "Tab") {
     assert.fail(key + " 30 times never reached " + label + ", stopped on " + (await focused(root)));
 }
 
+// Every hash a page reported to the relay, keyed by the tick it names (#41, #96). No client
+// hook needed: `framesent` is a wire read, same technique as the frame recorder above --
+// every socket the page opens, a reconnect included.
+function record_checksums(root) {
+    const hashes = new Map();
+    root.on("websocket", (ws) =>
+        ws.on("framesent", ({ payload }) => {
+            const text = String(payload);
+            if (!text.includes('"checksum"')) return;
+            const msg = JSON.parse(text);
+            // First hash wins: a second match in the same room counts from 0 again, so
+            // tick 30 names two different states. Keeps the map to the first match.
+            if (msg.type === "checksum" && !hashes.has(msg.t)) hashes.set(msg.t, msg.h);
+        }),
+    );
+    return hashes;
+}
+
+// Paired by tick, never by wall clock -- two pages, two 60Hz clocks, never on the same tick
+// at the same instant. `from` floor: pass 1 to drop tick 0, which both pages hash before any
+// `game_iteration`, same seed, same level -- agrees for free, not a real sample.
+const paired = (a, b, from = 0) =>
+    [...a.keys()].filter((t) => t >= from && b.has(t)).sort((x, y) => x - y);
+const disagreements = (a, b, from = 0) => paired(a, b, from).filter((t) => a.get(t) !== b.get(t));
+
 // --- the walk --------------------------------------------------------------------------
 
 async function walk() {
@@ -1152,16 +1177,46 @@ async function self_ending_match() {
 // are two players -- storage is per context, so the two pages never fight over one room
 // token -- and what is asserted is that they *agree*. The room is one thing, seen twice.
 //
-// Tick-by-tick agreement of the two simulations is not here. That needs a checksum the
-// client does not expose, which is #41; building a feature in order to test it is the wrong
-// order round.
+// Now also tick-by-tick (#41, #96): each page hashes its own sim every 30 ticks and sends
+// the number to the relay -- already on the wire, no client hook added. Sampled three times:
+// mid-match, with one hash deliberately wrong, and again after a mid-match repair. Paired by
+// tick, never by wall clock.
 
 async function two_pages() {
     const host = await (await make_context("host")).newPage();
-    const guest = await (await make_context("guest")).newPage();
+    const guest_context = await make_context("guest");
+    // A hash that's wrong on purpose, so the assertion below is shown capable of failing
+    // (#96). One lie, not two: each one the relay sees triggers desync() -> a `start`
+    // carrying a snapshot -> refetch + catch_up replay (game_session.js:157-160) -- one lie
+    // proves disagreements() catches it and halves that churn.
+    //
+    // ponytail: diverges the number on the wire, not the state behind it. State-to-hash link
+    // is replay.test.mjs:512-518's. upgrade path: drop an inbound `input` frame with a key
+    // held, if real state divergence is ever needed here too.
+    await guest_context.addInitScript(() => {
+        window.__lie = false;
+        window.__lied_tick = null;
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data) {
+            if (window.__lie && typeof data === "string" && data.includes('"checksum"')) {
+                const msg = JSON.parse(data);
+                if (msg.type === "checksum") {
+                    window.__lie = false;
+                    window.__lied_tick = msg.t;
+                    data = JSON.stringify({ type: "checksum", t: msg.t, h: (msg.h ^ 1) | 0 });
+                }
+            }
+            return send.call(this, data);
+        };
+    });
+    const guest = await guest_context.newPage();
     const errors = [];
     host.on("pageerror", (error) => errors.push("host: " + error.message));
     guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+
+    // Before either `goto`, or the handshake socket opens before anything is listening.
+    const host_hashes = record_checksums(host);
+    const guest_hashes = record_checksums(guest);
 
     await host.goto(origin + "/");
     await click("Create a room", host);
@@ -1255,9 +1310,33 @@ async function two_pages() {
     await on("play", guest);
     assert.ok(!(await screen("room", host).isVisible()), "the lobby goes on both");
     assert.ok(!(await screen("room", guest).isVisible()));
-    // Long enough for both simulations to have stepped a good many ticks of one match.
-    await settle();
-    await settle();
+
+    // --- the two simulations, tick by tick (#41, #96) -----------------------------------
+    // Not the final board, which travels with the announcement and would agree even across
+    // two different matches: each page's own hash of its own state, same tick, off the wire
+    // it ships on. Floor 1, not 0 -- three real samples (30, 60, 90), not tick 0's free one.
+    await until(
+        "three ticks both pages have hashed",
+        () => paired(host_hashes, guest_hashes, 1).length >= 3,
+    );
+    assert.deepEqual(
+        disagreements(host_hashes, guest_hashes, 1),
+        [],
+        "the two pages hash the same state for the same tick: one match, simulated twice (#41)",
+    );
+
+    // And the assertion can fail: one hash the guest gets wrong on purpose.
+    await guest.evaluate(() => (window.__lie = true));
+    await until("the lied tick to reach the host too", async () => {
+        const t = await guest.evaluate(() => window.__lied_tick);
+        return t !== null && host_hashes.has(t);
+    });
+    const lied_tick = await guest.evaluate(() => window.__lied_tick);
+    assert.deepEqual(
+        disagreements(host_hashes, guest_hashes),
+        [lied_tick],
+        "a client reporting a hash that is not the host's fails this assertion, and nothing else does",
+    );
 
     // --- leaving the match and taking an AI seat back into it (#42) --------------------
     // One host, one client, two AI bunnies, and the client walks out and sits back down --
@@ -1306,6 +1385,24 @@ async function two_pages() {
         await guest.evaluate(() => window.location.hash),
         "#play",
         "and it is still in the match it took the seat to get back into",
+    );
+
+    // --- and they agree again after the repair (#40, #41, #96) --------------------------
+    // Guest just took the host's packed state twice and replayed the gap (catch_up,
+    // game_session.js:157-160). A resync landing it in a near-right state looks fine on
+    // screen and hashes different -- the whole reason the hash exists. Floor is the host's
+    // latest sample so far, not the repair instant -- conservative, not exact: a guest
+    // sample from just before the repair could in principle land inside it too, if the
+    // guest crossed a 30-tick boundary the host had not yet.
+    const after_repair = Math.max(...host_hashes.keys()) + 1;
+    await until(
+        "three ticks both pages have hashed since the repair",
+        () => paired(host_hashes, guest_hashes, after_repair).length >= 3,
+    );
+    assert.deepEqual(
+        disagreements(host_hashes, guest_hashes, after_repair),
+        [],
+        "a client resumed from the host's snapshot hashes to the host's, tick for tick (#40)",
     );
     watcher.close();
 

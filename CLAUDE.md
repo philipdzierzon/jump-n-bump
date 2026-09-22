@@ -67,9 +67,10 @@ the silence after `M` is silence rather than a lull.
 
 What the suite still does not check is what listening and looking check: whether the sound is
 audible or at the right volume, whether the sprites look right, and a real autoplay block --
-headless Chrome autoplays with no flag, so there is none here to reproduce. Nor do the two
-pages agree tick by tick: that needs a checksum the client exposes to a test, which it does
-not (#41).
+headless Chrome autoplays with no flag, so there is none here to reproduce. The two pages'
+simulations are compared tick by tick, sampled three times across a match including after a
+repair: #41's checksum is already a message on the wire, and the suite reads it off
+`framesent` -- the client grows no hook for this (#96).
 
 Architecture notes for this port, and for the sibling C original it was translated from,
 live in the workspace-level `CLAUDE.md` one directory up (`sbx/jumpnbump/CLAUDE.md`).
