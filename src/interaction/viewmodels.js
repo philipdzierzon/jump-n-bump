@@ -433,7 +433,13 @@ function ViewModel() {
             : "";
     });
 
+    // The message a screen change takes with it. Six FLOW_TEXT failures are set on the route
+    // *before* the screen that shows them, so this is how `apply_route` tells one of those
+    // from an error left over from a route that is already over (#127).
+    var carried = "";
+
     function go(hash, replace) {
+        carried = self.error();
         // Navigating to the screen you are already on fires no `hashchange`, so the route
         // has to be applied by hand: a reload lands on `#room`, and the rejoin that follows
         // it would otherwise never build the session the next `start` arrives on.
@@ -653,6 +659,14 @@ function ViewModel() {
             // zero, or its seats went while it was away -- so it holds no session for this
             // match and waits in the lobby for the next one (#37; spectating is #40's).
             if (!granted().length) return;
+            // Zeroed with them, and below the guard rather than beside them: a failed
+            // resume's "did not work" describes a match that is over, and used to still be
+            // on screen through this one and into the lobby after it. Below the guard
+            // because countdown zero vacates an un-ready client and begins the match in the
+            // same breath, and that client's session hears this `start` too -- clearing
+            // above would wipe the `vacated` message off the names screen it just landed on
+            // (#127, #37).
+            self.error("");
             self.current_game(game);
             go("play");
         };
@@ -1059,10 +1073,19 @@ function ViewModel() {
         // before this line, so their `role="alert"`/`role="status"` region is still
         // `display: none` when the text lands -- measured in reload_into_a_dead_room():
         // `offsetParent` is false at the exact moment `room_gone` writes. Re-touching the
-        // observable now that the pane is up re-fires the live region.
-        // ponytail: unconditional, so an unrelated route can re-announce an error that did
-        // not change. upgrade path: clear `self.error` on route change instead.
-        self.error.valueHasMutated();
+        // observable now that the pane is up re-fires the live region -- but only for the
+        // message this navigation carried, so an unrelated route no longer re-announces an
+        // error that did not change.
+        // Anything else on screen belongs to the route it was set on, and that route is
+        // over: the buttons out of an error all clear it (`go_landing` and its neighbours,
+        // below) and the browser's own Back did not, so Back used to land on a screen still
+        // holding the last one's failure (#127).
+        // ponytail: `go` carries whatever happens to be on screen, so a redirect fired while
+        // an unrelated error stands keeps it one route longer. upgrade path: pass the
+        // message to `go` at the six sites that mean it, if a seventh ever gets it wrong.
+        if (self.error() !== carried) self.error("");
+        else if (carried) self.error.valueHasMutated();
+        carried = "";
         if (route.screen === "browse") self.refresh_rooms();
         if (route.screen === "password" && !self.pending_id()) return go("landing", true);
         if (route.screen === "room" || route.screen === "play")

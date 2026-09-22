@@ -70,6 +70,7 @@ const room_p = new_room_id();
 const room_q = new_room_id();
 const room_r = new_room_id();
 const room_s = new_room_id();
+const room_t = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -3492,6 +3493,150 @@ async function waitlisted_seat() {
     assert.deepEqual(errors, [], "and neither page threw");
 }
 
+// --- an error belongs to the route it was set on (#127) ---------------------------------
+// Two halves of one line, and they pull against each other. Six FLOW_TEXT messages
+// (dropped/room_gone/gave_up -> landing, vacated -> names, unavailable/not_accepted ->
+// browse/password) are set one route *before* the screen that shows them, so `apply_route`
+// cannot answer this by clearing the error on every route change -- that deletes all six.
+// And an error the flow did not carry to a screen describes a route that is over: every
+// button out of one clears it (`go_landing` and its neighbours) and the browser's own Back
+// did not, so Back landed on a screen still holding the last one's failure.
+//
+// `not_accepted` is the message walked here, set on the join screen and read on the password
+// screen that replaces it. The other five are asserted where they already live:
+// `room_gone` in reload_into_a_dead_room(), `gave_up` in reconnect_gives_up(), `vacated` in
+// two_pages(), `not_accepted` again in browse() and keyboard_only(). `dropped` and
+// `unavailable` have no walk of their own in this suite and take the same
+// `self.error(...); go(...)` shape as the four that do.
+async function error_dies_with_its_route() {
+    const back = await (await make_context("error_dies_with_its_route")).newPage();
+    const errors = [];
+    back.on("pageerror", (error) => errors.push(error.message));
+
+    // A code no room has: refused, and the refusal is written on the join screen for the
+    // password screen it is redirected to.
+    await back.goto(origin + "/");
+    await click("Join with a room code", back);
+    await on("join", back);
+    await screen("join", back).locator("input").fill(new_room_id());
+    await click("Continue", back);
+    await on("password", back);
+    assert.equal(
+        await err_on("password", back),
+        FLOW_TEXT.not_accepted,
+        "a refusal set one route before the screen that shows it survives that route change",
+    );
+
+    // The browser's own way out, not the button's. Continue pushes the room-code hash and
+    // `go("password", true)` replaces that, so the first Back is the join screen and the
+    // second is the landing screen the flow started on.
+    await back.goBack();
+    await on("join", back);
+    assert.equal(
+        await err_on("join", back),
+        "",
+        "and Back out of that screen leaves the refusal behind with it, exactly as the " +
+            "Start over button does (#127)",
+    );
+    // #127's own wording, one route further on. Downstream of the assertion above -- the
+    // clear it names has already happened -- and here because the landing screen is where
+    // the issue saw the stale text.
+    await back.goBack();
+    await until("the landing screen", async () => (await hash(back)) === "");
+    assert.equal(await err_on("landing", back), "", "and the landing screen behind it is clean");
+    assert.deepEqual(errors, [], "and the page threw nothing on the way through");
+    await back.close();
+}
+
+// --- an error belongs to the match it was set in (#127) ---------------------------------
+// The other half of #127. `on_match_start` zeroes the last match's board, its reason and the
+// resume latch, and left `self.error` standing: "Getting back into the match did not work"
+// was still on screen through the next match and into the lobby after it, describing a match
+// nobody is in any more.
+//
+// The failure is rejoin_fails()'s failure 2 -- a `start` whose snapshot will not decode --
+// because it is the cheapest route to that exact sentence.
+//
+// Cleared for a client that is taking the match, below the seat guard, not for every client
+// the `start` reaches: countdown zero takes an un-ready client's seats and begins the match
+// in the same breath, and that client's session hears the `start` too, so a clear above the
+// guard would wipe FLOW_TEXT.vacated off the names screen it had just been written to
+// (two_pages()).
+async function error_dies_with_its_match() {
+    const host = await (await make_context("error-match-host")).newPage();
+    const guest = await (await make_context("error-match-guest")).newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+
+    // Corrupts the snapshot on the `start` that answers this guest's resume, and only that
+    // one: the next match begins at tick 0 and carries none, and the flag is off by then
+    // regardless.
+    let break_start = true;
+    await guest.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        ws.onMessage((frame) => relay.send(frame));
+        relay.onMessage((frame) => {
+            const msg = JSON.parse(String(frame));
+            if (break_start && msg.type === "start" && msg.snapshot) msg.snapshot = "not one";
+            ws.send(JSON.stringify(msg));
+        });
+    });
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_t);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    await click("Start the match", host);
+    await on("play", host);
+
+    // Seated into the running match, so the page asks to be let into it by itself -- and is
+    // answered with the snapshot broken above.
+    await guest.goto(origin + "/#" + room_t);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    // Both couches default their first bunny to Dott and the host holds it, so an unrenamed
+    // seat is a name collision rather than the mid-match join this walk is about.
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    const said = () => text(screen("room", guest).locator("p.err"));
+    await until("the failed rejoin on screen", async () => /did not work/.test(await said()));
+
+    // The next match, with that failure behind it. Ready first: "start counts as readying"
+    // is the host's own seat only, and a countdown here would take the guest's seats
+    // instead of handing it the match.
+    break_start = false;
+    await click("Back to the lobby", host);
+    await on("room", host);
+    await click("Ready", guest);
+    await until(
+        "the room to read the guest as ready",
+        async () => (await room_view(host))[1][1] === "ready",
+    );
+    await click("Start the match", host);
+    await on("play", guest);
+    assert.equal(
+        await said(),
+        "",
+        "the match that began is not the match that failed, so its message goes with it (#127)",
+    );
+
+    // And it is still gone in the lobby that match walks back to, which is where #127 saw it.
+    await click("Back to the lobby", guest);
+    await on("room", guest);
+    assert.equal(await said(), "", "and the lobby after it is clean too");
+    assert.deepEqual(errors, [], "and neither page threw on the way through");
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -3513,6 +3658,8 @@ try {
     await double_click_create();
     await superseded_create_closes();
     await rejoin_fails();
+    await error_dies_with_its_route();
+    await error_dies_with_its_match();
     await late_resume();
     await late_resume_from_the_lobby();
     await phone();
