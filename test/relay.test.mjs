@@ -1806,7 +1806,7 @@ const hash_log = async (...sends) => {
     console.log = (...args) => said.push(format(...args));
     for (const [who, match, t, h] of sends) {
         relit[who].socket.send({ type: "checksum", match, t, h });
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 100));
     }
     console.log = spoke;
     return said.filter((line) => / desync /.test(line));
