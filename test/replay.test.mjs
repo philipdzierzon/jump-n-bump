@@ -452,6 +452,120 @@ assert.equal(
     "a seat the room handed the AI seven ticks ago is the AI's here too, not a released frame",
 );
 
+// The d-tick tail: a frame that was local when it was consumed -- not merely when it was
+// scheduled -- outliving the handover. Two routes stamp such a frame, exercised here: this
+// client's own schedule (seat 1, d ticks ahead of the handover) and the relay's resend ring
+// (seat 2, landing on the handover tick itself, same as the live fan-out would). step is the
+// only place the driver table and the frame set are both in hand to reconcile them (#110).
+const handover_transport = function (extra) {
+    return {
+        receive(fn) {
+            this.to_client = fn;
+        },
+        send(msg) {
+            if (msg.type !== "start") return;
+            this.to_client(
+                Object.assign(
+                    {
+                        type: "start",
+                        t: 0,
+                        d: 2,
+                        seed: 1,
+                        settings: {},
+                        held: [0, 1],
+                        drivers: ["local", "local", "local", "ai"],
+                        changes: [
+                            { t: 2, seat: 1, driver: "ai" },
+                            { t: 2, seat: 2, driver: "ai" },
+                        ],
+                        inputs: [{ t: 2, seats: { 2: { left: true, right: false, up: false } } }],
+                    },
+                    extra || {},
+                ),
+            );
+        },
+    };
+};
+const handover = new Room(handover_transport(), no_keys);
+handover.start({ seed: 1, settings: {}, held: [0, 1] });
+handover.step();
+handover.step();
+assert.deepEqual(
+    Object.keys(handover.step()),
+    ["0"],
+    "a seat handed to the AI keeps no frame, whoever stamped it -- this client d ticks ago, or the relay's ring (#110)",
+);
+
+// The same reconciliation on the replay path, not only the live one: a joiner's catch-up
+// steps through the same `step`, so the ring's stale frame for seat 2 must not survive
+// being replayed into a fresh room either.
+const replayed = new Room(handover_transport({ until: 3 }), no_keys);
+replayed.start({ seed: 1, settings: {}, held: [0, 1] });
+let replayed_last = null;
+replayed.catch_up(function () {
+    replayed_last = replayed.step();
+});
+assert.deepEqual(
+    Object.keys(replayed_last),
+    ["0"],
+    "and replayed through catch_up, the ring's stale frame is dropped there too (#110)",
+);
+
+// What discriminates "local at the tick it was stamped for" from "local at the tick it is
+// consumed" -- the wrong invariant and the right one -- is a window shorter than d: seat 1
+// goes local -> ai at t=2 and back ai -> local at t=4, so the frame this client scheduled
+// at t=0 for t=2 was stamped while local but must not survive to be consumed, and the frame
+// it schedules once local again must reach the seat exactly as if it had never left.
+const window_transport = {
+    receive(fn) {
+        this.deliver = fn;
+    },
+    send() {},
+};
+const windowed = new Room(window_transport, (scheme) => ({
+    left: scheme === 1,
+    right: false,
+    up: false,
+}));
+window_transport.deliver({
+    type: "start",
+    t: 0,
+    d: 2,
+    seed: 1,
+    settings: {},
+    held: [0, 1],
+    drivers: ["local", "local", "ai", "ai"],
+    changes: [
+        { t: 2, seat: 1, driver: "ai" },
+        { t: 4, seat: 1, driver: "local" },
+    ],
+});
+const seen = {};
+for (let t = 0; t <= 6; t++) {
+    const frames = windowed.step();
+    if (t === 2 || t === 4 || t === 6) seen[t] = frames;
+}
+assert.deepEqual(
+    Object.keys(seen[2]),
+    ["0"],
+    "the frame stamped at t=0 for t=2, while seat 1 was still local, does not survive the ai it became by t=2 (#110)",
+);
+assert.deepEqual(
+    Object.keys(seen[4]),
+    ["0", "1"],
+    "and once local again the d-tick floor releases it exactly as any seat with no frame yet does",
+);
+assert.equal(
+    seen[4][1].left,
+    false,
+    "released, not stale keys: nothing was ever scheduled for this tick while the seat was away",
+);
+assert.equal(
+    seen[6][1].left,
+    true,
+    "and the seat's own keys reach it again once local has had d ticks to schedule one",
+);
+
 // #83: one simulation tick that costs more than a frame must not lock the loop. The pump
 // advances its budget by exactly one frame per tick, so before the batch bound a tick that
 // overran it left `next_time - now` monotonically decreasing and the break unreachable -- no
@@ -769,6 +883,19 @@ assert.notEqual(
     "and chaining the ban map's hash in front of it makes them disagree from tick 0 (#95)",
 );
 
+// The simulation-level half of the same fact (#110): `player[i].ai` is `!frame`, so the
+// reconciliation in `step` above has to reach `game.js` too. Last, because building a Game
+// replaces the `player` array.
+const handover_game = start(1, {}, [0, 1], handover_transport());
+handover_game.game.step();
+handover_game.game.step();
+handover_game.game.step();
+assert.deepEqual(
+    player.map((p) => p.ai),
+    [false, true, true, true],
+    "and the AI steers it on this client too, which is what every other client is doing (#110)",
+);
+
 console.log(
-    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, and a snapshot plus the input gap lands in the host's state",
+    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, a snapshot plus the input gap lands in the host's state, and a seat handed to the AI keeps no stale frame",
 );
