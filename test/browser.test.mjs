@@ -64,6 +64,7 @@ const room_j = new_room_id();
 const room_k = new_room_id();
 const room_l = new_room_id();
 const room_m = new_room_id();
+const room_n = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -1741,6 +1742,240 @@ async function queueing() {
     assert.deepEqual(errors, [], "and neither page threw");
 }
 
+// One click, one room (#89). The connect path had no in-flight state and the button no
+// enable binding, so a second click opened a second socket -- and the abandoned one went
+// on answering the relay's pings, holding a room up in the public list with a host that
+// would never leave.
+async function double_click_create() {
+    // AC1's own claim, independent of the guard below: the button disables itself on the
+    // click that opens the socket, not on however long the answer takes -- Knockout's
+    // `enable` binding writes `disabled` synchronously inside the click handler's own turn.
+    // Its own page: a single click here is a real room, left up rather than raced with the
+    // double-click below.
+    //
+    // The relay is in-process and local, so an unslowed round trip can answer before this
+    // test ever gets to look -- proving nothing about whether the button waited for it or
+    // was never disabled at all. Delaying every message the relay sends this page opens a
+    // window wide enough to look inside.
+    const solo = await (await make_context("solo-create")).newPage();
+    await solo.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        relay.onMessage((frame) => setTimeout(() => ws.send(frame), 300));
+    });
+    await solo.goto(origin + "/");
+    await click("Create a room", solo);
+    await on("create", solo);
+    await click("Create", solo);
+    assert.equal(
+        await disabled(button("Create", solo)),
+        true,
+        "the button disables on the click itself, not on the relay's answer (#89)",
+    );
+    await on("names", solo);
+
+    const dbl = await (await make_context("double")).newPage();
+    const listed = async () =>
+        (await fetch(origin + "/api/rooms").then((res) => res.json())).map((room) => room.id);
+    await dbl.goto(origin + "/");
+    const before = await listed();
+    await click("Create a room", dbl);
+    await on("create", dbl);
+    // Listed, because the public list is where the orphan showed up. And no code typed: the
+    // relay generates one per create, so two clicks with a code of their own would collide
+    // on the second rather than make a second room.
+    await screen("create", dbl).locator('input[type="checkbox"]').check();
+    // Not two clicks: the second would fail Playwright's own enabled check and report a
+    // timeout instead of the thing under test. A double-click is what a player does, and it
+    // is dispatched without re-checking in between -- so the button really is asked twice,
+    // and what refuses the second one is the page.
+    await button("Create", dbl).dblclick();
+    await on("names", dbl);
+    // Proving something did not happen, which is the one place a fixed wait is right.
+    await settle();
+    const after = await listed();
+    assert.equal(
+        after.filter((id) => before.indexOf(id) < 0).length,
+        1,
+        "two clicks on Create, one room in the public list",
+    );
+}
+
+// AC2 on its own, with no second click for AC1's binding to intercept: a hash route
+// supersedes through the same `connect()` a button does, so this is `pending.close()`
+// itself under test, not the binding backstopping a double click (#89).
+async function superseded_create_closes() {
+    const sup = await (await make_context("superseded")).newPage();
+    await sup.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        relay.onMessage((frame) => setTimeout(() => ws.send(frame), 300));
+    });
+    const listed = async () =>
+        (await fetch(origin + "/api/rooms").then((res) => res.json())).map((room) => room.id);
+    await sup.goto(origin + "/");
+    const before = await listed();
+    await click("Create a room", sup);
+    await on("create", sup);
+    await screen("create", sup).locator('input[type="checkbox"]').check();
+    await click("Create", sup);
+    // Walked away before the create ever answered -- a room code hash, not a second click.
+    await sup.evaluate(() => (window.location.hash = "#ZZZZZ"));
+    // Both delayed answers land inside this: the abandoned create's, and the new join's.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const after = await listed();
+    assert.deepEqual(
+        after.filter((id) => before.indexOf(id) < 0),
+        [],
+        "a superseded create leaves no room in the public list (#89)",
+    );
+}
+
+// Rejoining a match that will not have you (#89). The ask set a flag cleared on three paths,
+// and a `start` that never became a match was none of them -- so a failed rejoin left the
+// button silently doing nothing for the rest of the match.
+//
+// Three failures, each arranged so it can only be reached by one production code path, and
+// a fourth press that recovers:
+//   1. the level fetch itself rejecting -- on the level the host's match is actually
+//      running, blocked from before this guest ever loads the room, because `get_level`
+//      caches a *successful* fetch for the page's lifetime and this is the only window in
+//      which one has not happened yet (AC5);
+//   2. a state `decode_snapshot` answers null for -- the early return out of `build`, above
+//      `on_match_start`, once the level above is let through (AC3/AC4);
+//   3. an ask the relay never hears -- nothing answers it and nothing fails it, so the only
+//      thing that ends it is the bound the client puts on it (AC4).
+async function rejoin_fails() {
+    const host = await (await make_context("rejoin-host")).newPage();
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_n);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    // Caves, so failure 1 below has a level of its own to block the fetch of -- the same
+    // level the rest of the suite already exercises.
+    await open_settings(host);
+    await level_select(host).selectOption("caves");
+    await click("Apply to the next match", host);
+    await click("Start the match", host);
+    await on("play", host);
+
+    const guest = await (await make_context("rejoin-guest")).newPage();
+    // Failure 1, armed from before the guest ever loads the page: `get_level` never caches
+    // a rejected fetch (its catch deletes the entry), so every attempt while this is on
+    // fails afresh, and turning it off recovers rather than replaying a cached failure.
+    // Starts on: the lobby's own `preload` fetches this level the moment the room's config
+    // arrives, well before any of the failures below, and a fetch that succeeds once stays
+    // cached for the rest of the page's life -- this is the only window this failure is
+    // reachable in at all.
+    let block_level = true;
+    await guest.route("**/levels/caves/caves.dat", (route) =>
+        block_level ? route.abort() : route.continue(),
+    );
+    // Failure 2: corrupt every `start` carrying a snapshot, until told to stop. A counter
+    // rather than this flag would corrupt every attempt forever, including the one meant to
+    // recover (#89). Off at first: failure 1 above must be the only way the first ask fails.
+    let break_start = false;
+    // Failure 3: the ask nothing ever answers and nothing ever fails.
+    let deaf = false;
+    let broken = 0;
+    // Every `resync` this guest ever sends, counted regardless of `deaf`: proves the latch
+    // (#89 MUST FIX 3) below rather than just the visible error text, which a stray re-ask
+    // would show identically.
+    let resync_count = 0;
+    await guest.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        ws.onMessage((frame) => {
+            if (String(frame).includes('"resync"')) resync_count++;
+            if (deaf && String(frame).includes('"resync"')) return;
+            relay.send(frame);
+        });
+        relay.onMessage((frame) => {
+            const msg = JSON.parse(String(frame));
+            // A state `decode_snapshot` answers null for, which is the return out of
+            // `build` that happens above `on_match_start`.
+            if (break_start && msg.type === "start" && msg.snapshot) {
+                msg.snapshot = "not a snapshot";
+                broken++;
+            }
+            ws.send(JSON.stringify(msg));
+        });
+    });
+    const said = () => text(screen("room", guest).locator("p.err"));
+
+    await guest.goto(origin + "/#" + room_n);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    // Renamed: both couches default their first bunny to Dott, and the host already holds
+    // it, so taking the seat unrenamed is a collision (NAME_TAKEN) rather than the mid-match
+    // join this walk is about.
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    // Seated into a match already running, so the page asks to be let into it by itself,
+    // straight into the level fetch blocked above (AC5).
+    let t0 = Date.now();
+    // `get_level`'s own message, not `resume_failed`'s generic one: more specific, and
+    // "try again" would be wrong advice on a level that will not load.
+    await until("the failure on screen", async () => /would not load/.test(await said()));
+    // Under the 5s `RESUME_MS` bound with room to spare -- 2000-2900ms is the honest worst
+    // case (fast local setup, a late host snapshot) against this budget. Without
+    // `get_level`'s own rejection reaching `start_failed`, nothing shows this until that
+    // timeout backstops it, and the text alone would read the generic message either way --
+    // only the clock (and now the wording) tells the two apart.
+    assert.ok(
+        Date.now() - t0 < 4000,
+        "the level fetch's own rejection said so, not the 5s timeout (#89)",
+    );
+    assert.equal(resync_count, 1, "one ask, one failure, before anything re-arms it");
+
+    // MUST FIX 3 (#89): a room broadcast (a bystander taking a seat) must not retry the
+    // latched failure on its own -- only `rejoin_match` may.
+    const bystander_seen = [];
+    const bystander = relay_client({ type: "join", id: room_n }, bystander_seen);
+    await until("the bystander into the room", () =>
+        bystander_seen.some((msg) => msg.type === "joined"),
+    );
+    bystander.send({ type: "take", seat: 2, name: "Bystander" });
+    await until("the room to see the bystander seated", () =>
+        bystander_seen.some((msg) => msg.type === "room" && msg.seats[2] === "Bystander"),
+    );
+    assert.equal(resync_count, 1, "a room broadcast alone must not retry a failed ask (#89)");
+    bystander.close();
+
+    // Failure 2 (AC3): the level is let through now, so a fresh press succeeds at fetching
+    // it and fails only on the corrupted snapshot underneath.
+    block_level = false;
+    break_start = true;
+    t0 = Date.now();
+    await click("Rejoin the match", guest);
+    assert.equal(await said(), "", "pressing it again clears the last answer");
+    await until("the relay's answer, broken on the way in", () => broken > 0);
+    await until("the failure on screen", async () => /did not work/.test(await said()));
+    assert.ok(
+        Date.now() - t0 < 3000,
+        "the corrupted snapshot's own early return said so, not the 5s timeout (#89)",
+    );
+
+    // Failure 3 (AC4): the ask the relay never hears. Nothing answers it and nothing fails
+    // it, so the only thing that can end it is the bound the client puts on it -- this one
+    // is supposed to take the full timeout, unlike the two above.
+    deaf = true;
+    await click("Rejoin the match", guest);
+    await until("the ask to time out", async () => /did not work/.test(await said()));
+
+    // None of the three failures latched it: the fourth press is the one that works.
+    deaf = false;
+    break_start = false;
+    await click("Rejoin the match", guest);
+    await on("play", guest);
+}
+
 async function phone() {
     const phone_context = await make_context("phone", { viewport: { width: 390, height: 844 } });
     const phone_page = await phone_context.newPage();
@@ -2324,6 +2559,9 @@ try {
     await sound();
     await browse();
     await queueing();
+    await double_click_create();
+    await superseded_create_closes();
+    await rejoin_fails();
     await phone();
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +

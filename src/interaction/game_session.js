@@ -21,8 +21,6 @@ import { MAX_CATCH_UP } from "../net/room_config.js";
 import { Room } from "../net/room.js";
 import ko from "knockout";
 
-function noop() {}
-
 // How often the host packs its simulation and hands it to the relay, which caches the
 // latest one for the next client to join the match (#40).
 var SNAPSHOT_MS = 2000;
@@ -144,6 +142,10 @@ export function Game_Session(get_level, config, muted, transport) {
     // when the bunnies jump (#41).
     this.reconnecting = ko.observable(false);
     this.on_match_start = null;
+    // A `start` that never became a match: the level would not load, or the state it
+    // carried could not be replayed. Both were silent, and a client that had asked to be
+    // let into this match was waiting on exactly this answer (#89).
+    this.on_start_failed = null;
     // Whether a `start` has landed on this session: it is playing a match, or building
     // one, rather than sitting in the lobby waiting for the next (#40).
     this.in_match = false;
@@ -174,6 +176,12 @@ export function Game_Session(get_level, config, muted, transport) {
             }),
         );
     };
+
+    // A `start` that never became a match, said once regardless of which of the two ways
+    // it failed (#89).
+    function start_failed() {
+        if (self.on_start_failed) self.on_start_failed();
+    }
 
     // A socket answers `start` a round trip later than a loopback does, so the whole
     // simulation is built out of what the relay handed down rather than out of `config`
@@ -209,9 +217,14 @@ export function Game_Session(get_level, config, muted, transport) {
         // `.dat` has to be fetched and decoded before anything can be built on it (#38).
         // A client that cannot load it stays where it is rather than playing a different
         // map: a differing ban map is a desync, not a degraded picture.
-        get_level(room.settings.level).then(function (level) {
-            if (mine === starting) build(level);
-        }, noop);
+        get_level(room.settings.level).then(
+            function (level) {
+                if (mine === starting) build(level);
+            },
+            function () {
+                if (mine === starting) start_failed();
+            },
+        );
     };
 
     // What a repair costs the machine least able to pay it, split three ways: building the
@@ -273,7 +286,7 @@ export function Game_Session(get_level, config, muted, transport) {
         var t0 = performance.now();
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
         var gap = room.gap();
-        if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return;
+        if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return start_failed();
         // A key tapped in the lobby has no tick to be read on yet -- it would otherwise sit
         // latched and land on this match's first tick, a spurious jump/step nobody pressed
         // just then (#86). `clear_taps`, not `release_all`: a key held into the countdown

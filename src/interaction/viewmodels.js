@@ -97,6 +97,11 @@ function ViewModel() {
     // answered by the one it happens to hold.
     var resuming = false;
     var in_match_with = "";
+    // How long the ask is given before it is called a failure. The relay answers on the
+    // host's next snapshot, which is two seconds away at worst, and the level was preloaded
+    // in the lobby -- so past this it is an answer that is not coming rather than a slow one.
+    var RESUME_MS = 5000;
+    var resume_timer = null;
     // The room id this client has already spent its no-password attempt on, so Back onto
     // the same link does not open a second socket to be refused by the same room.
     var attempted_id = null;
@@ -136,6 +141,10 @@ function ViewModel() {
     this.queued = ko.observable(false);
     this.password = ko.observable("");
     this.error = ko.observable("");
+    // A connection attempt in flight, which is all three submit buttons' enabled state:
+    // nothing visibly changed on the first click, so the player clicked again and got a
+    // second socket (#89).
+    this.connecting = ko.observable(false);
     this.room_id = ko.observable(null);
     this.pending_id = ko.observable(null);
     this.is_host = ko.observable(true);
@@ -451,6 +460,9 @@ function ViewModel() {
         // for a reload (#17). The relay cannot tell the two apart without being told.
         if (self.room_id() && transport.send) transport.send({ type: "leave" });
         if (transport.close) transport.close();
+        if (pending) pending.close();
+        pending = null;
+        self.connecting(false);
         transport = new Loopback_Transport();
         host = true;
         self.is_host(true);
@@ -485,7 +497,7 @@ function ViewModel() {
         token = null;
         // The match in progress belonged to the room, so the next one is asked about from
         // scratch (#40).
-        resuming = false;
+        stop_resuming();
         in_match_with = "";
         remember("room", { id: null });
     }
@@ -627,7 +639,7 @@ function ViewModel() {
             in_match_with = granted().join(",");
             // Asked and answered: the next ask is a seat this client did not have when the
             // match was handed to it (#42).
-            resuming = false;
+            stop_resuming();
             // A match beginning outranks the last one's frozen frame: the hold must not
             // walk this client out of the match it just started.
             clearTimeout(leaving);
@@ -644,6 +656,11 @@ function ViewModel() {
             self.current_game(game);
             go("play");
         };
+        // A `start` that never became a match: the level would not load, or the state it
+        // carried could not be replayed. Both were silent, and a client that had asked to
+        // be let into this one is waiting on exactly this answer, and there is no second
+        // telling (#89).
+        game.on_start_failed = resume_failed;
         self.current_game(game);
         // Built into a room with a match already running: this is the session that will
         // hear the answer, so this is where the asking belongs.
@@ -675,7 +692,28 @@ function ViewModel() {
         if (granted().join(",") === in_match_with) return;
         if (!current) return;
         resuming = true;
+        resume_timer = setTimeout(resume_failed, RESUME_MS);
         current.resume();
+    }
+
+    // One place the ask stops being in flight, because the timer bounding it has to stop
+    // with it: one left running would call the *next* ask a failure.
+    function stop_resuming() {
+        clearTimeout(resume_timer);
+        resume_timer = null;
+        resuming = false;
+    }
+
+    // It neither landed nor came back. `resuming` is left latched rather than cleared:
+    // `apply_room` calls `ask_to_resume` on every room broadcast (a seat taken, ready
+    // toggled, countdown, host migration), and clearing it here would re-arm this timer
+    // and re-show this error on each one. Only `rejoin_match` re-opens it (#89).
+    function resume_failed() {
+        if (!resuming) return;
+        // A level that would not load already said so (viewmodels.js's own `get_level`
+        // catch) -- more specific than this, and "try again" is wrong advice on it, since a
+        // retry refetches the same broken level.
+        if (!self.error()) self.error("Getting back into the match did not work. Try again.");
     }
 
     // The relay's picture of the room: which seats exist, who is on them, which ones this
@@ -704,7 +742,7 @@ function ViewModel() {
         // The match this client was in is over, so the next one is a match it has not been
         // in and has not asked about.
         if (!msg.started) {
-            resuming = false;
+            stop_resuming();
             in_match_with = "";
         }
         host = msg.host;
@@ -786,7 +824,19 @@ function ViewModel() {
         ask_to_resume();
     }
 
+    // The attempt that has not answered yet. A second one supersedes it rather than racing
+    // it: an abandoned socket goes on ponging the relay whether or not it is still the
+    // transport, so the room it created stays up -- in the public list, with a host that
+    // never leaves, and picked first by Quick Join for having four free seats (#89).
+    // ponytail: short of `go_landing` (which now closes it, below), a socket that neither
+    // opens nor closes leaves the buttons disabled until the browser gives up on it.
+    // upgrade path: a bound of its own if anybody ever sees one -- the page is served by
+    // the relay it dials, so an unreachable relay is a page that never loaded.
+    var pending = null;
+
     function connect(entry) {
+        if (pending) pending.close();
+        self.connecting(true);
         self.error("");
         // Which build of the simulation this page is running. Two builds in one lockstep
         // room desync -- the same seed drawn through different code is a different match --
@@ -800,6 +850,11 @@ function ViewModel() {
             function (msg) {
                 var reconnected = false;
                 if (msg.type === "joined") {
+                    // Belt and braces against clearing a successor's state (#89).
+                    if (pending === socket) {
+                        pending = null;
+                        self.connecting(false);
+                    }
                     // Only once the new room is in: a refused join leaves this client in the
                     // room it already had, rather than in neither.
                     if (leaving.close) leaving.close();
@@ -835,6 +890,12 @@ function ViewModel() {
                 go(msg.held.length ? "room" : "names", true);
             },
             function (code) {
+                // Belt and braces against clearing a successor's state (#89). Before the
+                // retry early return, so a reconnect attempt that fails always re-arms.
+                if (pending === socket) {
+                    pending = null;
+                    self.connecting(false);
+                }
                 // A retry that did not get in -- the socket died again, or the room would
                 // not have it yet -- is answered by the next retry and by nothing on
                 // screen: the overlay is already up, and the window is what ends this.
@@ -893,6 +954,7 @@ function ViewModel() {
                 }
             },
         );
+        pending = socket;
     }
 
     // 1, 2, 4 and then 5 seconds apart, and it gives up when the reservation window the
@@ -936,7 +998,7 @@ function ViewModel() {
         self.current_game(null);
         // The match is the room's, and this client is being let back into it rather than
         // one it remembers having played and must not be walked back into (#40).
-        resuming = false;
+        stop_resuming();
         in_match_with = "";
         retry();
     }
@@ -1167,7 +1229,13 @@ function ViewModel() {
     // this is the client saying it wants exactly that. Forgetting which seats it was last in
     // the match with is the whole of it: the relay hands its bunnies back off the AI on the
     // same `resume` a mid-match joiner asks for (#40, #42).
+    //
+    // The one place `resuming`'s latch re-opens after a failure (#89): `apply_room`'s own
+    // calls to `ask_to_resume` must not, or a failed ask would retry itself on every room
+    // broadcast.
     this.rejoin_match = function () {
+        self.error("");
+        stop_resuming();
         in_match_with = "";
         ask_to_resume();
     };
