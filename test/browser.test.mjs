@@ -79,10 +79,10 @@ const browser = await chromium.launch();
 
 // Every <audio> the page plays, in the order it played them, and whether it is still
 // playing. Sound_Player creates them and keeps them to itself -- they are never in the
-// document -- so patching the prototype is the only way to see them from out here. A session
-// builds one Sound_Player, so a match being played sounds one looping track and a match
-// that is over sounds none; two loops at once was a session left running behind the one on
-// screen, which is how it was heard (#28, #40). The ordered list is the other half: a set
+// document -- so patching the prototype is the only way to see them from out here. A page
+// builds one Sound_Player and every session shares it (#123), so a match being played sounds
+// one looping track and a match that is over sounds none; two loops at once was a session
+// left running behind the one on screen, which is how it was heard (#28, #40). The ordered list is the other half: a set
 // says a sound was played at some point, and an order says which event played it (#66).
 function record_audio() {
     window.__audio = new Set();
@@ -1800,14 +1800,15 @@ async function sound() {
 }
 
 // --- the sound player outlives the room (#123) -------------------------------------------
-// #91 moved the six <audio> elements up from the match to the session, and stopped there. A
-// session is one room entry, and nothing ever released one: browse in, browse out, and the
-// set stays -- paused, decoded, and never asked for again. A match walked back to the lobby
-// costs a second set, because that is a new session too. The fix is the same move one level
-// further up, to the page.
+// #91 moved the six <audio> elements up from the match to the session, and stopped there.
+// Nothing ever released a session's set, and a session is rebuilt on every room entry *and*
+// every walk between the lobby and the match (`viewmodels.js:95`): browse in, play, browse
+// out, and two sets stay -- paused, decoded, and never asked for again. The fix is the same
+// move one level further up, to the page. What this walk counts is the laps, which is why it
+// takes four room entries and two matches rather than one of each.
 //
 // Offline rooms, and no clock to pin: nothing below turns on which bunny bumps which, only
-// on the music being asked for in two different room entries.
+// on the music being asked for in two different sessions.
 //
 // The two counts are deliberately different questions. `audio_made` is every element this
 // page ever created, which is what says no new set was built. `__audio` is every element
@@ -1832,8 +1833,12 @@ async function sound_outlives_the_room() {
         await click("Leave", hop);
         await on("landing", hop);
     }
-    // Every element that has played the music, which the recorder holds a reference to --
-    // so this counts elements that are still there, not elements that once were.
+    // How many distinct elements carry the music's `src` among the ones that have played.
+    // Not a liveness check -- the recorder's Set is never pruned, so it is holding them
+    // itself -- but the question it does answer is the one worth asking: a page that decodes
+    // this file twice is a page carrying two of it, however the second one came to be. That
+    // cuts both ways round: a `dispose()` on the session would leave `audio_made` counting a
+    // set per session and report a leak that had been fixed, and this would still read 1.
     const music_elements = (root) =>
         root.evaluate(() => [...window.__audio].filter((a) => /bump\.\w+$/.test(a.src)).length);
     // Whether anything is playing the music this instant. `sounding` rather than `music`,
@@ -1868,13 +1873,27 @@ async function sound_outlives_the_room() {
     await click("Start the match", hop);
     await on("play", hop);
     await until("the music", async () => await music_playing(hop));
+    // Muted here and left muted, on purpose. The player carrying that mute out of this match
+    // is the same one the next room's session picks up, so a `set_muted(true)` that nothing
+    // spoke for again would leave the page silent for the rest of the tab -- which is the
+    // one thing a player shared between sessions could most plausibly break for a player who
+    // would never connect it to the room they muted in. Each session writes its own `muted`
+    // in on the way into a match, which is what takes it back off.
+    await hop.keyboard.press("m");
+    await until("the music to stop", async () => !(await music_playing(hop)));
     await click("Back to the lobby", hop);
     await on("room", hop);
     await leave_lobby();
     await enter_lobby();
+    // Forgotten here rather than read as `paused`: what is claimed is that this match asked
+    // the element to play, and a wait that timed out is the red -- a page still carrying the
+    // last room's mute never calls `play` at all, so nothing is ever recorded.
+    await forget_sounds(hop);
     await click("Start the match", hop);
     await on("play", hop);
-    await until("the music again", async () => await music_playing(hop));
+    await until("the music to come back in a match after a muted one (#123)", async () =>
+        (await sounds(hop)).some((name) => name.startsWith("bump.")),
+    );
 
     assert.equal(
         await music_elements(hop),
@@ -1887,8 +1906,8 @@ async function sound_outlives_the_room() {
         one_set,
         "and two matches in four room entries made no element the first lobby had not (#123)",
     );
-    // The half of sharing that could have gone wrong: the session pressing M is not the
-    // session that built the player.
+    // And M still reaches it both ways round from a session that did not build it -- the
+    // mute above is only ever taken back off by `play`, so this is the other path.
     await hop.keyboard.press("m");
     await until("the music to stop", async () => !(await music_playing(hop)));
     await hop.keyboard.press("m");

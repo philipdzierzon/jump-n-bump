@@ -4,7 +4,8 @@
 // until the main thread died (#30). The owner rose from the match to the session next,
 // because a repair rebuilt the match and its six elements with it (#91), and from the
 // session to the page after that, because nothing ever released a session's set and a
-// room entry builds a session (#123).
+// session is rebuilt on every room entry *and* every walk between the lobby and the match
+// (`viewmodels.js`) -- two sets a lap, and no end to it (#123).
 //
 // It is not reached through `new` any more, and that is the point: `shared_sound_player`
 // below is the only way in, so there is no second set of elements to leak.
@@ -13,9 +14,11 @@ const SFX_NAMES = ["bump", "death", "fly", "jump", "splash", "spring"];
 function Sound_Player() {
     var self = this;
     var sounds = {};
-    // Where the page's mute preference lives now. It used to be handed in and shadowed by
-    // whichever session held the player; a session is one room entry, and this outlives
-    // every one of them (#123).
+    // Not a preference of this player's, though it outlives every session that drives it:
+    // whichever session is in a match writes its own `muted` in here through `set_muted` on
+    // every entry into one, and M toggles the two together (`game_session.js`). This is only
+    // what holds until the first session speaks for it, which is why it is no longer handed
+    // in -- there is no one session whose value it would be.
     var muted = false;
 
     var sfx_extension = document.createElement("audio").canPlayType("audio/mpeg") ? "mp3" : "ogg";
@@ -62,13 +65,19 @@ function Sound_Player() {
     };
 }
 
-// One player, built on the first room entry that needs it and kept for the tab. A session
-// is one room entry and nothing ever tore its player down, so browsing in and out of rooms
-// cost a set of six decoded elements per entry, for good (#123).
+// One player, built on the first session that needs it and kept for the tab. Nothing ever
+// tore a session's player down, and a session is rebuilt on every room entry and on every
+// walk between the lobby and the match -- so a browse in, a match and a browse out cost two
+// sets of six decoded elements, for good (#123).
 //
 // Sharing is right here and was wrong one level down: what `Sfx` holds is a match's, and a
-// repair rebuilds the match (#91). What this holds is the six files and the mute
-// preference, and neither of those is a match's or a room's.
+// repair rebuilds the match (#91). What this holds is six decoded files, and a file is
+// neither a match's nor a room's.
+//
+// ponytail: one player per module instance, and no way to ask for a fresh one -- a test
+// that wanted a player with no history would have to reload the page, which is what every
+// walk in `browser.test.mjs` already does. upgrade path: a `reset` export, if anything ever
+// needs two players on one page.
 var shared = null;
 export function shared_sound_player() {
     if (!shared) shared = new Sound_Player();

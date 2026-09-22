@@ -93,9 +93,9 @@ export function Game_Session(get_level, config, muted, transport) {
     // `build` making a set per match left the outgoing set paused, decoded and alive --
     // ninety of them a minute on a client being repaired every two seconds, which is exactly
     // the client that could least afford them (#30, #91). They hold nothing to do with a
-    // room either, and a session is one room entry: owning them here left a set behind per
-    // entry, and walking a match back to the lobby rebuilds the session, so it cost two
-    // (#123).
+    // room either, and a session is rebuilt on every room entry and on every walk between
+    // the lobby and the match (`viewmodels.js`): owning them here left a set behind for each
+    // of those, so a browse in, a match and a browse out cost two (#123).
     var sound_player = shared_sound_player();
     // The two halves of the simulation a snapshot is packed from and unpacked into: the
     // objects and the RNG's own state. The players are the `player` array, which is the
