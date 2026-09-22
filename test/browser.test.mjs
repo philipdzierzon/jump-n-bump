@@ -1352,8 +1352,43 @@ async function sound() {
         20,
     );
 
+    // --- alt-tab with the key still down (#85) ---------------------------------------
+    // The key is held and the browser is about to stop telling this page about it: no
+    // keyup is ever delivered for it, and the map used to go on reporting it pressed --
+    // which `Room.step` re-reads and re-stamps 60 times a second, so the latch was the
+    // whole room's picture and not this page's.
+    // The event rather than a real tab switch: which window has focus is the window
+    // manager's business and headless has no window manager, so a second tab brought to
+    // the front is a different test on every machine. What is under test is what the page
+    // does when the event lands.
+    // ponytail: proves the handler, not that Chrome fires blur on alt-tab. upgrade path:
+    // a second page and `bringToFront()`, if headless focus ever becomes something a suite
+    // with no retries can lean on.
+    await sound_page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await forget_sounds(sound_page);
+    await sound_page.clock.fastForward(500);
+
+    // A keydown on a key that is already down, which is what the OS repeats into a window
+    // that regains focus still holding it -- and here, the only thing that can jump again.
+    // `jump_ready` comes back on a tick that saw the key *up* (`movement.js:92`), so a
+    // bunny whose keyup never arrived jumps once and then never again: a jump after the
+    // blur is proof the simulation was told to let go. Asserting silence instead would
+    // prove nothing, because a latched key is just as silent.
+    await sound_page.keyboard.down("ArrowUp");
+    await wind_until(
+        sound_page,
+        "the jump the blur made possible again",
+        async () => (await sounds(sound_page)).includes("jump.mp3"),
+        500,
+        20,
+    );
+
     // M, which is a keyup in this game. The key stays down over it, so what is being
-    // silenced is a bunny that was sounding a moment ago and goes on jumping throughout.
+    // silenced is a bunny that was sounding a moment ago.
+    //
+    // ponytail: this one is weaker than it reads -- a held jump fires once and is silent
+    // after (`jump_ready`, movement.js:92), so silence here does not prove the mute.
+    // upgrade path: re-press ArrowUp while muted, as the blur block above does.
     await sound_page.keyboard.press("m");
     await until("the music to stop", async () => (await music(sound_page)).paused === true);
     await forget_sounds(sound_page);
