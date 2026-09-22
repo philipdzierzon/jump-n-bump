@@ -431,10 +431,23 @@ function broadcast_state(room) {
 
 // A client is atomic: its seat count is fixed at the names screen and granted
 // all-or-nothing, so a couch pair stays together and keeps every seat (#14).
-// The seats nobody is holding. A reserved seat is not one of them: its holder's token owns
-// it until the window runs out, which is the same reason `/api/rooms` counts it as occupied.
+// The seats this room could hand to a client right now. Nobody holding it is most of the
+// answer: a reserved seat is not one of them, because its holder's token owns it until the
+// window runs out, which is the same reason `/api/rooms` counts it as occupied.
+//
+// Mid-match there is a second half, and it is the rule `claim_seat` has always applied to
+// the other door (#7, #37, #116): only a seat the AI is driving. One a client is steering
+// is not free; one its holder let go is still that bunny's driver until thirty missing
+// ticks hand it over; and one the room disabled stays disabled for the match it was
+// disabled in. It belongs here rather than at either caller, because the two ask one
+// question in one synchronous step and `quick_join` leans on them agreeing: `best_room`
+// picks the room and `seat_client` seats the client in it, so a room ranked on seats that
+// cannot be granted is a client landing in a stranger's room holding nothing instead of in
+// a room of its own (#44).
 function free_seats(room) {
-    return room.seats.map((seat, index) => (seat ? -1 : index)).filter((index) => index >= 0);
+    return room.seats
+        .map((seat, index) => (seat || (room.started && room.drivers[index] !== "ai") ? -1 : index))
+        .filter((index) => index >= 0);
 }
 
 // Seats a whole client or none of it, which is the one rule every way into a seat obeys: a
@@ -443,12 +456,10 @@ function free_seats(room) {
 // waited.
 function seat_client(client, names) {
     const room = client.room;
-    // Mid-match, only a seat the AI is driving, which is the rule `claim_seat` has always
-    // applied to the other door (#7, #37, #116): a seat its holder let go is still that
-    // bunny's driver until the room hands it over, and one the room disabled stays disabled
-    // for the match it was disabled in. Filtered before the fit test, not after the grant,
-    // so a couch that no longer fits waitlists exactly as a full room makes it (#14, #44).
-    const free = free_seats(room).filter((seat) => !room.started || room.drivers[seat] === "ai");
+    // Mid-match `free_seats` is narrower than "unheld", so this is also where a seat the
+    // room is still driving for its old holder is refused (#116). The fit test is the same
+    // one it always was: a couch that no longer fits waitlists rather than splitting.
+    const free = free_seats(room);
     if (free.length < names.length || name_taken(room, names)) return false;
     client.seats = free.slice(0, names.length);
     client.seats.forEach((seat, nth) => {

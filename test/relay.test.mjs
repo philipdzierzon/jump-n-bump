@@ -1786,7 +1786,7 @@ stuck.socket.close();
 // rather than the thirty missing ticks it takes the room to hand that bunny over. That is
 // the fast path under #93's allowance: a `leave`, a fresh token and a `seats` message
 // bought a fresh five repairs on the same bunny.
-const guard = connect({ type: "create", id: "MDGRD" });
+const guard = connect({ type: "create", id: "MDGRD", listed: true });
 await lobby(guard);
 await guard.seats(["Ann", "Bea"]);
 const quitter = connect({ type: "join", id: "MDGRD" });
@@ -1817,6 +1817,15 @@ assert.equal(
     true,
     "and a client that cannot fit waits rather than being refused",
 );
+
+// Quick Join ranks rooms with the same function, which is why the rule lives in it: a room
+// whose free seats cannot be granted does not fit, and the client gets one of its own
+// rather than landing in this one holding nothing and never being told why (#44, #116).
+const passer_by = connect({ type: "quick", names: ["Nix"] });
+const passer_joined = await lobby(passer_by);
+assert.notEqual(passer_joined.id, "MDGRD", "a room it could not be seated in is not one that fits");
+assert.deepEqual(passer_joined.held, [0], "so Quick Join answers with a room of its own, seated");
+passer_by.socket.close();
 
 // Thirty missing ticks later those bunnies really are the AI's, which is the one moment
 // mid-match a seat becomes grantable: the queue is served there rather than left waiting

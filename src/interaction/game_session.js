@@ -300,6 +300,12 @@ export function Game_Session(get_level, config, muted, transport) {
         // waitlist -- is driven no earlier than the `start` that answers the resume it asks
         // for, which is this build. A spectator's stray keypress therefore cannot reach the
         // bunny it is handed (#119, #42).
+        //
+        // The invariant to keep is "cleared exactly when the seat becomes drivable", not
+        // "cleared on every start": the two guards above return before this line, and a
+        // client that refuses the `start` drives nothing, so the latch it keeps is a latch
+        // no tick will read. Moving this call above them would clear taps for a match this
+        // client never joins, and moving it below the build would clear the tick-0 input.
         keyboard.clear_taps();
         var t1 = performance.now();
         // After the guards above: a `start` this client refuses to build must leave the
