@@ -141,6 +141,9 @@ function create(client, msg) {
         // nobody else's: a client cannot push an entry in here, so it cannot flush the
         // reference out of it either (#41). `desyncs` is the room's own counter, which is
         // how a determinism defect gets noticed in the wild -- it is the number in the log.
+        // It counts mismatches *seen*, not repairs sent: the three branches in `desync()`
+        // that can repair nothing are detections all the same, and a counter that skipped
+        // them read zero for exactly the desyncs nobody could see (#118, #126).
         checksums: [],
         desyncs: 0,
         // Driver changes stamped for a tick nobody has stepped yet. The table above is
@@ -930,6 +933,11 @@ function keep_checksum(client, msg) {
     if (!room.started) return;
     if (!Number.isInteger(msg.t) || !Number.isInteger(msg.h)) return;
     if (!client.host) {
+        // `resync_t` is the guard here: a hash the client had already sent when the repair
+        // was decided on belongs to the state being replaced. `dropped` beside it is a fast
+        // path and not the rule -- `desync()` owns that one and checks it again -- worth its
+        // half of the line for skipping the lookup and not parking a `pending` on a client
+        // nobody is going to repair (#126).
         if (client.allowance.dropped || msg.t <= (client.resync_t || 0)) return;
         const reference = room.checksums.find((one) => one.t === msg.t);
         // Held one deep rather than queued: a client has one tick in flight at a time, and
@@ -949,6 +957,21 @@ function keep_checksum(client, msg) {
     }
 }
 
+// Detected, and answerable with nothing: the three branches in `desync()` below repair no
+// one, and until #118 each of them said so in the log nowhere and in the counter nowhere.
+// #110 hid behind that silence for months. One helper for all three, so the shape cannot
+// drift between them.
+function unrepairable(client, t, why) {
+    client.waiting = true;
+    console.log(
+        "room %s desync %d at tick %d, nothing to repair with (%s)",
+        client.room.id,
+        client.room.desyncs,
+        t,
+        why,
+    );
+}
+
 // A mismatch is the desync -- the relay substitutes a missing frame, so every client's input
 // stream is identical and a divergence is a determinism bug rather than routine drift (#17,
 // #41). Recovery is the payload the join path already sends, and there is no new UI for it:
@@ -961,29 +984,38 @@ function desync(client, t) {
     // A hash held for a host hash that arrived after its sender went is nobody's
     // disagreement any more, and must not spend a repair.
     if (!room.clients.has(client) || spent.dropped) return;
+    // Counted at detection rather than beside the repair: the counter says what the relay
+    // saw, the log line beneath it says what the relay did about it (#118).
+    room.desyncs++;
     // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
     // and the first hashes are half a second in, so the whole allowance would be spent
     // before a single repair could be sent. Marked instead, and answered by that first
     // snapshot exactly as a mid-match joiner's ask is (#40).
-    if (!room.snapshot) return void (client.waiting = true);
+    if (!room.snapshot) return unrepairable(client, t, "no snapshot yet");
     // Same shape, one snapshot later: a resume `room.tick - room.snapshot.t` this far past
     // cannot be served either, and spending a repair on an ask that comes back with nothing
     // is how a client starves its way to `drop_from_match` without ever having been repaired
     // (#92).
-    if (room.tick - room.snapshot.t > MAX_CATCH_UP) return void (client.waiting = true);
+    if (room.tick - room.snapshot.t > MAX_CATCH_UP)
+        return unrepairable(client, t, "snapshot is past the catch-up ceiling");
     // Same reason, same shape: the ring's count cap can evict past this snapshot's tick
     // before the ceiling above even trips, and spending a repair on that is spending it on
     // nothing (#92 review).
-    if (room.snapshot.t <= room.holed) return void (client.waiting = true);
+    if (room.snapshot.t <= room.holed)
+        return unrepairable(client, t, "the frames behind the snapshot are gone");
     const now = Date.now();
     const since = now - spent.at;
     // Quiet for long enough: the run this client was in is over, and the repair that ended
     // it worked. What is starting now gets the whole allowance.
     if (since > repair_reset_ms()) spent.repairs = 0;
     // Still the same unrepaired desync, seen again 30 ticks later: the last repair has not
-    // had a fresh snapshot to have worked from yet, so this is not a second one.
+    // had a fresh snapshot to have worked from yet, so this is not a second one. Silent on
+    // purpose, and the one branch in here that has to be: a client hashes every 30 ticks and
+    // a divergence lasts until something repairs it, so a line here is a line every half
+    // second for as long as the fault runs. It is still counted -- the count is sightings --
+    // and the repair line below prints that count, so a count running ahead of the repair
+    // number is how often this branch was taken (#118).
     else if (since < repair_cooldown_ms()) return;
-    room.desyncs++;
     if (spent.repairs >= MAX_REPAIRS) {
         console.log(
             "room %s desync %d at tick %d, dropped after %d repairs with no let-up",

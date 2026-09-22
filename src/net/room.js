@@ -137,7 +137,13 @@ export function Room(transport, read_input) {
                 // stays because the loopback transport has no relay in front of it.
                 if ((msg.t | 0) - tick > MAX_CATCH_UP) break;
                 // Measured on arrival rather than on use: this is the only moment the wire
-                // trip and the sender's own lateness are both visible (#70).
+                // trip and the sender's own lateness are both visible (#70). So it counts
+                // frames *seen*, the same convention the relay's `desyncs` keeps (#118): a
+                // frame for a seat the room has since handed to the AI is counted here and
+                // deleted in `step()` (#110), so `arrived` answers "what reached this client
+                // and when", not "what the simulation ran". `substituted`, `holes` and
+                // `forged` are the ones measured on use, and are not fractions of this
+                // number (#126).
                 stats.arrived++;
                 var margin = (msg.t | 0) - tick;
                 if (margin < 0) {

@@ -3,6 +3,7 @@
 // test and a fake of it would be the thing under test instead. Run with `npm test`.
 import assert from "node:assert";
 import fs from "node:fs";
+import { format } from "node:util";
 
 import { normalise_room_id } from "../src/net/room_id.js";
 import { LEVELS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/room_config.js";
@@ -740,6 +741,27 @@ assert.equal(
     undefined,
     "a room whose host has not snapshotted yet has nothing to hand over",
 );
+// A mismatch the relay can repair nothing with is still a mismatch it detected, and this
+// is the branch that covers the first two seconds of every match -- the silence #110 hid in
+// for months, logged nowhere and counted nowhere (#118). The line is the whole fix, so the
+// line is what is asserted: the relay runs in this process, so its own `console.log` is
+// readable from here.
+const said = [];
+const spoke = console.log;
+console.log = (...args) => said.push(format(...args));
+early_host.socket.send({ type: "checksum", t: 30, h: 111 });
+early_guest.socket.send({ type: "checksum", t: 30, h: 222 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+console.log = spoke;
+assert.ok(
+    said.some((line) =>
+        /^room SNPZX desync 1 at tick 30, nothing to repair with \(no snapshot yet\)$/.test(line),
+    ),
+    "a desync the relay has no snapshot to repair from names the branch, the tick and its " +
+        "place in the room's count (#118) -- said instead: " +
+        said.join(" | "),
+);
+
 const early_matrix = new Array(16).fill(0);
 early_matrix[1] = 2;
 early_host.socket.send({ type: "snapshot", t: 0, matrix: early_matrix, body: "FIRST-BODY" });

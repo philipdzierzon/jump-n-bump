@@ -1049,6 +1049,10 @@ async function walk() {
     await until("the music to get going", async () => (await music_t()) > 0.4);
     const audio_before = await audio_made();
     const t_before = await music_t();
+    // Said out loud, because the relay cannot know: a desync line in CI output is a health
+    // signal, and the two this suite plants on purpose were told apart by their tick number
+    // until now. Room and tick, next to the relay's own line for them (#126).
+    console.log("deliberate desync: room %s, ticks 30-240, the boss's forged hashes (#41)", room_d);
     for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", t, h: 1 });
     await until("the repair to land", () => page.locator(".reconnecting").isVisible());
     assert.equal(
@@ -1332,6 +1336,12 @@ async function two_pages() {
         return t !== null && host_hashes.has(t);
     });
     const lied_tick = await guest.evaluate(() => window.__lied_tick);
+    // The second of the two deliberate ones, announced for the same reason as the walk's.
+    console.log(
+        "deliberate desync: room %s, tick %d, the guest's lied hash (#96)",
+        room_e,
+        lied_tick,
+    );
     assert.deepEqual(
         disagreements(host_hashes, guest_hashes),
         [lied_tick],
@@ -2973,31 +2983,39 @@ try {
 } catch (error) {
     // Where the page actually was, which a locator timeout never says: "not visible" reads
     // the same whether the flow went nowhere or went somewhere else entirely.
-    const where = await page
-        .evaluate(() => ({
-            hash: window.location.hash,
-            showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
-                .filter((el) => el.offsetParent !== null)
-                .map((el) => el.getAttribute("data-bind").match(/screen\(\) === '(\w+)'/)[1]),
-            // Every `p.err`, not just the first in document order, now that every screen has
-            // one: an empty one contributes nothing, so this is never longer than it needs
-            // to be for whichever screen the page was actually on.
-            error: [...document.querySelectorAll("p.err")]
-                .map((el) => el.textContent.trim())
-                .filter(Boolean)
-                .join(" | "),
-            // The participant rows are the `participants` array, and an empty one is what
-            // bounces the lobby back to the names screen.
-            participants: document.querySelectorAll("div[data-bind*=\"screen() === 'names'\"] li")
-                .length,
-        }))
-        .catch(() => null);
-    // The main page, which is not the failing one when the fake-clock section is what broke.
-    console.error("main page was at:", JSON.stringify(where));
-    const routes = await page.evaluate(() => window.__routes || []).catch(() => []);
-    console.error("routes the page took (last 20):");
-    for (const route of routes.slice(-20)) console.error("  " + route);
-    console.error("last frames the page was sent:");
+    const state = (open) =>
+        open
+            .evaluate(() => ({
+                hash: window.location.hash,
+                showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
+                    .filter((el) => el.offsetParent !== null)
+                    .map((el) => el.getAttribute("data-bind").match(/screen\(\) === '(\w+)'/)[1]),
+                // Every `p.err`, not just the first in document order, now that every screen
+                // has one: an empty one contributes nothing, so this is never longer than it
+                // needs to be for whichever screen the page was actually on.
+                error: [...document.querySelectorAll("p.err")]
+                    .map((el) => el.textContent.trim())
+                    .filter(Boolean)
+                    .join(" | "),
+                // The participant rows are the `participants` array, and an empty one is what
+                // bounces the lobby back to the names screen.
+                participants: document.querySelectorAll(
+                    "div[data-bind*=\"screen() === 'names'\"] li",
+                ).length,
+            }))
+            .catch(() => null);
+    // Every page still open, which is the failing one by construction: a section closes its
+    // pages when it passes. The flow page used to be the only one dumped, so a two-page
+    // comparison (#113) failing printed a third page's screen and routes (#126).
+    for (const [name, made] of contexts)
+        for (const open of made.pages()) {
+            const where = await state(open);
+            if (!where) continue;
+            console.error(name + " page was at:", JSON.stringify(where));
+            const routes = await open.evaluate(() => window.__routes || []).catch(() => []);
+            for (const route of routes.slice(-20)) console.error("  " + name + ": " + route);
+        }
+    console.error("last frames the flow page was sent:");
     for (const frame of frames.slice(-25)) console.error("  " + frame);
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
     // nothing to read.
