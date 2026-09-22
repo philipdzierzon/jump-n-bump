@@ -997,7 +997,12 @@ function resume(client) {
 // none short of a server-side simulation, which is the thing this whole design avoids (#6).
 function keep_checksum(client, msg) {
     const room = client.room;
-    if (!room.started) return;
+    // A hash from the match that ended is a hash of another game: `begin` has cleared what it
+    // could have been held against, so it would be held against this match's for the same
+    // tick, and from the host it would be the reference every client's is judged by (#132).
+    // Refused like the frame in `input`, with that case's ceiling for a page too old to
+    // stamp one, and not counted: `stale` is frames, and a hash cannot move a clock.
+    if (!room.started || msg.match !== room.match) return;
     if (!Number.isInteger(msg.t) || !Number.isInteger(msg.h)) return;
     if (!client.host) {
         // `resync_t` is the guard here: a hash the client had already sent when the repair

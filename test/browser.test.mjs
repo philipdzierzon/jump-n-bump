@@ -1153,7 +1153,8 @@ async function walk() {
     // suite booted it, the container's in CI -- so what ties the two together is the room
     // id, not the order they print in (#126).
     console.log("deliberate desync: room %s, ticks 30-240, the boss's forged hashes (#41)", room_d);
-    for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", t, h: 1 });
+    // Stamped with the room's one match: a hash from any other is refused (#132).
+    for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", match: 1, t, h: 1 });
     await until("the repair to land", () => page.locator(".reconnecting").isVisible());
     assert.equal(
         await audio_made(),
@@ -1358,7 +1359,7 @@ async function two_pages() {
                 if (msg.type === "checksum") {
                     window.__lie = false;
                     window.__lied_tick = msg.t;
-                    data = JSON.stringify({ type: "checksum", t: msg.t, h: (msg.h ^ 1) | 0 });
+                    data = JSON.stringify({ ...msg, h: (msg.h ^ 1) | 0 });
                 }
             }
             return send.call(this, data);
@@ -2413,7 +2414,7 @@ async function late_resume() {
                 const msg = JSON.parse(data);
                 if (msg.type === "checksum") {
                     window.__lie = false;
-                    data = JSON.stringify({ type: "checksum", t: msg.t, h: (msg.h ^ 1) | 0 });
+                    data = JSON.stringify({ ...msg, h: (msg.h ^ 1) | 0 });
                 }
             }
             return send.call(this, data);
