@@ -194,6 +194,9 @@ function create(client, msg) {
         // both doors into one refuse a seat the AI is not driving mid-match, so a `leave`
         // costs the thirty missing ticks it takes the room to hand that bunny over rather
         // than a round trip (#116). Closes the accidental reload, deters nothing deliberate.
+        // The ceiling grew with #117: the verbatim token now also gets past a locked room's
+        // password while it holds a reserved seat there, so this is no longer only about
+        // allowances -- see the note at `join`'s door.
         // upgrade path: an identity the client cannot choose (#7), or rate limiting (#47).
         allowances: new Map(),
         // The whole phase model: a room is in lobby or in-game, and there is no third
