@@ -138,6 +138,9 @@ const context = await make_context("flow");
 const page = await context.newPage();
 const page_errors = [];
 page.on("pageerror", (error) => page_errors.push(error.message));
+// AC4 (#92): the tick a resumed snapshot was packed on, against the tick it arrived with.
+const console_lines = [];
+page.on("console", (msg) => console_lines.push(msg.text()));
 // What the relay told this page, kept for a failure to print. A flow driven by a socket is
 // unreadable from the DOM alone: the screen it ended on says what happened, and this says
 // which message did it.
@@ -1002,6 +1005,13 @@ async function walk() {
         t_after >= t_before,
         `the repair rewound the music rather than resuming it: ${t_before} -> ${t_after} (#91)`,
     );
+    // AC4's other half: packed at tick 0, sent on the wire as tick 0, and they agree -- so
+    // pinning the message alone would pass an `if (true)` that logs on every repair. This is
+    // the negative that catches it: nothing about this one's tick disagreement is unpacked.
+    assert.ok(
+        !console_lines.some((line) => line.startsWith("snapshot packed at tick %d arrived")),
+        "AC4: ticks that agree are not reported as a disagreement (#92)",
+    );
     await click("Back to the lobby");
     await on("room");
     // And it goes with the match, rather than standing over the lobby this page walked to --
@@ -1672,6 +1682,10 @@ async function reconnect() {
     const dropped = await context.newPage();
     const errors = [];
     dropped.on("pageerror", (error) => errors.push(error.message));
+    // AC4 (#92): the tick a resumed snapshot was packed on, against the tick it arrived
+    // with. Nothing else in this page reaches the console, so a match here is unambiguous.
+    const console_lines = [];
+    dropped.on("console", (msg) => console_lines.push(msg.text()));
 
     // Somebody else hosts, so the match this page drops out of goes on being played: a host
     // that leaves takes the match with it, and there would be nothing to come back to.
@@ -1700,9 +1714,12 @@ async function reconnect() {
     // in progress is given (#40): without one there is a seat to reclaim but no match to
     // play from. The relay never decodes a body, so an empty simulation of the right size is
     // as good as a played one.
+    // t: 5 on the wire, against an all-zero packed body -- `unpack_snapshot` reads its tick
+    // out of the body itself, so this one is packed at 0 and arrives claiming 5, which is
+    // exactly the disagreement AC4 exists to report (#92).
     host.send({
         type: "snapshot",
-        t: 0,
+        t: 5,
         matrix: new Array(16).fill(0),
         body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
     });
@@ -1725,6 +1742,17 @@ async function reconnect() {
         return !said.includes("Connection lost");
     });
     await on("play", dropped);
+    // Playwright's ConsoleMessage.text() does not do the browser's own %d substitution --
+    // it hands back the literal format string with the arguments appended, space-separated
+    // (`console.log`'s own template, then `0 5`, not "tick 0 arrived as tick 5").
+    assert.ok(
+        console_lines.some(
+            (line) =>
+                line.startsWith("snapshot packed at tick %d arrived as tick %d") &&
+                line.endsWith("0 5"),
+        ),
+        "AC4: the packed tick and the tick it arrived with disagree, and it says so (#92)",
+    );
     assert.deepEqual(
         host_saw.filter((msg) => msg.type === "room").pop().seats,
         ["Host", "Dott", null, null],
