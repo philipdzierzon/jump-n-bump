@@ -293,6 +293,13 @@ export function Game_Session(get_level, config, muted, transport) {
         // is this match's real tick-0 input (a level sample, not a latch), and wiping
         // `keys_pressed` too would strand it with no keydown left to set it again --
         // including on a repair, where the player never stopped holding it.
+        //
+        // It is the mid-match seat boundary as well, and the only call needed for it: a
+        // `Room` is handed a seat list nowhere but `start` (`room.js`'s `held = msg.held`),
+        // so a seat granted while a match runs -- by the Take-seat button, or off the
+        // waitlist -- is driven no earlier than the `start` that answers the resume it asks
+        // for, which is this build. A spectator's stray keypress therefore cannot reach the
+        // bunny it is handed (#119, #42).
         keyboard.clear_taps();
         var t1 = performance.now();
         // After the guards above: a `start` this client refuses to build must leave the

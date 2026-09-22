@@ -1780,6 +1780,80 @@ assert.equal(
 four_up.socket.close();
 stuck.socket.close();
 
+// Both doors into a seat ask the same question mid-match (#116). `claim_seat` has always
+// refused a seat the room is not driving with the AI; `take_seats` took whatever nobody
+// held, so a client could give a seat up and be handed it straight back -- a round trip,
+// rather than the thirty missing ticks it takes the room to hand that bunny over. That is
+// the fast path under #93's allowance: a `leave`, a fresh token and a `seats` message
+// bought a fresh five repairs on the same bunny.
+const guard = connect({ type: "create", id: "MDGRD" });
+await lobby(guard);
+await guard.seats(["Ann", "Bea"]);
+const quitter = connect({ type: "join", id: "MDGRD" });
+await lobby(quitter);
+await quitter.seats(["Cid", "Dot"]);
+const guard_saw = [];
+guard.socket.receive((msg) => guard_saw.push(msg));
+// Every seat is held when the match begins, so the AI is driving none of them.
+quitter.socket.send({ type: "ready", ready: true });
+guard.socket.send({ type: "start", seed: 5, settings: {} });
+await awaited(guard_saw, "start");
+quitter.socket.send({ type: "leave" });
+await quitter.until((msg) => msg.type === "room" && !msg.held.length);
+
+// The same seats, asked for again on the next message: free, because their holder let them
+// go, and still that holder's bunnies as far as the room is concerned.
+quitter.socket.send({ type: "seats", names: ["Cid", "Dot"] });
+const refused_mid = await quitter.until(
+    (msg) => msg.type === "error" || (msg.type === "room" && (msg.queued || msg.held.length)),
+);
+assert.deepEqual(
+    refused_mid.held,
+    [],
+    "a seat mid-match is grantable only while the AI drives it, whichever door asks (#116)",
+);
+assert.equal(
+    refused_mid.queued,
+    true,
+    "and a client that cannot fit waits rather than being refused",
+);
+
+// Thirty missing ticks later those bunnies really are the AI's, which is the one moment
+// mid-match a seat becomes grantable: the queue is served there rather than left waiting
+// for a `leave` that may never come (#44).
+for (let t = 0; t <= 34; t++)
+    guard.socket.send({ type: "input", t, seats: { 0: pressed_key, 1: pressed_key } });
+await until_seen(
+    guard_saw,
+    (msg) => msg.type === "driver" && msg.seat === 3 && msg.driver === "ai",
+    "the seats their holder let go to become the AI's",
+);
+await new Promise((resolve) => setTimeout(resolve, 100));
+// The room as this client was last told it, rather than the next update that happens to
+// mention it: a waitlist left unserved goes on broadcasting, and waiting for a grant that
+// never comes is a timeout rather than an answer.
+const served_mid = quitter.events.filter((msg) => msg.type === "room").pop();
+assert.deepEqual(
+    served_mid.held,
+    [2, 3],
+    "and the waitlist is served the moment they are: the seats go to the client that waited",
+);
+assert.equal(served_mid.queued, false, "which is what takes it out of the queue");
+
+// And the table that match leaves behind says nothing about the lobby: there is no match
+// to be a bunny's driver in, so every seat nobody holds is grantable again.
+guard.socket.send({ type: "match_end", reason: "host_left", matrix: new Array(16).fill(0) });
+await quitter.until((msg) => msg.type === "room" && !msg.started);
+quitter.socket.send({ type: "leave" });
+await quitter.until((msg) => msg.type === "room" && !msg.held.length);
+quitter.socket.send({ type: "seats", names: ["Cid", "Dot"] });
+const relobbied = await quitter.until(
+    (msg) => msg.type === "error" || (msg.type === "room" && (msg.queued || msg.held.length)),
+);
+assert.deepEqual(relobbied.held, [2, 3], "in the lobby, every free seat is grantable as before");
+guard.socket.close();
+quitter.socket.close();
+
 // Quick Join: one round trip, and the answer is a seat. The room it picks is the listed,
 // unlocked one with the fewest free seats that still takes the whole client -- a match in
 // progress before a lobby, oldest breaking ties -- and when nothing fits, a room of its own

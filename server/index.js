@@ -174,10 +174,11 @@ function create(client, msg) {
         // admitted. Bounded with the rest of abuse (#47).
         //
         // ponytail: the token is accepted from the client verbatim (`admit`), so a client that
-        // wants a fresh allowance sends a fresh one and re-takes the seat it just gave up
-        // (`leave` frees it now, `take_seats` re-grants it mid-match). Closes the accidental
-        // reload, deters nothing deliberate. upgrade path: an identity the client cannot choose
-        // (#7), or rate limiting (#47).
+        // wants a fresh allowance sends a fresh one. The seat no longer comes back with it:
+        // both doors into one refuse a seat the AI is not driving mid-match, so a `leave`
+        // costs the thirty missing ticks it takes the room to hand that bunny over rather
+        // than a round trip (#116). Closes the accidental reload, deters nothing deliberate.
+        // upgrade path: an identity the client cannot choose (#7), or rate limiting (#47).
         allowances: new Map(),
         // The whole phase model: a room is in lobby or in-game, and there is no third
         // (#21). The countdown is part of the lobby, not a phase of its own.
@@ -442,7 +443,12 @@ function free_seats(room) {
 // waited.
 function seat_client(client, names) {
     const room = client.room;
-    const free = free_seats(room);
+    // Mid-match, only a seat the AI is driving, which is the rule `claim_seat` has always
+    // applied to the other door (#7, #37, #116): a seat its holder let go is still that
+    // bunny's driver until the room hands it over, and one the room disabled stays disabled
+    // for the match it was disabled in. Filtered before the fit test, not after the grant,
+    // so a couch that no longer fits waitlists exactly as a full room makes it (#14, #44).
+    const free = free_seats(room).filter((seat) => !room.started || room.drivers[seat] === "ai");
     if (free.length < names.length || name_taken(room, names)) return false;
     client.seats = free.slice(0, names.length);
     client.seats.forEach((seat, nth) => {
@@ -783,6 +789,11 @@ function substitute(room) {
                     AI_AFTER,
                 );
                 stamp_driver(room, seat, "ai");
+                // The one moment mid-match a free seat becomes grantable, now that a seat
+                // is only grantable while the AI drives it: a `leave` frees seats the room
+                // goes on driving for their holder, so a client that waitlisted against
+                // them is served here rather than on a `leave` that may never come (#44).
+                seat_queue(room);
             }
         }
         if (!Object.keys(seats).length) continue;

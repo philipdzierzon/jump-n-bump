@@ -66,6 +66,7 @@ const room_l = new_room_id();
 const room_m = new_room_id();
 const room_n = new_room_id();
 const room_o = new_room_id();
+const room_p = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -2956,6 +2957,121 @@ async function keyboard_only() {
     keeper.close();
 }
 
+// --- a seat granted from the waitlist mid-match (#119, #116) ----------------------------
+//
+// The third tap boundary. #86 gave the keyboard a latch so a key pressed between ticks is
+// not lost inside a catch-up batch, and cleared it at the two boundaries it owned: a match
+// being built, and a local board being hidden. The third is a seat arriving mid-match --
+// a spectator presses a key with no seat to read it on, and that latch must not steer the
+// bunny it is handed on its first tick, because that frame goes on the wire and every
+// other client replays it.
+//
+// Both doors into a seat land on the same boundary, which is why one walk covers them: the
+// only place `Room` is ever given a seat list is `start` (`src/net/room.js`, the `held =
+// msg.held` line), and `build` clears the latch before the tick that follows. So this walk
+// takes the door that had no coverage at all -- the waitlist, where the client sits in the
+// lobby holding nothing while the relay decides -- rather than the Take-seat button, which
+// `two_pages` already walks.
+//
+// Two keys, because `clear_taps` and `release_all` differ only here: Left is tapped and
+// gone, Up is still held when the seat lands. The tap must not arrive and the held key
+// must, which is #86's own reason for having two methods -- wiping `keys_pressed` would
+// strand a key nobody has let go of, with no keydown left to set it again.
+async function waitlisted_seat() {
+    const host = await (await make_context("waitlist-host")).newPage();
+    const spectator = await (await make_context("waitlist-spectator")).newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    spectator.on("pageerror", (error) => errors.push("spectator: " + error.message));
+    // This page's own frames, read off the wire: what it puts in the room's input stream is
+    // the thing under test, and the canvas cannot say whether a bunny stepped because it
+    // was told to or because the AI did it.
+    let sent = [];
+    spectator.on("websocket", (ws) =>
+        ws.on("framesent", ({ payload }) => {
+            const msg = JSON.parse(String(payload));
+            if (msg.type === "input") sent.push(msg);
+        }),
+    );
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_p);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+
+    // The other three seats on clients of their own, so the room is full when the spectator
+    // asks and there is exactly one seat to free later.
+    const fillers = [];
+    for (const name of ["Ann", "Ben", "Cid"]) {
+        const seen = [];
+        const client = relay_client({ type: "join", id: room_p }, seen);
+        await until("the room to take " + name, async () =>
+            seen.some((msg) => msg.type === "joined"),
+        );
+        client.send({ type: "seats", names: [name] });
+        await until(name + "'s seat", async () =>
+            seen.some((msg) => msg.type === "room" && msg.held.length === 1),
+        );
+        client.send({ type: "ready", ready: true });
+        fillers.push(client);
+    }
+    await click("Start the match", host);
+    await on("play", host);
+
+    // A full room in the middle of a match: the answer is "not yet", and the lobby is where
+    // it is waited in (#44).
+    await spectator.goto(origin + "/");
+    await click("Join with a room code", spectator);
+    await on("join", spectator);
+    await screen("join", spectator).locator("input").fill(room_p);
+    await click("Continue", spectator);
+    await on("names", spectator);
+    await spectator.keyboard.press("ArrowUp");
+    await until("the spectator's participant", async () => (await seats(spectator).count()) === 1);
+    await seats(spectator).nth(0).locator("input").fill("Zip");
+    await seats(spectator).nth(0).locator("input").blur();
+    await click("Take the seats", spectator);
+    await on("room", spectator);
+
+    // Watching a match it holds no seat in, and pressing keys at it. `document.onkeydown` is
+    // wired for the whole session, so both of these reach the keyboard and neither has a
+    // seat to be read on.
+    await spectator.keyboard.down("ArrowLeft");
+    await spectator.keyboard.up("ArrowLeft");
+    await spectator.keyboard.down("ArrowUp");
+    sent = [];
+
+    // Ann gives her seat up. It stays her bunny's as far as the room is concerned until
+    // thirty missing ticks hand it to the AI, which is the moment it becomes a seat the
+    // waitlist can be given (#116) -- so this is a grant the spectator asked for long
+    // before, and did not press anything to get.
+    fillers[0].send({ type: "leave" });
+    await on("play", spectator);
+    const frames_of = (seat) => sent.filter((msg) => msg.seats && msg.seats[seat]).slice(0, 10);
+    const mine = frames_of(1);
+    assert.ok(mine.length, "the seat it waited for is one it drives: it stamps frames for it");
+    assert.equal(
+        mine.some((msg) => msg.seats["1"].left),
+        false,
+        "a key tapped before the seat arrived is not in the frames that seat starts with (#119)",
+    );
+    assert.equal(
+        mine.some((msg) => msg.seats["1"].up),
+        true,
+        "and a key still held when it arrives is: `clear_taps`, never `release_all` (#86)",
+    );
+
+    await spectator.keyboard.up("ArrowUp");
+    for (const filler of fillers) filler.close();
+    assert.deepEqual(errors, [], "and neither page threw");
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -2971,6 +3087,7 @@ try {
     await sound();
     await browse();
     await queueing();
+    await waitlisted_seat();
     await double_click_create();
     await superseded_create_closes();
     await rejoin_fails();
