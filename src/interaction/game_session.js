@@ -156,6 +156,10 @@ export function Game_Session(get_level, config, muted, transport) {
     // board travels with it (#22, #19). It comes back to the announcer too, which is what
     // makes every client leave the match on the same message rather than on its own.
     room.on_match_end = function (msg) {
+        // Where a session stops being one that is in a match. Every client hears the same
+        // message, so this is the one place both readers of the flag agree on: the way out
+        // of the match screen, and the announcement that way out makes (#87).
+        self.in_match = false;
         if (self.on_match_end) self.on_match_end(msg);
     };
     // A client that stops simulating hands its seats over rather than leaving them frozen.
