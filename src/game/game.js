@@ -48,8 +48,12 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
         }
     }
 
+    // Monotonic, which the name always promised: the Win32 timer this is named after counts
+    // from boot and cannot be stepped. `Date.getTime()` can go backwards under an NTP
+    // correction, and a backwards step is exactly what would un-trip the batch bound in
+    // `pump` and put the loop back in the lock it is there to prevent (#83).
     function timeGetTime() {
-        return new Date().getTime();
+        return performance.now();
     }
 
     // Who drives a seat: whoever the room delivers a frame for this tick, the AI if nobody
@@ -121,10 +125,31 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
         return tick_limit ? Math.max(0, tick_limit - room.now()) : null;
     };
 
+    // The most wall clock one catch-up batch may hold the event loop for. One frame: the loop
+    // exists to hit 60 Hz, so blocking longer than the frame it is chasing is never the right
+    // trade. What it bounds is how long the socket, the keyboard and the timer wait between
+    // two ticks -- not latency: the check is after a tick, so a single tick that takes three
+    // seconds still blocks for three seconds. No tick is capped and none is skipped (#83).
+    //
+    // ponytail: nested `setTimeout(pump, 0)` clamps to 4 ms five deep, so a client catching up
+    // runs at ~80% duty. Upgrade path: `scheduler.yield()` or a `MessageChannel` ping.
+    var BATCH_MS = 1000 / 60;
+
     function pump() {
+        var batch_started = timeGetTime();
         while (playing) {
             game_iteration();
             var now = timeGetTime();
+            // Above the sprint branch on purpose: a peer holding `gap()` positive drives that
+            // branch past both the draw and the yield, and it is the entrance that needs the
+            // bound most (#83, and `docs/research/desync-under-load.md` §7 -- a client that
+            // has not read its socket cannot know what the room is doing).
+            if (now - batch_started >= BATCH_MS) {
+                next_time = now + 1000 / 60;
+                renderer.draw();
+                setTimeout(pump, 0);
+                break;
+            }
             // Behind the room rather than behind its own clock. The ticks between here and
             // the newest frame anybody has stamped are ticks whose input has already
             // arrived, so stepping them is replay and not guesswork -- and a client that
@@ -147,8 +172,11 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
 
             if (time_diff > 0) {
                 // We have time left, so the backlog is cleared: draw once for the whole
-                // catch-up batch. Catch-up itself stays uncapped and no tick is ever
-                // skipped -- a slow client loses frames, never simulation state (#30).
+                // catch-up batch. Catch-up stays uncapped in ticks and no tick is ever
+                // skipped -- what bounds it is `BATCH_MS` of wall clock per batch, so the
+                // loop always reaches this yield or the one above it. That bound is what
+                // makes the old claim true: a slow client loses frames, never simulation
+                // state (#30, #83).
                 renderer.draw();
                 setTimeout(pump, time_diff);
                 break;

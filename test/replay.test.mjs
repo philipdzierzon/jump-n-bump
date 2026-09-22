@@ -87,7 +87,7 @@ const no_sfx = { jump() {}, death() {}, spring() {}, splash() {}, fly() {}, musi
 // `held` is the seats this client holds; control scheme n drives held[n] (#32). Input
 // reaches the simulation only through the room, over a loopback transport -- the same path
 // a networked room takes, with a different transport under it (#16, #33).
-function start(seed, settings, held, transport = new Loopback_Transport()) {
+function start(seed, settings, held, transport = new Loopback_Transport(), renderer = no_renderer) {
     const keyboard = new Keyboard([]);
     const room = new Room(transport, (scheme) => keyboard.input_frame(scheme));
     room.start({ seed, settings, held });
@@ -97,7 +97,7 @@ function start(seed, settings, held, transport = new Loopback_Transport()) {
         new Movement(no_sfx, objects, room.settings, rnd),
         new AI(),
         new Animation(no_renderer, {}, objects, rnd),
-        no_renderer,
+        renderer,
         objects,
         room,
         { ban_map: default_ban_map() },
@@ -263,6 +263,9 @@ const behind_transport = (ahead) => ({
 });
 const behind = start(9, {}, [0], behind_transport(40));
 assert.equal(behind.room.gap(), 38, "the room is 38 ticks past the tick this client landed on");
+// Real `performance.now()` here, and the only real-clock dependency in this file: the 38
+// ticks below must cost less than the 16.67 ms batch bound (#83) or the pump yields first.
+// They cost microseconds -- but if this ever flakes, that bound is why.
 behind.game.start();
 assert.equal(
     behind.room.now(),
@@ -301,6 +304,71 @@ assert.ok(
     absurd.room.gap() <= 0,
     "a frame stamped past anything this client could replay is dropped, not believed",
 );
+
+// #83: one simulation tick that costs more than a frame must not lock the loop. The pump
+// advances its budget by exactly one frame per tick, so before the batch bound a tick that
+// overran it left `next_time - now` monotonically decreasing and the break unreachable -- no
+// draw, no keyboard, no socket read, and in an endless match no exit at all. Both the clock
+// and the yield are globals the pump reads at call time, so a fake clock here needs no seam
+// the game does not already have.
+{
+    const real_performance = globalThis.performance;
+    const real_setTimeout = globalThis.setTimeout;
+    let fake = 0;
+    let drawn = 0;
+    let stepped = 0;
+    const yields = [];
+    // The fake clock only moves when a tick runs, so nothing here depends on how fast the
+    // machine running the test is. 20 ms a tick against a 16.67 ms budget.
+    const slow_renderer = {
+        add_pob() {},
+        add_leftovers() {},
+        clear_pobs() {
+            fake += 20;
+            // A regression in the intermediate state -- monotonic clock in, bound missing --
+            // hangs rather than fails, so it is turned into a failure here.
+            if (++stepped > 100) throw new Error("#83: pump spun instead of yielding");
+        },
+        draw() {
+            drawn++;
+        },
+    };
+    globalThis.performance = { now: () => fake };
+    globalThis.setTimeout = (fn, ms) => yields.push(ms); // the wakeup is never run
+
+    try {
+        const slow = start(9, {}, [0], new Loopback_Transport(), slow_renderer);
+        slow.game.start();
+        assert.equal(stepped, 1, "the batch ends on the tick that overran the frame budget");
+        assert.equal(
+            yields.length,
+            1,
+            "and the loop yields to the event loop rather than spinning",
+        );
+        assert.equal(slow.room.now(), 1, "the tick it stepped is stepped, not skipped");
+        assert.equal(drawn, 1, "a bounded batch still draws, so the tab is not frozen either");
+        slow.game.pause();
+
+        // The sprint branch `continue`s past both the draw and the yield, and any peer can
+        // hold it open up to MAX_CATCH_UP every tick, so it needs the same bound -- and it is
+        // this sub-case, not the one above, that fails without it: the pump would drain all
+        // 38 backlog ticks in one block.
+        fake = 0;
+        stepped = 0;
+        drawn = 0;
+        yields.length = 0;
+        const sprinting = start(9, {}, [0], behind_transport(40), slow_renderer);
+        assert.equal(sprinting.room.gap(), 38, "the room is 38 ticks ahead before the first step");
+        sprinting.game.start();
+        assert.equal(stepped, 1, "a sprint is bounded by the same batch budget");
+        assert.equal(yields.length, 1, "and yields instead of draining 38 ticks in one block");
+        assert.equal(sprinting.room.gap(), 37, "the backlog is still there, to be run next wakeup");
+        sprinting.game.pause();
+    } finally {
+        globalThis.performance = real_performance;
+        globalThis.setTimeout = real_setTimeout;
+    }
+}
 
 let ended = null;
 local.room.on_match_end = (msg) => (ended = msg);
