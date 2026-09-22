@@ -1614,6 +1614,44 @@ duo.socket.close();
 lone_host.socket.close();
 unlisted.socket.close();
 
+// One malformed frame is dropped and the socket goes on handling the next, rather than
+// taking the handler with it under a page that still looks alive (#94). The relay cannot be
+// made to send one, so the frame is handed to the client's own `onmessage`: the socket under
+// it is real and the relay behind it is real, and the only fake thing is the frame.
+const Native_WebSocket = globalThis.WebSocket;
+let raw = null;
+// The last socket opened, which is the guest's -- `two_seats` connects the host first.
+globalThis.WebSocket = class extends Native_WebSocket {
+    constructor(...args) {
+        super(...args);
+        raw = this;
+    }
+};
+const parse = await two_seats("PARSE");
+globalThis.WebSocket = Native_WebSocket;
+raw.onmessage({ data: "{" });
+parse.host.socket.send({ type: "input", t: 9, seats: { 0: pressed_key } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    parse.guest_saw.some((msg) => msg.type === "input" && msg.t === 9),
+    "a malformed frame mid-match is dropped, and the frame after it is handled as usual",
+);
+// And the guard covers the parse alone. A `try` around the whole handler would drop a
+// malformed frame just as quietly while swallowing every bug in the dispatch under it --
+// worse than the hole it closes, and invisible to the assertion above.
+parse.guest.socket.receive(() => {
+    throw new Error("dispatch");
+});
+assert.throws(
+    () => raw.onmessage({ data: JSON.stringify({ type: "input", t: 10 }) }),
+    /dispatch/,
+    "a well-formed frame whose handler throws is not swallowed: the guard is the parse, not the dispatch",
+);
+parse.guest.socket.receive(() => {});
+
+parse.host.socket.close();
+parse.guest.socket.close();
+
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");
 process.exit(0);
