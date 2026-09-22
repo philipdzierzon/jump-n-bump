@@ -1049,9 +1049,11 @@ async function walk() {
     await until("the music to get going", async () => (await music_t()) > 0.4);
     const audio_before = await audio_made();
     const t_before = await music_t();
-    // Said out loud, because the relay cannot know: a desync line in CI output is a health
-    // signal, and the two this suite plants on purpose were told apart by their tick number
-    // until now. Room and tick, next to the relay's own line for them (#126).
+    // Said out loud, because the relay cannot know: a desync line is a health signal, and
+    // the two this suite plants on purpose were told apart by their tick number until now.
+    // The relay's own line for them goes to the relay's stdout -- this process's when the
+    // suite booted it, the container's in CI -- so what ties the two together is the room
+    // id, not the order they print in (#126).
     console.log("deliberate desync: room %s, ticks 30-240, the boss's forged hashes (#41)", room_d);
     for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", t, h: 1 });
     await until("the repair to land", () => page.locator(".reconnecting").isVisible());
@@ -1330,18 +1332,16 @@ async function two_pages() {
     );
 
     // And the assertion can fail: one hash the guest gets wrong on purpose.
+    // The second of the two deliberate ones, announced before it is told rather than after:
+    // the tick is not known until the lie is on the wire, and the room id is what ties this
+    // to the relay's own line for it anyway (#126).
+    console.log("deliberate desync: room %s, the guest's next hash is a lie (#96)", room_e);
     await guest.evaluate(() => (window.__lie = true));
     await until("the lied tick to reach the host too", async () => {
         const t = await guest.evaluate(() => window.__lied_tick);
         return t !== null && host_hashes.has(t);
     });
     const lied_tick = await guest.evaluate(() => window.__lied_tick);
-    // The second of the two deliberate ones, announced for the same reason as the walk's.
-    console.log(
-        "deliberate desync: room %s, tick %d, the guest's lied hash (#96)",
-        room_e,
-        lied_tick,
-    );
     assert.deepEqual(
         disagreements(host_hashes, guest_hashes),
         [lied_tick],
@@ -3004,17 +3004,25 @@ try {
                 ).length,
             }))
             .catch(() => null);
-    // Every page still open, which is the failing one by construction: a section closes its
-    // pages when it passes. The flow page used to be the only one dumped, so a two-page
-    // comparison (#113) failing printed a third page's screen and routes (#126).
-    for (const [name, made] of contexts)
+    // The newest pages still open, which is where the failure is: only three of the
+    // nineteen sections close their pages when they pass, so by the end of a run nearly
+    // every page ever opened is still there and the failing one is the *last* of them.
+    // Three deep, because the widest thing asserted across pages is #113's host-against-
+    // guest comparison and the flow page behind it. The flow page alone used to be the
+    // whole dump, so that comparison failing printed a third page's screen and routes
+    // (#126).
+    let dumped = 0;
+    for (const [name, made] of [...contexts].reverse()) {
+        if (dumped >= 3) break;
         for (const open of made.pages()) {
-            const where = await state(open);
-            if (!where) continue;
-            console.error(name + " page was at:", JSON.stringify(where));
+            if (dumped++ >= 3) break;
+            // Printed even when it is null: a page that died is exactly the case where its
+            // absence is the thing worth saying.
+            console.error(name + " page was at:", JSON.stringify(await state(open)));
             const routes = await open.evaluate(() => window.__routes || []).catch(() => []);
             for (const route of routes.slice(-20)) console.error("  " + name + ": " + route);
         }
+    }
     console.error("last frames the flow page was sent:");
     for (const frame of frames.slice(-25)) console.error("  " + frame);
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has

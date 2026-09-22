@@ -15,6 +15,7 @@ import { default_ban_map, LEVEL_WIDTH } from "../src/asset_data/default_levelmap
 import { BAN_ICE } from "../src/game/level.js";
 import { Renderer } from "../src/interaction/renderer.js";
 import { Room } from "../src/net/room.js";
+import { MAX_CATCH_UP } from "../src/net/room_config.js";
 import { Loopback_Transport } from "../src/net/loopback_transport.js";
 import {
     checksum_ban_map,
@@ -239,6 +240,23 @@ assert.deepEqual(
     delayed_room.stats(),
     { substituted: 2, arrived: 1, late: 1, worst_margin: -3, late_by: { "-3": 1 }, holes: 0 },
     "a frame arriving after the tick it was stamped for is counted, with its slack",
+);
+// And one for a tick this room could not reach if it replayed for a whole minute: refused
+// rather than scheduled, and counted all the same. `arrived` is what the wire delivered, so
+// it is counted above that guard rather than after it -- the relay counts its own refusal of
+// the same frame (`room.forged++`), and a client silent about what the relay is loud about
+// is the blind spot #118 closed one layer up (#126).
+const before_ceiling = delayed_room.gap();
+delayed_transport.to_client({ type: "input", t: MAX_CATCH_UP + 10, seats: { 1: { left: true } } });
+assert.deepEqual(
+    delayed_room.stats(),
+    { substituted: 2, arrived: 2, late: 1, worst_margin: -3, late_by: { "-3": 1 }, holes: 0 },
+    "a frame past the catch-up ceiling is counted as arrived, and measured as nothing else",
+);
+assert.equal(
+    delayed_room.gap(),
+    before_ceiling,
+    "and it is refused rather than scheduled: the room's position does not move with it",
 );
 
 // Input edge latch: a tap that begins and ends between two loop wakeups, and a key really

@@ -157,7 +157,10 @@ function create(client, msg) {
         // `missing` counts, per seat, how many ticks in a row the relay has had to put a
         // released frame in for -- thirty of them hands that seat to the AI. `late` and
         // `forged` are the two ways a frame is dropped silently, counted per room and read
-        // from the log line the match ends on.
+        // from the log line the match ends on. Both are incremented where the frame is
+        // refused, which is the same rule `desyncs` above keeps: a counter counts what the
+        // relay saw, and the log line says what it did about it. A counter added here goes
+        // at its own refusal site, not after whatever the refusal led to (#118, #126).
         due: 0,
         missing: new Array(SEATS).fill(0),
         substituted: 0,

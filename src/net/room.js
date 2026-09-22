@@ -129,6 +129,19 @@ export function Room(transport, read_input) {
                 if (self.on_start) self.on_start(msg);
                 break;
             case "input":
+                // Above the guard below, not after it: `arrived` is what the wire delivered
+                // to this client, so a frame that guard refuses is counted here and
+                // scheduled nowhere -- the relay counts its own refusal of that same frame
+                // as `forged`, and a client that counted it nowhere would be silent about
+                // what the relay is loud about. Measured on arrival rather than on use for
+                // the reason #70 gives: this is the only moment the wire trip and the
+                // sender's own lateness are both visible. So it counts what was seen, which
+                // is the convention the relay's `desyncs` keeps (#118, #126) -- a frame for
+                // a seat the room has since handed to the AI is counted here and deleted in
+                // `step()` (#110) too. `late` and `late_by` below are strict subsets of it,
+                // counted on the same arrival; `substituted` and `holes` are measured on
+                // use in `step()` and are not fractions of it at all.
+                stats.arrived++;
                 // A tick this client could not reach if it replayed for a whole minute, so
                 // it is not a frame. `newest` is what `gap()` reads as the room's position,
                 // and `pump` sprints while that gap is positive, so one client stamping a
@@ -136,15 +149,6 @@ export function Room(transport, read_input) {
                 // match (#51, #71). The relay bounds the same frame since #82; this bound
                 // stays because the loopback transport has no relay in front of it.
                 if ((msg.t | 0) - tick > MAX_CATCH_UP) break;
-                // Measured on arrival rather than on use: this is the only moment the wire
-                // trip and the sender's own lateness are both visible (#70). So it counts
-                // frames *seen*, the same convention the relay's `desyncs` keeps (#118): a
-                // frame for a seat the room has since handed to the AI is counted here and
-                // deleted in `step()` (#110), so `arrived` answers "what reached this client
-                // and when", not "what the simulation ran". `substituted`, `holes` and
-                // `forged` are the ones measured on use, and are not fractions of this
-                // number (#126).
-                stats.arrived++;
                 var margin = (msg.t | 0) - tick;
                 if (margin < 0) {
                     stats.late++;
