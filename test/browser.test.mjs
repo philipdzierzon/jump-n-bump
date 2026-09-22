@@ -67,6 +67,7 @@ const room_m = new_room_id();
 const room_n = new_room_id();
 const room_o = new_room_id();
 const room_p = new_room_id();
+const room_q = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -209,6 +210,16 @@ async function on(name, root = page) {
 }
 
 const hash = (root = page) => root.evaluate(() => window.location.hash);
+// Whether a page reaches a route, as a boolean rather than as a thrown timeout: where a
+// claim is "it gets there" the assertion should be the thing that goes red and say what was
+// expected, which a locator timeout never does.
+const reaches = (root, want, ms = 15000) =>
+    root
+        .waitForFunction((h) => window.location.hash === h, want, { timeout: ms })
+        .then(
+            () => true,
+            () => false,
+        );
 // Synchronous, unlike `__routes`: `apply_route` can replace the hash again before
 // `__routes`'s `setTimeout` push runs (a bounce), so that push always reads the hash
 // *after* the bounce, for both entries. This one lands in the same task as the
@@ -1178,6 +1189,57 @@ async function self_ending_match() {
     await clock_page.close();
 }
 
+// A match that begins inside the last one's two-second hold (#39, #124). The hold is a
+// `go("room")` on a timer and `on_match_start` cancels it, which is the case that cancel was
+// written for: without it the client is walked out of the match it has just been handed, two
+// seconds in. Offline and on a fake clock, so those two seconds pass exactly when this says
+// they do -- against a relay the host would be sitting through a ten-second countdown, which
+// is longer than the hold the next match has to begin inside.
+async function new_match_outranks_the_hold() {
+    const held_page = await (await make_context("hold")).newPage();
+    const errors = [];
+    held_page.on("pageerror", (error) => errors.push(error.message));
+    await held_page.clock.install();
+    await held_page.goto(origin + "/");
+
+    await click("Play offline", held_page);
+    await on("names", held_page);
+    await held_page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(held_page).count()) === 1);
+    await click("Take the seats", held_page);
+    await on("room", held_page);
+    await open_settings(held_page);
+    await config_row("Minutes", "number", held_page).fill("1");
+    await click("Apply to the next match", held_page);
+
+    await click("Start the match", held_page);
+    await on("play", held_page);
+    // Exactly the limit, and not a millisecond of the hold that follows it: the walk is
+    // armed and has not been served.
+    await held_page.clock.fastForward("01:00");
+    // Back to the lobby inside the hold, which leaves it armed behind us -- only leaving the
+    // room itself clears it (#39) -- and is the one way to reach Start while it still runs.
+    await click("Back to the lobby", held_page);
+    await on("room", held_page);
+    await click("Start the match", held_page);
+    await on("play", held_page);
+
+    await held_page.clock.fastForward(2500);
+    await settle();
+    assert.equal(
+        await held_page.evaluate(() => window.location.hash),
+        "#play",
+        "a match that begins inside the last one's hold outranks it: the walk to the lobby " +
+            "is cancelled, not served two seconds into the new match (#39, #124)",
+    );
+    assert.ok(
+        (await chrome(held_page)).some((item) => /^\d+:\d\d$/.test(item)),
+        "and what it is looking at is the new match, still counting down",
+    );
+    assert.deepEqual(errors, [], "with nothing thrown on the way");
+    await held_page.close();
+}
+
 // --- two real pages in one room (#66) --------------------------------------------------
 // jsdom bound Knockout once per module import, so one process was one page: every second
 // client in the walk above is a raw socket with no page of its own. Two browser contexts
@@ -2113,6 +2175,154 @@ async function rejoin_fails() {
     break_start = false;
     await click("Rejoin the match", guest);
     await on("play", guest);
+}
+
+// A resume that lands after the match it is for has ended (#124). The walk back to the lobby
+// is a two-second timer, and `on_match_start` cancels it -- rightly, for a match that is
+// beginning, which is the case its comment is about. A `resume` that arrives after
+// `match_end` walks into that same cancel and leaves the client on the match screen of a
+// match nobody else is still in, with nothing left to route it out.
+//
+// The guard that would have refused the build, `gap > MAX_CATCH_UP`, cannot fire any more:
+// #84 made `gap()` return 0 once the match is over, deliberately and correctly. What is left
+// to tell a `start` for the match this client has just watched end from one that begins the
+// next is the match number on it (#122), which `match_end` does not clear.
+//
+// Both routes into it are walked here. The guest joins the running match from the lobby,
+// which is AC3 and the second route the issue names, and the repair it is sent later is a
+// real one -- one lied-about checksum, exactly as two_pages() does. Only the delivery is
+// arranged: that repair frame is held at the socket until the `match_end` has gone past it,
+// which is the ordering the bug needs and the only way to get it on purpose.
+async function late_resume() {
+    const host = await (await make_context("late-host")).newPage();
+    const guest_context = await make_context("late-guest");
+    await guest_context.addInitScript(() => {
+        window.__lie = false;
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data) {
+            if (window.__lie && typeof data === "string" && data.includes('"checksum"')) {
+                const msg = JSON.parse(data);
+                if (msg.type === "checksum") {
+                    window.__lie = false;
+                    data = JSON.stringify({ type: "checksum", t: msg.t, h: (msg.h ^ 1) | 0 });
+                }
+            }
+            return send.call(this, data);
+        };
+    });
+    const guest = await guest_context.newPage();
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+    // `report_repair`'s line, printed by `build()` and by nothing else: it is what says a
+    // payload was built into a simulation rather than merely delivered to the page. Nothing
+    // on screen tells those two apart, and the screen is what the bug is about. Matched on
+    // the literal format string, because `ConsoleMessage.text()` does not do the browser's
+    // own `%s`/`%d` substitution -- see reconnect() for the same read.
+    const built = [];
+    guest.on("console", (msg) => {
+        if (msg.text().startsWith("%s at tick %d: gap %d ticks")) built.push(msg.text());
+    });
+
+    // The repair, held back until after the match it repairs has ended. Armed only once the
+    // guest is in the match, so the join below -- a `start` with a snapshot too -- goes
+    // through and gives `built` the one line the assertion at the end is measured against.
+    let hold = false;
+    let held = null;
+    let released = 0;
+    await guest.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        ws.onMessage((frame) => relay.send(frame));
+        relay.onMessage((frame) => {
+            const msg = JSON.parse(String(frame));
+            if (hold && msg.type === "start" && msg.snapshot) return void (held = frame);
+            ws.send(frame);
+            // A beat after the end, and well inside the two-second hold: released any later
+            // and the walk this is meant to cancel would already have happened by itself,
+            // which would pass whatever the client did with the frame.
+            if (msg.type === "match_end" && held)
+                setTimeout(() => {
+                    released++;
+                    ws.send(held);
+                }, 100);
+        });
+    });
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_q);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    // Alone in the room, so Start begins the match on the press rather than on a countdown.
+    await click("Start the match", host);
+    await on("play", host);
+
+    await guest.goto(origin + "/#" + room_q);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    // Renamed: both couches call their first bunny Dott and the host holds it, so taking the
+    // seat unrenamed is a name collision rather than the mid-match join under test.
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    // AC3: a client that takes a seat from the lobby while the match runs is handed the
+    // match -- the `start` carrying the host's state is built, not refused.
+    assert.ok(
+        await reaches(guest, "#play"),
+        "a client that takes a seat from the lobby while a match runs is handed that match",
+    );
+    assert.equal(
+        built.length,
+        1,
+        "and it got there by building the state the relay sent it, not by any other route " +
+            "(#40)",
+    );
+
+    // One wrong hash, which is what makes the relay send a repair -- the payload nobody will
+    // have any use for by the time it is let through.
+    hold = true;
+    await guest.evaluate(() => (window.__lie = true));
+    await until("the relay's repair, held at the socket", () => held !== null);
+
+    await click("Back to the lobby", host);
+    await on("room", host);
+    // AC1: the guest is not leaving -- it is being told the match is over, and it walks
+    // itself back after the moment the last frame is held for (#39). The resume released
+    // inside that hold must not cancel the walk.
+    const walked = await reaches(guest, "#room");
+    assert.equal(released, 1, "the held resume really was delivered, and after the match_end");
+    // Both halves of the criterion in one claim, because they are one: the build is what
+    // reaches `on_match_start`, and `on_match_start` is what cancels the walk. `built` is
+    // still at the one line the join above printed, and the client got to the lobby.
+    assert.deepEqual(
+        [walked, built.length],
+        [true, 1],
+        "a resume for a match that is already over neither builds nor cancels the walk to " +
+            "the lobby (#124, #39)",
+    );
+    assert.equal(
+        await err_on("room", guest),
+        "",
+        "and nothing is said to have gone wrong, because nothing did",
+    );
+    await until("the guest's board", () => board_panel(guest).isVisible());
+    const names = (await grid(board_panel(guest)))
+        .slice(1)
+        .map((row) => row[0].replace(" (AI)", ""));
+    assert.deepEqual(
+        [names.length, names.indexOf("Dott"), names.indexOf("Zip"), names[4]],
+        [5, 0, 1, "Total deaths"],
+        "and it ends up looking at the board of the match it played, not at a match screen " +
+            "nobody else is in (#124, #13)",
+    );
+
+    assert.deepEqual(errors, [], "with nothing thrown on either page");
 }
 
 async function phone() {
@@ -3077,6 +3287,7 @@ async function waitlisted_seat() {
 try {
     await walk();
     await self_ending_match();
+    await new_match_outranks_the_hold();
     await two_pages();
     await reconnect();
     await reconnect_gives_up();
@@ -3091,6 +3302,7 @@ try {
     await double_click_create();
     await superseded_create_closes();
     await rejoin_fails();
+    await late_resume();
     await phone();
     await keyboard_only();
     console.log(

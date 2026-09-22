@@ -153,6 +153,12 @@ export function Game_Session(get_level, config, muted, transport) {
     // A limit the simulation reached. Every client reaches it on the same tick and stops
     // there; only the host announces it, which is what the others leave the match on (#22).
     this.on_limit = null;
+    // The match this client last watched end, by the room's own count of its matches
+    // (#122). Zero until one does, which is a number no `start` ever carries. `room.match`
+    // is not cleared by `match_end` -- it outlives the match it names, which is the whole
+    // reason it can be read here at all -- so a `start` arriving with this number, or with
+    // one below it, is for a match this client has already seen out (#124).
+    var ended_match = 0;
 
     // The relay cannot read the simulation, so the host announces the end and the final
     // board travels with it (#22, #19). It comes back to the announcer too, which is what
@@ -162,6 +168,10 @@ export function Game_Session(get_level, config, muted, transport) {
         // message, so this is the one place both readers of the flag agree on: the way out
         // of the match screen, and the announcement that way out makes (#87).
         self.in_match = false;
+        // Read at the end and not at the next `start`, because a `start` is where the
+        // number is overwritten: by the time `build` runs, `room.match` is already the
+        // arriving payload's (#124).
+        ended_match = room.match;
         if (self.on_match_end) self.on_match_end(msg);
     };
     // A client that stops simulating hands its seats over rather than leaving them frozen.
@@ -279,14 +289,27 @@ export function Game_Session(get_level, config, muted, transport) {
     }
 
     function build(level) {
-        // Two ways a match already running cannot be joined: a body that does not decode,
-        // and a gap too big to replay. Either one means this client would be playing a
-        // state it knows is wrong, so it stays in the lobby and plays the next match
-        // instead of half-joining this one (#40).
+        // Three ways a match already running cannot be joined: a body that does not decode,
+        // a gap too big to replay, and a match that is not running any more. The first two
+        // mean this client would be playing a state it knows is wrong; the third means
+        // there is nothing left to join. All three leave it in the lobby to play the next
+        // match rather than half-joining this one (#40).
+        //
+        // The third is #124. The relay serves no resume for a match that is over
+        // (`server/index.js`'s `if (!room.started || !room.snapshot) return`), so a payload
+        // naming a match this client has watched end was sent before it ended -- whether it
+        // crossed the `match_end` on the wire or was still fetching its level when it
+        // landed. Building it anyway put the client back on the match screen of a match
+        // nobody else was in, and `on_match_start` cancelled the walk to the lobby that
+        // `match_end` had armed, which was the only thing left to route it out (#39). The
+        // gap guard beside it cannot catch this: #84 made `gap()` return 0 past a match end
+        // on purpose, so it reads 0 here and always will. A `start` that begins the next
+        // match carries a higher number and is refused by none of this (#122).
         var t0 = performance.now();
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
         var gap = room.gap();
-        if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return start_failed();
+        if (room.resume && (!resumed || gap > MAX_CATCH_UP || room.match <= ended_match))
+            return start_failed();
         // A key tapped in the lobby has no tick to be read on yet -- it would otherwise sit
         // latched and land on this match's first tick, a spurious jump/step nobody pressed
         // just then (#86). `clear_taps`, not `release_all`: a key held into the countdown
