@@ -66,11 +66,26 @@ function connect(entry) {
         socket,
         events,
         async until(matches) {
-            for (;;) {
-                const index = events.findIndex(matches);
-                // Consumed, so the next wait cannot be answered by an old message.
-                if (index >= 0) return events.splice(0, index + 1).pop();
-                await new Promise((resolve) => (wake = resolve));
+            // Raced against a timeout, same 2s as `until_seen` and `awaited_where`: this
+            // suite has no runner underneath it, so a wait with no reject arm hangs the
+            // whole thing instead of failing the one case that stopped getting an answer.
+            let timer;
+            try {
+                return await Promise.race([
+                    (async () => {
+                        for (;;) {
+                            const index = events.findIndex(matches);
+                            // Consumed, so the next wait cannot be answered by an old message.
+                            if (index >= 0) return events.splice(0, index + 1).pop();
+                            await new Promise((resolve) => (wake = resolve));
+                        }
+                    })(),
+                    new Promise((_, reject) => {
+                        timer = setTimeout(() => reject(new Error("until() timed out")), 2000);
+                    }),
+                ]);
+            } finally {
+                clearTimeout(timer);
             }
         },
         seats(names) {
@@ -476,6 +491,12 @@ assert.deepEqual(
     "but the board keeps the name of whoever last held it: a seat-keyed column of bumps " +
         "still needs a heading, and a seat nobody ever took has none of its own (#13, #39)",
 );
+assert.equal(
+    vacated.host_seat,
+    0,
+    "and the room names the seat its host is on, so a client that is not the host can say " +
+        "which of four names it is waiting for (#88)",
+);
 await new Promise((resolve) => setTimeout(resolve, 100));
 const short_handed = gate_saw.filter((msg) => msg.type === "start").pop();
 assert.deepEqual(
@@ -723,22 +744,25 @@ const early_matrix = new Array(16).fill(0);
 early_matrix[1] = 2;
 early_host.socket.send({ type: "snapshot", t: 0, matrix: early_matrix, body: "FIRST-BODY" });
 // Answered by the snapshot rather than by a reply to anything, so this waits on the
-// message and gives up rather than hanging a suite that has no test runner under it.
-function awaited(seen, type) {
+// message and gives up rather than hanging a suite that has no test runner under it. A
+// predicate rather than a bare type, because two messages of the same type can ride the
+// wire and only one of them is the answer.
+function awaited_where(seen, predicate, label) {
     return new Promise((resolve, reject) => {
         const since = Date.now();
         const wait = setInterval(() => {
-            const msg = seen.find((one) => one.type === type);
+            const msg = seen.find(predicate);
             if (msg) {
                 clearInterval(wait);
                 resolve(msg);
             } else if (Date.now() - since > 2000) {
                 clearInterval(wait);
-                reject(new Error("no " + type + " ever arrived"));
+                reject(new Error("no " + label + " ever arrived"));
             }
         }, 10);
     });
 }
+const awaited = (seen, type) => awaited_where(seen, (msg) => msg.type === type, type);
 const answered = await awaited(early_saw, "start");
 assert.equal(answered.snapshot, "FIRST-BODY", "so the host's first snapshot answers the ask");
 
@@ -763,6 +787,177 @@ assert.deepEqual(
 );
 early_guest.socket.close();
 
+// --- a throttled snapshot interval: the ring keeps what the snapshot needs, or the resume
+// is refused rather than served with a hole (#92) --------------------------------------
+//
+// A host whose tab went to the background: the browser throttles its snapshot interval to
+// about one a minute, so one snapshot is followed by thousands of frames and no second one.
+// The ring used to hold a fixed 2000 entries, so the frames the snapshot still needed fell
+// off the front of it and the joiner after that was handed a state with a hole behind it --
+// replayed as released keys, desynced on landing, with nothing counting it (#92).
+//
+// One collector on the guest for both cases below: `socket.receive` replaces the listener
+// outright, so a second call to it would silently orphan the first (#94's guard is on the
+// parse, not on this).
+const thr_host = connect({ type: "create", id: "THRTL" });
+await lobby(thr_host);
+await thr_host.seats(["Chief"]);
+thr_host.socket.send({ type: "start", seed: 7, settings: {}, held: [] });
+const thr_guest = connect({ type: "join", id: "THRTL" });
+await lobby(thr_guest);
+const thr_saw = [];
+thr_guest.socket.receive((msg) => thr_saw.push(msg));
+thr_host.socket.send({ type: "snapshot", t: 0, matrix, body: "THROTTLED-BODY" });
+// A driver change stamped before the gap, so `served.changes` below has something in it to
+// prune correctly rather than being vacuously empty.
+thr_host.socket.send({ type: "driver", seat: 0, driver: "ai" });
+const FRAMES = 2200; // past the 2000 the ring used to cap at
+for (let t = 1; t <= FRAMES; t++) thr_host.socket.send({ type: "input", t, seats: { 0: pressed } });
+// Waited on rather than slept off: the relay handles one socket's messages in order and fans
+// each frame out as it goes, so the guest seeing the last one proves every one before it was
+// rung too.
+await awaited_where(thr_saw, (msg) => msg.type === "input" && msg.t === FRAMES, "the last frame");
+thr_guest.socket.send({ type: "resync" });
+const served = await awaited_where(thr_saw, (msg) => msg.type === "start", "the resume");
+assert.equal(served.t, 0, "the snapshot is still the one the host took");
+assert.equal(
+    served.inputs[0].t,
+    1,
+    "and the ring still starts at it: no hole between the state and the frames after it",
+);
+assert.equal(served.inputs.length, FRAMES, "every frame since, none shifted off the front");
+assert.deepEqual(
+    served.changes,
+    [{ t: 2 * served.d, seat: 0, driver: "ai" }],
+    "the driver change stamped before the gap rides with it, on the tick it lands",
+);
+
+// Past the catch-up ceiling the ring cannot cover the snapshot at all, and a payload with a
+// hole in it is not one to send. The ask is left standing rather than refused, and the
+// host's next snapshot answers it -- which is what a room that had not snapshotted yet
+// already does (#40, #92). The client keeps its seat and its place in the room throughout.
+const before_resync = thr_saw.length;
+thr_host.socket.send({ type: "input", t: MAX_CATCH_UP + 1, seats: { 0: pressed } });
+await awaited_where(
+    thr_saw,
+    (msg) => msg.type === "input" && msg.t === MAX_CATCH_UP + 1,
+    "the frame past the ceiling",
+);
+thr_guest.socket.send({ type: "resync" });
+// Nothing answers this one -- that is the point -- so there is no reply of its own to await.
+// A second message that does get one stands in for it: two sends on one socket are handled
+// in the order they were sent, so "room" (ready's answer) cannot arrive before "start"
+// (resync's, if there were one) would have. Drained first -- the driver stamp above already
+// left one "room" update sitting unconsumed in `events`, and `until` would hand back that
+// stale one instead of waiting for a fresh one.
+thr_guest.events.length = 0;
+thr_guest.socket.send({ type: "ready", ready: true });
+await thr_guest.until((msg) => msg.type === "room");
+assert.ok(
+    !thr_saw.slice(before_resync).some((msg) => msg.type === "start"),
+    "a resume the ring cannot cover is not served with a hole in it",
+);
+
+// The desync path hits the same ceiling as resync's, and must not spend a repair finding
+// that out: a mismatch this far past the snapshot is answered with nothing either way, so
+// counting it would starve the client to `drop_from_match` having never actually been
+// repaired (plan-review MUST FIX 2). Six rounds, one more than the relay's MAX_REPAIRS(5) --
+// without the guard the sixth would end the match instead of the ceiling refusing all six.
+process.env.REPAIR_COOLDOWN_MS = "60";
+process.env.REPAIR_RESET_MS = "10000";
+thr_host.socket.send({ type: "checksum", t: MAX_CATCH_UP + 1, h: 111 });
+for (let round = 0; round < 6; round++) {
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    thr_guest.socket.send({ type: "checksum", t: MAX_CATCH_UP + 1, h: 222 });
+}
+// The last round needs the same settling time as the five before it: sent, not yet answered.
+await new Promise((resolve) => setTimeout(resolve, 90));
+assert.ok(
+    !thr_saw.slice(before_resync).some((msg) => msg.type === "start" || msg.type === "match_end"),
+    "a desync this far past the snapshot spends no repair -- not served, and not dropped either",
+);
+
+thr_host.socket.send({ type: "snapshot", t: MAX_CATCH_UP + 1, matrix, body: "SECOND-BODY" });
+// From `before_resync` on, not `find`'s default first match: case 1's own "start" is still
+// sitting in `thr_saw` from the resume it served.
+const late_answer = await awaited_where(
+    thr_saw,
+    (msg, i) => i >= before_resync && msg.type === "start",
+    "the deferred resume, once the next snapshot answers it",
+);
+assert.equal(late_answer.snapshot, "SECOND-BODY", "the next snapshot answers the ask standing");
+assert.equal(late_answer.t, MAX_CATCH_UP + 1, "on the tick the host took it");
+// This is the pruning case case 1's own `served.changes` check does not reach: that one's
+// floor never moves past the change's landing tick, so it only proves the change is not
+// dropped too early. Here the floor has moved to `MAX_CATCH_UP + 1`, thousands of ticks past
+// where the change landed, and `late_answer.changes` is protocol payload, not relay
+// internals -- if the change were still in `room.stamped`, it would be right here.
+assert.deepEqual(
+    late_answer.changes,
+    [],
+    "and the driver change stamped long before the gap is pruned once the floor passes it",
+);
+thr_guest.socket.close();
+thr_host.socket.close();
+
+// --- the count cap itself can silently evict a frame the floor still thinks it covers
+// (#92 review) ---------------------------------------------------------------------------
+//
+// The floor only moves when the snapshot or the catch-up ceiling does, but the cap behind
+// it counts entries: a client resending one tick past MAX_RING pushes the frames right
+// after the snapshot off the front before either ever has reason to move. `room.holed` is
+// what remembers the newest tick lost that way, and it is what has to refuse this, because
+// the floor alone does not see it.
+const MAX_RING = MAX_CATCH_UP * 5; // mirrors server/index.js: MAX_CATCH_UP * (SEATS + 1)
+const flood_host = connect({ type: "create", id: "FLUDZ" });
+await lobby(flood_host);
+await flood_host.seats(["Chief"]);
+flood_host.socket.send({ type: "start", seed: 3, settings: {}, held: [] });
+const flood_guest = connect({ type: "join", id: "FLUDZ" });
+await lobby(flood_guest);
+const flood_saw = [];
+flood_guest.socket.receive((msg) => flood_saw.push(msg));
+flood_host.socket.send({ type: "snapshot", t: 0, matrix, body: "FLOOD-BODY" });
+for (let t = 1; t <= 200; t++) flood_host.socket.send({ type: "input", t, seats: { 0: pressed } });
+await awaited_where(flood_saw, (msg) => msg.type === "input" && msg.t === 200, "the 200th frame");
+for (let i = 0; i < MAX_RING + 200; i++)
+    flood_host.socket.send({ type: "input", t: 200, seats: { 0: pressed } });
+// A marker after the flood, waited on rather than counted: one socket's messages land in the
+// order they were sent, so the marker arriving proves every flood frame ahead of it already
+// did too.
+flood_host.socket.send({ type: "input", t: 201, seats: { 0: pressed } });
+await awaited_where(
+    flood_saw,
+    (msg) => msg.type === "input" && msg.t === 201,
+    "the marker after the flood",
+);
+flood_guest.socket.send({ type: "resync" });
+flood_guest.events.length = 0;
+flood_guest.socket.send({ type: "ready", ready: true });
+await flood_guest.until((msg) => msg.type === "room");
+assert.ok(
+    !flood_saw.some((msg) => msg.type === "start"),
+    "a resume the cap has already holed is refused even though the floor never moved",
+);
+
+// desync() hits the same hole, and must not spend a repair on it either. room.tick is nowhere
+// near the catch-up ceiling here (~202), so this is the one scenario where `room.holed` alone
+// explains a refusal rather than riding along with the other guard.
+process.env.REPAIR_COOLDOWN_MS = "60";
+process.env.REPAIR_RESET_MS = "10000";
+flood_host.socket.send({ type: "checksum", t: 201, h: 111 });
+for (let round = 0; round < 6; round++) {
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    flood_guest.socket.send({ type: "checksum", t: 201, h: 222 });
+}
+await new Promise((resolve) => setTimeout(resolve, 90));
+assert.ok(
+    !flood_saw.some((msg) => msg.type === "start" || msg.type === "match_end"),
+    "the count-cap hole spends no repair either -- not served, and not dropped",
+);
+flood_guest.socket.close();
+flood_host.socket.close();
+
 // --- checksum desync detection (#41) ---------------------------------------------------
 //
 // The relay substitutes a missing frame, so every client in a room plays the same input
@@ -777,7 +972,7 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "REFERENCE-BODY" });
 
 const chk_guest = connect({ type: "join", id: "CHKSM" });
-await lobby(chk_guest);
+const chk_token = await lobby_token(chk_guest);
 await chk_guest.seats(["Guest"]);
 const chk_saw = [];
 chk_guest.socket.receive((msg) => chk_saw.push(msg));
@@ -847,9 +1042,9 @@ assert.equal(
     "a hash stamped before the repair is not a second desync",
 );
 
-// Repairs two to five, each a cooldown apart. The client's hash first on one of them, since
+// Repairs two to four, each a cooldown apart. The client's hash first on one of them, since
 // clients run at their own pace and either order has to reach the same comparison.
-for (const t of [630, 660, 690, 720]) {
+for (const t of [630, 660, 690]) {
     await cooled();
     chk_saw.length = 0;
     if (t === 660) {
@@ -862,24 +1057,52 @@ for (const t of [630, 660, 690, 720]) {
     assert.ok(await awaited(chk_saw, "start"), "repaired again rather than given up on");
 }
 
+// The allowance is the player's, not the socket's (#93). Reloaded here, after four of five,
+// rather than after the drop: what has to survive the reload is the *count*, not only a
+// flag a finished drop would leave behind. Moving `dropped` into the record and leaving
+// `repairs`/`at` on the socket -- the exact split this diff removed -- would pass every
+// assertion above and hand the reloaded socket a fresh count right here.
+chk_guest.socket.close();
+const chk_back = connect({ type: "join", id: "CHKSM", token: chk_token });
+const reloaded = await lobby(chk_back);
+assert.deepEqual(reloaded.held, [1], "the reload comes back to the seat the token held");
+assert.equal(
+    reloaded.labels[1],
+    "Guest",
+    "not dropped yet -- four of five spent is still a client the relay is repairing",
+);
+const back_saw = [];
+chk_back.socket.receive((msg) => back_saw.push(msg));
+
+// The fifth, on the reloaded socket: carried over from the one that closed, so this is the
+// last of the allowance and not a fresh first.
+await cooled();
+back_saw.length = 0;
+chk_host.socket.send({ type: "checksum", t: 720, h: 111 });
+chk_back.socket.send({ type: "checksum", t: 720, h: 222 });
+assert.ok(
+    await awaited(back_saw, "start"),
+    "repaired again rather than given up on, reload included",
+);
+
 // The sixth is a client that is not hiccupping. It leaves the match -- not the room: the
 // seat stays its own, the board says why nobody is driving it, and the next match in this
 // room is one it plays like any other.
 await cooled();
-chk_saw.length = 0;
+back_saw.length = 0;
 // Drained, so the room update awaited below is the one the drop broadcast and not an older
 // one still in the queue from the seat being taken.
-chk_guest.events.length = 0;
+chk_back.events.length = 0;
 chk_host.socket.send({ type: "checksum", t: 750, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 750, h: 222 });
-const dropped = await awaited(chk_saw, "match_end");
+chk_back.socket.send({ type: "checksum", t: 750, h: 222 });
+const dropped = await awaited(back_saw, "match_end");
 assert.equal(dropped.reason, "desync", "the match ends for that client, and says why");
 assert.equal(
-    chk_saw.find((msg) => msg.type === "start"),
+    back_saw.find((msg) => msg.type === "start"),
     undefined,
     "with no sixth repair behind it",
 );
-const after_drop = await chk_guest.until((msg) => msg.type === "room");
+const after_drop = await chk_back.until((msg) => msg.type === "room");
 assert.deepEqual(after_drop.held, [1], "the seat is still the dropped client's to play next match");
 assert.equal(
     after_drop.labels[1],
@@ -887,39 +1110,40 @@ assert.equal(
     "and the board says why nobody is driving it, beside `(left)` and `(AI)` (#13)",
 );
 
-// Dropped is dropped for the rest of this match: an ask still in flight, or another hash,
-// must not hand the match back.
-chk_saw.length = 0;
-chk_guest.socket.send({ type: "resync" });
+// Dropped is dropped for the rest of this match, across the reload already inside it: an ask
+// still in flight, another hash, or a fresh socket on the same token must not hand the match
+// back.
+back_saw.length = 0;
+chk_back.socket.send({ type: "resync" });
 await cooled();
 chk_host.socket.send({ type: "checksum", t: 780, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 780, h: 222 });
+chk_back.socket.send({ type: "checksum", t: 780, h: 222 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
-    chk_saw.find((msg) => msg.type === "start"),
+    back_saw.find((msg) => msg.type === "start"),
     undefined,
-    "a client the relay gave up repairing is not let back into the match it was dropped from",
+    "a reload is not a fresh allowance -- the relay still will not repair it (#93)",
 );
 
 // Out of the match, never out of the room: the next match in it is one the dropped client
-// plays like any other, with its seat and its name back (#41).
-chk_saw.length = 0;
-chk_guest.events.length = 0;
+// plays like any other, with its seat and its name back (#41), across the reload too (#93).
+back_saw.length = 0;
+chk_back.events.length = 0;
 // Readied after the match ends, not before: walking back to the lobby resets the room's
 // ready flags, which is what the countdown is there to collect again (#37).
 chk_host.socket.send({ type: "match_end", reason: "lobby", matrix: null });
 await new Promise((resolve) => setTimeout(resolve, 100));
-chk_guest.socket.send({ type: "ready", ready: true });
+chk_back.socket.send({ type: "ready", ready: true });
 await new Promise((resolve) => setTimeout(resolve, 50));
 chk_host.socket.send({ type: "start", seed: 8, settings: {}, held: [] });
-const next_match = await awaited(chk_saw, "start");
+const next_match = await awaited(back_saw, "start");
 assert.equal(next_match.t, 0, "the next match begins at tick zero for it like everybody else");
 assert.deepEqual(next_match.held, [1], "on the seat it kept");
-const relabelled = await chk_guest.until((msg) => msg.type === "room" && msg.labels[1] === "Guest");
+const relabelled = await chk_back.until((msg) => msg.type === "room" && msg.labels[1] === "Guest");
 assert.equal(relabelled.labels[1], "Guest", "and the board stops saying it was out of step");
 
 chk_host.socket.close();
-chk_guest.socket.close();
+chk_back.socket.close();
 
 // Five is five in a row, not five in a match. A client that recovers -- repaired, then
 // quiet -- starts the next run with the whole allowance, so an evening of occasional
@@ -1125,6 +1349,40 @@ assert.ok(
 );
 gap.host.socket.close();
 gap.guest.socket.close();
+
+// The catch-up run seeds its driver table once and walks it forward as it goes (#92), rather
+// than asking a fresh scan every tick: a change that lands mid-run must flip the table on
+// the tick it lands on -- not a tick early, and not never.
+const walk = await two_seats("WALKX");
+walk.guest.socket.send({ type: "input", t: 0, seats: { 1: pressed_key } });
+await until_seen(
+    walk.host_saw,
+    (msg) => msg.type === "input" && msg.t === 0,
+    "the quiet client's one frame",
+);
+for (let t = 0; t <= 34; t++)
+    walk.host.socket.send({ type: "input", t, seats: { 0: pressed_key } });
+const took_over = await until_seen(
+    walk.host_saw,
+    (msg) => msg.type === "driver" && msg.seat === 1,
+    "the quiet seat to go to the AI",
+);
+const land = took_over.t;
+// One frame far enough ahead that the room's clock jumps the whole distance to the landing
+// tick and past it in a single catch-up run -- the shape this file's other cases, one tick
+// per message, never exercise.
+walk.host.socket.send({ type: "input", t: land + 10, seats: { 0: pressed_key } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    walk.host_saw.some((msg) => msg.type === "input" && msg.t === land - 1 && msg.seats["1"]),
+    "still substituted the tick before the change lands",
+);
+assert.ok(
+    !walk.host_saw.some((msg) => msg.type === "input" && msg.t >= land && msg.seats["1"]),
+    "and never again from the tick it lands on -- not reverted back, and not stuck on early",
+);
+walk.host.socket.close();
+walk.guest.socket.close();
 
 // A client that has sent nothing at all is not one that went away: it is still arriving --
 // fetching the room's level, most likely -- so its seat is covered for and never taken off
@@ -1613,6 +1871,44 @@ assert.ok(
 duo.socket.close();
 lone_host.socket.close();
 unlisted.socket.close();
+
+// One malformed frame is dropped and the socket goes on handling the next, rather than
+// taking the handler with it under a page that still looks alive (#94). The relay cannot be
+// made to send one, so the frame is handed to the client's own `onmessage`: the socket under
+// it is real and the relay behind it is real, and the only fake thing is the frame.
+const Native_WebSocket = globalThis.WebSocket;
+let raw = null;
+// The last socket opened, which is the guest's -- `two_seats` connects the host first.
+globalThis.WebSocket = class extends Native_WebSocket {
+    constructor(...args) {
+        super(...args);
+        raw = this;
+    }
+};
+const parse = await two_seats("PARSE");
+globalThis.WebSocket = Native_WebSocket;
+raw.onmessage({ data: "{" });
+parse.host.socket.send({ type: "input", t: 9, seats: { 0: pressed_key } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    parse.guest_saw.some((msg) => msg.type === "input" && msg.t === 9),
+    "a malformed frame mid-match is dropped, and the frame after it is handled as usual",
+);
+// And the guard covers the parse alone. A `try` around the whole handler would drop a
+// malformed frame just as quietly while swallowing every bug in the dispatch under it --
+// worse than the hole it closes, and invisible to the assertion above.
+parse.guest.socket.receive(() => {
+    throw new Error("dispatch");
+});
+assert.throws(
+    () => raw.onmessage({ data: JSON.stringify({ type: "input", t: 10 }) }),
+    /dispatch/,
+    "a well-formed frame whose handler throws is not swallowed: the guard is the parse, not the dispatch",
+);
+parse.guest.socket.receive(() => {});
+
+parse.host.socket.close();
+parse.guest.socket.close();
 
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");

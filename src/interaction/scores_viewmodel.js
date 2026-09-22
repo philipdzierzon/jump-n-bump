@@ -66,10 +66,17 @@ export function match_result(matrix, names, reason) {
     // client's simulation as often as it is willing to and it kept falling out of step, so
     // the match went on without it. It is still in the room and plays the next one, which is
     // the half of it worth saying out loud (#41).
+    //
+    // And a way out, because one cause of this does not clear by itself: a level fetched
+    // into a stale cache is held as a resolved promise for the tab's lifetime, so the next
+    // match rebuilds from the same wrong ban map and ejects this client again, forever
+    // (#95). A reload is the only thing that refetches it -- the same instruction an
+    // unavailable level already gives.
     if (reason === "desync")
         return (
             "Your game fell out of step with the room and could not catch up, so the " +
-            "match carried on without you. You are still in the room and can play the next one."
+            "match carried on without you. You are still in the room and can play the next one. " +
+            "If it keeps happening, reload the page."
         );
     if (reason !== "bumps" && reason !== "time") return "";
     var bumps = (matrix || []).map(row_sum);

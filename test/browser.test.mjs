@@ -36,6 +36,7 @@ import { chromium } from "playwright";
 import { start_server } from "../server/index.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { generate_room_id } from "../src/net/room_id.js";
+import { FLOW_TEXT } from "../src/interaction/router.js";
 import { SNAPSHOT_INTS, decode_snapshot, encode_snapshot } from "../src/game/snapshot.js";
 
 // Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does.
@@ -44,45 +45,27 @@ const server = given ? null : await start_server(0);
 const origin = given ? given.replace(/\/$/, "") : "http://localhost:" + server.address().port;
 // Generated rather than fixed, so the walk can be run twice against one long-lived
 // container without the second run colliding with the first run's rooms.
-const room_a = generate_room_id({});
-const room_b = generate_room_id({ [room_a]: true });
-const room_c = generate_room_id({ [room_a]: true, [room_b]: true });
-const room_d = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true });
-const room_e = generate_room_id({ [room_a]: true, [room_b]: true, [room_c]: true, [room_d]: true });
-const room_f = generate_room_id({
-    [room_a]: true,
-    [room_b]: true,
-    [room_c]: true,
-    [room_d]: true,
-    [room_e]: true,
-});
-const room_g = generate_room_id({
-    [room_a]: true,
-    [room_b]: true,
-    [room_c]: true,
-    [room_d]: true,
-    [room_e]: true,
-    [room_f]: true,
-});
-const room_h = generate_room_id({
-    [room_a]: true,
-    [room_b]: true,
-    [room_c]: true,
-    [room_d]: true,
-    [room_e]: true,
-    [room_f]: true,
-    [room_g]: true,
-});
-const room_i = generate_room_id({
-    [room_a]: true,
-    [room_b]: true,
-    [room_c]: true,
-    [room_d]: true,
-    [room_e]: true,
-    [room_f]: true,
-    [room_g]: true,
-    [room_h]: true,
-});
+const taken_room_ids = {};
+const new_room_id = () => {
+    const id = generate_room_id(taken_room_ids);
+    taken_room_ids[id] = true;
+    return id;
+};
+const room_a = new_room_id();
+const room_b = new_room_id();
+const room_c = new_room_id();
+const room_d = new_room_id();
+const room_e = new_room_id();
+const room_f = new_room_id();
+const room_g = new_room_id();
+const room_h = new_room_id();
+const room_i = new_room_id();
+const room_j = new_room_id();
+const room_k = new_room_id();
+const room_l = new_room_id();
+const room_m = new_room_id();
+const room_n = new_room_id();
+const room_o = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -90,7 +73,7 @@ const browser = await chromium.launch();
 
 // Every <audio> the page plays, in the order it played them, and whether it is still
 // playing. Sound_Player creates them and keeps them to itself -- they are never in the
-// document -- so patching the prototype is the only way to see them from out here. A match
+// document -- so patching the prototype is the only way to see them from out here. A session
 // builds one Sound_Player, so a match being played sounds one looping track and a match
 // that is over sounds none; two loops at once was a session left running behind the one on
 // screen, which is how it was heard (#28, #40). The ordered list is the other half: a set
@@ -98,6 +81,18 @@ const browser = await chromium.launch();
 function record_audio() {
     window.__audio = new Set();
     window.__sounds = [];
+    // Counted as they are made rather than as they are played: a leaked <audio> is one that
+    // nothing plays again, and Sound_Player keeps them out of the document, so there is
+    // nothing to querySelectorAll for (#91).
+    // ponytail: this counts elements made, not elements still alive -- it proves a repair
+    // makes none, which is the fix, rather than that a made one was freed. upgrade path: a
+    // heap snapshot through CDP if a leak ever survives this.
+    window.__audio_made = 0;
+    const create = document.createElement.bind(document);
+    document.createElement = function (tag) {
+        if (String(tag).toLowerCase() === "audio") window.__audio_made++;
+        return create.apply(null, arguments);
+    };
     window.__sounding = () =>
         [...window.__audio]
             .filter((audio) => !audio.paused)
@@ -118,6 +113,38 @@ async function make_context(name, options) {
     const made = await browser.newContext(options);
     await made.tracing.start({ screenshots: true, snapshots: true });
     await made.addInitScript(record_audio);
+    // Every route the page took, recorded in the page because the flow is a hash router: a
+    // screen that never appeared is nearly always a route that was taken and then taken back.
+    await made.addInitScript(() => {
+        window.__routes = [];
+        // See the `hashes` helper below for why this exists beside `__routes`.
+        window.__hashes = [];
+        window.addEventListener("hashchange", () => window.__hashes.push(location.hash));
+        window.addEventListener("hashchange", () =>
+            setTimeout(
+                () =>
+                    window.__routes.push(
+                        location.hash +
+                            " shown=" +
+                            [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
+                                .filter((el) => el.offsetParent !== null)
+                                .map((el) => el.getAttribute("data-bind").match(/'(\w+)'/)[1])
+                                .join(",") +
+                            " participants=" +
+                            document.querySelectorAll("div[data-bind*=\"screen() === 'names'\"] li")
+                                .length,
+                    ),
+                0,
+            ),
+        );
+    });
+    // A real mouse click reports `detail >= 1`; a button activated by Enter or Space reports
+    // 0. This is what keeps the keyboard-only walk a keyboard walk after somebody edits it
+    // (#90).
+    await made.addInitScript(() => {
+        window.__mouse = 0;
+        addEventListener("click", (event) => event.detail > 0 && window.__mouse++, true);
+    });
     contexts.push([name, made]);
     return made;
 }
@@ -126,32 +153,13 @@ const context = await make_context("flow");
 const page = await context.newPage();
 const page_errors = [];
 page.on("pageerror", (error) => page_errors.push(error.message));
+// AC4 (#92): the tick a resumed snapshot was packed on, against the tick it arrived with.
+const console_lines = [];
+page.on("console", (msg) => console_lines.push(msg.text()));
 // What the relay told this page, kept for a failure to print. A flow driven by a socket is
 // unreadable from the DOM alone: the screen it ended on says what happened, and this says
 // which message did it.
 const frames = [];
-// Every route the page took, recorded in the page because the flow is a hash router: a
-// screen that never appeared is nearly always a route that was taken and then taken back.
-await page.addInitScript(() => {
-    window.__routes = [];
-    window.addEventListener("hashchange", () =>
-        setTimeout(
-            () =>
-                window.__routes.push(
-                    location.hash +
-                        " shown=" +
-                        [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
-                            .filter((el) => el.offsetParent !== null)
-                            .map((el) => el.getAttribute("data-bind").match(/'(\w+)'/)[1])
-                            .join(",") +
-                        " participants=" +
-                        document.querySelectorAll("div[data-bind*=\"screen() === 'names'\"] li")
-                            .length,
-                ),
-            0,
-        ),
-    );
-});
 let sockets = 0;
 page.on("websocket", (ws) => {
     const n = ++sockets;
@@ -199,10 +207,25 @@ async function on(name, root = page) {
     await root.waitForFunction((n) => window.location.hash === "#" + n, name);
 }
 
+const hash = (root = page) => root.evaluate(() => window.location.hash);
+// Synchronous, unlike `__routes`: `apply_route` can replace the hash again before
+// `__routes`'s `setTimeout` push runs (a bounce), so that push always reads the hash
+// *after* the bounce, for both entries. This one lands in the same task as the
+// `hashchange` that caused it, which is what a bounce-count gate needs (#87).
+const hashes = (root = page) => root.evaluate(() => window.__hashes || []);
+const routes = (root = page) => root.evaluate(() => window.__routes || []);
+// The most recent `room` message a socket has seen, which is the relay's own answer to
+// "what does the room look like now" -- read instead of the DOM wherever the claim is about
+// the room rather than about what got painted.
+const last_room = (seen) => seen.filter((msg) => msg.type === "room").pop();
+
 const sounding = (root = page) => root.evaluate(() => window.__sounding());
 // Every sound played since the list was last forgotten, in the order it was played (#66).
 const sounds = (root = page) => root.evaluate(() => window.__sounds);
 const forget_sounds = (root = page) => root.evaluate(() => (window.__sounds.length = 0));
+// Every <audio> this page has made, leaked ones included: six per Sound_Player plus the one
+// `canPlayType` is probed on (#91).
+const audio_made = (root = page) => root.evaluate(() => window.__audio_made);
 // The music as the element itself. Playing a file is one thing; decoding 54.8 seconds of
 // mp3 and moving through them is the thing a recorder cannot see (#66).
 const music = (root = page) =>
@@ -220,6 +243,15 @@ const music = (root = page) =>
               }
             : {};
     });
+
+// How far into the track this session is. `music` takes the first element it finds, which
+// on a page that has walked through several sessions is an old one, paused where its match
+// left it; the one playing now is the newest. Zero for a track that never played, so a poll
+// on this times out on its own wait rather than on a `TypeError` (#91).
+const music_t = (root = page) =>
+    root.evaluate(
+        () => [...window.__audio].filter((a) => /bump\.\w+$/.test(a.src)).pop()?.currentTime ?? 0,
+    );
 
 // On a fake clock, waiting means winding the simulation on rather than sitting through it:
 // a sound the AI causes lands on the tick it lands on, and which tick that is belongs to
@@ -304,6 +336,9 @@ const settings = (root = page) => screen("room", root).locator("fieldset").first
 const password_panel = (root = page) => screen("room", root).locator("fieldset").nth(1);
 const password_box = (root = page) => screen("room", root).locator('input[type="password"]');
 const notice = (root = page) => text(screen("room", root).locator('p[data-bind*="text: notice"]'));
+// The error line of whichever screen is being asked about. Every screen carries one now,
+// and `text` squashes it, so this reads the same on all seven (#88).
+const err_on = (name, root = page) => text(screen(name, root).locator("p.err"));
 const banner = (root = page) => screen("room", root).locator("div.banner");
 const board_panel = (root = page) =>
     screen("room", root).locator('div[data-bind*="visible: board"]');
@@ -332,6 +367,54 @@ const relay_client = (entry, seen) =>
         (msg) => seen.push(msg),
         (code) => seen.push({ type: "error", code }),
     );
+
+// What the next key would go to. `BODY` is the bug (#90): a screen change that leaves focus
+// on the document makes a keyboard player tab down from the top of the page again.
+const focused = (root = page) =>
+    root.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return "BODY";
+        const name = el.tagName + (el.className ? "." + el.className.split(" ")[0] : "");
+        // A button by its label, an input by its type: what a player would call the thing
+        // they are about to press or type into.
+        if (el.tagName === "BUTTON" || el.tagName === "SUMMARY")
+            return name + ":" + el.textContent.replace(/\s+/g, " ").trim();
+        return el.tagName === "INPUT" ? name + ":" + el.type : name;
+    });
+// Tab until the label has focus, which is the reach assertion itself: a control no number of
+// Tabs arrives at is a control the flow cannot be driven to.
+async function tab_to(label, root = page, key = "Tab") {
+    for (let i = 0; i < 30; i++) {
+        if ((await focused(root)).endsWith(label)) return;
+        await root.keyboard.press(key);
+    }
+    assert.fail(key + " 30 times never reached " + label + ", stopped on " + (await focused(root)));
+}
+
+// Every hash a page reported to the relay, keyed by the tick it names (#41, #96). No client
+// hook needed: `framesent` is a wire read, same technique as the frame recorder above --
+// every socket the page opens, a reconnect included.
+function record_checksums(root) {
+    const hashes = new Map();
+    root.on("websocket", (ws) =>
+        ws.on("framesent", ({ payload }) => {
+            const text = String(payload);
+            if (!text.includes('"checksum"')) return;
+            const msg = JSON.parse(text);
+            // First hash wins: a second match in the same room counts from 0 again, so
+            // tick 30 names two different states. Keeps the map to the first match.
+            if (msg.type === "checksum" && !hashes.has(msg.t)) hashes.set(msg.t, msg.h);
+        }),
+    );
+    return hashes;
+}
+
+// Paired by tick, never by wall clock -- two pages, two 60Hz clocks, never on the same tick
+// at the same instant. `from` floor: pass 1 to drop tick 0, which both pages hash before any
+// `game_iteration`, same seed, same level -- agrees for free, not a real sample.
+const paired = (a, b, from = 0) =>
+    [...a.keys()].filter((t) => t >= from && b.has(t)).sort((x, y) => x - y);
+const disagreements = (a, b, from = 0) => paired(a, b, from).filter((t) => a.get(t) !== b.get(t));
 
 // --- the walk --------------------------------------------------------------------------
 
@@ -954,8 +1037,37 @@ async function walk() {
     // from the inside, because its own tick keeps up and its own inputs are its own. The
     // repair landing is the only local evidence there is, which is what the overlay says.
     // Eight ticks' worth, which is the window the relay keeps and four seconds of match.
+    // A repair used to build a second Sound_Player and merely mute the first, leaving its
+    // six decoded elements alive: a client repaired every two seconds orphaned ninety of
+    // them a minute, on exactly the machine that was already short of everything (#91).
+    // The track is four to eight milliseconds in when the repair lands, so `currentTime`
+    // rises across it either way -- rewound to zero it is still ahead of where it was last
+    // read. Wait for it to get going first, and then "it did not go backwards" is exactly
+    // the difference between the session's own track picked up where it was paused and a
+    // second start from the top. Half a second of real time, and the only check there is
+    // on the rewind guard (#91).
+    await until("the music to get going", async () => (await music_t()) > 0.4);
+    const audio_before = await audio_made();
+    const t_before = await music_t();
     for (let t = 30; t <= 240; t += 30) boss.send({ type: "checksum", t, h: 1 });
     await until("the repair to land", () => page.locator(".reconnecting").isVisible());
+    assert.equal(
+        await audio_made(),
+        audio_before,
+        "a repair makes no audio elements at all, so a run of them cannot pile up (#91)",
+    );
+    const t_after = await music_t();
+    assert.ok(
+        t_after >= t_before,
+        `the repair rewound the music rather than resuming it: ${t_before} -> ${t_after} (#91)`,
+    );
+    // AC4's other half: packed at tick 0, sent on the wire as tick 0, and they agree -- so
+    // pinning the message alone would pass an `if (true)` that logs on every repair. This is
+    // the negative that catches it: nothing about this one's tick disagreement is unpacked.
+    assert.ok(
+        !console_lines.some((line) => line.startsWith("snapshot packed at tick %d arrived")),
+        "AC4: ticks that agree are not reported as a disagreement (#92)",
+    );
     await click("Back to the lobby");
     await on("room");
     // And it goes with the match, rather than standing over the lobby this page walked to --
@@ -1065,16 +1177,46 @@ async function self_ending_match() {
 // are two players -- storage is per context, so the two pages never fight over one room
 // token -- and what is asserted is that they *agree*. The room is one thing, seen twice.
 //
-// Tick-by-tick agreement of the two simulations is not here. That needs a checksum the
-// client does not expose, which is #41; building a feature in order to test it is the wrong
-// order round.
+// Now also tick-by-tick (#41, #96): each page hashes its own sim every 30 ticks and sends
+// the number to the relay -- already on the wire, no client hook added. Sampled three times:
+// mid-match, with one hash deliberately wrong, and again after a mid-match repair. Paired by
+// tick, never by wall clock.
 
 async function two_pages() {
     const host = await (await make_context("host")).newPage();
-    const guest = await (await make_context("guest")).newPage();
+    const guest_context = await make_context("guest");
+    // A hash that's wrong on purpose, so the assertion below is shown capable of failing
+    // (#96). One lie, not two: each one the relay sees triggers desync() -> a `start`
+    // carrying a snapshot -> refetch + catch_up replay (game_session.js:157-160) -- one lie
+    // proves disagreements() catches it and halves that churn.
+    //
+    // ponytail: diverges the number on the wire, not the state behind it. State-to-hash link
+    // is replay.test.mjs:512-518's. upgrade path: drop an inbound `input` frame with a key
+    // held, if real state divergence is ever needed here too.
+    await guest_context.addInitScript(() => {
+        window.__lie = false;
+        window.__lied_tick = null;
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data) {
+            if (window.__lie && typeof data === "string" && data.includes('"checksum"')) {
+                const msg = JSON.parse(data);
+                if (msg.type === "checksum") {
+                    window.__lie = false;
+                    window.__lied_tick = msg.t;
+                    data = JSON.stringify({ type: "checksum", t: msg.t, h: (msg.h ^ 1) | 0 });
+                }
+            }
+            return send.call(this, data);
+        };
+    });
+    const guest = await guest_context.newPage();
     const errors = [];
     host.on("pageerror", (error) => errors.push("host: " + error.message));
     guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+
+    // Before either `goto`, or the handshake socket opens before anything is listening.
+    const host_hashes = record_checksums(host);
+    const guest_hashes = record_checksums(guest);
 
     await host.goto(origin + "/");
     await click("Create a room", host);
@@ -1138,6 +1280,16 @@ async function two_pages() {
         "and the two pages read one room: the same seats, the same names, the same ready flags",
     );
 
+    // Who the lobby is waiting on, by name. The client's own `host` flag names nobody, so
+    // this is the relay's `host_seat` arriving, being kept, and being turned into a sentence
+    // -- three links that used to be asserted nowhere (#88).
+    assert.equal(
+        await text(screen("room", guest).locator('p[data-bind*="waiting_text"]')),
+        "Waiting for Dott to start.",
+        "the lobby identifies the host among the seated players, by the name the room knows " +
+            "it under rather than by its bunny (#88)",
+    );
+
     // The host readies by starting and the guest has not readied at all, so what Start runs
     // into is the countdown -- on both pages, since the deadline is the relay's (#21, #37).
     const countdown = (root) => screen("room", root).locator('p[data-bind*="visible: countdown"]');
@@ -1158,9 +1310,33 @@ async function two_pages() {
     await on("play", guest);
     assert.ok(!(await screen("room", host).isVisible()), "the lobby goes on both");
     assert.ok(!(await screen("room", guest).isVisible()));
-    // Long enough for both simulations to have stepped a good many ticks of one match.
-    await settle();
-    await settle();
+
+    // --- the two simulations, tick by tick (#41, #96) -----------------------------------
+    // Not the final board, which travels with the announcement and would agree even across
+    // two different matches: each page's own hash of its own state, same tick, off the wire
+    // it ships on. Floor 1, not 0 -- three real samples (30, 60, 90), not tick 0's free one.
+    await until(
+        "three ticks both pages have hashed",
+        () => paired(host_hashes, guest_hashes, 1).length >= 3,
+    );
+    assert.deepEqual(
+        disagreements(host_hashes, guest_hashes, 1),
+        [],
+        "the two pages hash the same state for the same tick: one match, simulated twice (#41)",
+    );
+
+    // And the assertion can fail: one hash the guest gets wrong on purpose.
+    await guest.evaluate(() => (window.__lie = true));
+    await until("the lied tick to reach the host too", async () => {
+        const t = await guest.evaluate(() => window.__lied_tick);
+        return t !== null && host_hashes.has(t);
+    });
+    const lied_tick = await guest.evaluate(() => window.__lied_tick);
+    assert.deepEqual(
+        disagreements(host_hashes, guest_hashes),
+        [lied_tick],
+        "a client reporting a hash that is not the host's fails this assertion, and nothing else does",
+    );
 
     // --- leaving the match and taking an AI seat back into it (#42) --------------------
     // One host, one client, two AI bunnies, and the client walks out and sits back down --
@@ -1210,6 +1386,24 @@ async function two_pages() {
         "#play",
         "and it is still in the match it took the seat to get back into",
     );
+
+    // --- and they agree again after the repair (#40, #41, #96) --------------------------
+    // Guest just took the host's packed state twice and replayed the gap (catch_up,
+    // game_session.js:157-160). A resync landing it in a near-right state looks fine on
+    // screen and hashes different -- the whole reason the hash exists. Floor is the host's
+    // latest sample so far, not the repair instant -- conservative, not exact: a guest
+    // sample from just before the repair could in principle land inside it too, if the
+    // guest crossed a 30-tick boundary the host had not yet.
+    const after_repair = Math.max(...host_hashes.keys()) + 1;
+    await until(
+        "three ticks both pages have hashed since the repair",
+        () => paired(host_hashes, guest_hashes, after_repair).length >= 3,
+    );
+    assert.deepEqual(
+        disagreements(host_hashes, guest_hashes, after_repair),
+        [],
+        "a client resumed from the host's snapshot hashes to the host's, tick for tick (#40)",
+    );
     watcher.close();
 
     await click("Back to the lobby", host);
@@ -1247,6 +1441,34 @@ async function two_pages() {
             "and on one account of how it ended, the " + who + "'s included",
         );
     assert.deepEqual(await room_view(guest), await room_view(host), "in one lobby, still");
+
+    // Ready clears for the whole room when a match ends, and cleared checkboxes on their own
+    // read as a bug rather than as the rule they are (#10, #38, #88).
+    assert.equal(await notice(guest), FLOW_TEXT.ready_cleared);
+    await click("Ready", guest);
+    await until("the instruction to retire", async () => (await notice(guest)) === "");
+
+    // And the other half of #88's item B: the countdown running out on a client that never
+    // readied takes its seats back, and says so on the screen it lands on (#17, #37).
+    await click("Not ready", guest);
+    await until(
+        "the room to read the guest as not ready",
+        async () => (await room_view(guest))[1][1] === "not ready",
+    );
+    // Shortens the wait to under half a second when the walk booted the relay itself. In
+    // CI the relay is in a container this process's env cannot reach, so the write is
+    // inert there and the walk sits out the real ten seconds instead -- the assertion
+    // below is the same one either way, and the countdown is the relay's to run.
+    process.env.COUNTDOWN_MS = "400";
+    await click("Start the match", host);
+    await on("names", guest);
+    assert.equal(
+        await err_on("names", guest),
+        FLOW_TEXT.vacated,
+        "a player whose seats the countdown took is told so, where it lands (#17, #37, #88)",
+    );
+    delete process.env.COUNTDOWN_MS;
+
     assert.deepEqual(errors, [], "and neither page threw on the way through");
 }
 
@@ -1337,8 +1559,19 @@ async function sound() {
     await open_settings(sound_page);
     await tick("AI on the empty seats", false, sound_page);
     await click("Apply to the next match", sound_page);
+    // A tap in the lobby, before "Start the match" -- the negative to the held-jump
+    // control right below it: no tick has run yet for it to land on, so it must not ride
+    // a latch onto the match's first one (#86).
+    await sound_page.keyboard.down("ArrowUp");
+    await sound_page.keyboard.up("ArrowUp");
+    await forget_sounds(sound_page);
     await click("Start the match", sound_page);
     await on("play", sound_page);
+    await sound_page.clock.fastForward(200);
+    assert.ok(
+        !(await sounds(sound_page)).includes("jump.mp3"),
+        "a key tapped in the lobby does not survive onto the match it starts (#86)",
+    );
 
     // Held down rather than pressed: no tick passes between a keydown and the keyup that
     // follows it on a fake clock, so a press is a key the simulation never sees.
@@ -1426,7 +1659,7 @@ async function browse() {
     // This walk's own room, by its code: an earlier walk's room is still up and still
     // listed, which is the list working rather than a row to count around.
     const rows = () => screen("browse", browse_page).locator("li").filter({ hasText: room_g });
-    const message = () => screen("browse", browse_page).locator(".err").innerText();
+    const message = () => err_on("browse", browse_page);
 
     const seen = [];
     const doomed = relay_client({ type: "create", id: room_g, listed: true }, seen);
@@ -1473,6 +1706,70 @@ async function browse() {
     await click("Refresh", browse_page);
     await until("the new room on a manual refresh", async () => (await rows().count()) === 1);
     revived.close();
+
+    // A relay that is down and a Saturday with nothing on are the same empty array to
+    // `fetch`, and used to be the same sentence on screen (#88). Aborting the request is
+    // the failure a player gets, rather than a stubbed rejection inside the view model.
+    await browse_page.route("**/api/rooms*", (route) => route.abort());
+    await click("Refresh", browse_page);
+    await until("the failure", async () => (await err_on("browse", browse_page)) !== "");
+    assert.equal(await err_on("browse", browse_page), FLOW_TEXT.rooms_failed);
+    assert.ok(
+        !(await screen("browse", browse_page)
+            .locator("p.muted")
+            .filter({ hasText: "Nothing public" })
+            .isVisible()),
+        "and the quiet-Saturday line is not what a dead relay says",
+    );
+    await browse_page.unroute("**/api/rooms*");
+    await click("Refresh", browse_page);
+    await until("the list back", async () => (await err_on("browse", browse_page)) === "");
+
+    // The refusal a player gets for a code that was never a room: said on the *first*
+    // attempt, on the screen it lands on, rather than only after a password is typed at a
+    // room that may never have existed (#8, #88).
+    const never_made = new_room_id();
+    await click("Back", browse_page);
+    await on("landing", browse_page);
+    await click("Join with a room code", browse_page);
+    await on("join", browse_page);
+    await screen("join", browse_page).locator("input").fill(never_made);
+    await click("Continue", browse_page);
+    await on("password", browse_page);
+    await until("the refusal", async () => (await err_on("password", browse_page)) !== "");
+    assert.equal(await err_on("password", browse_page), FLOW_TEXT.not_accepted);
+
+    // The locked-room twin: a room that exists and is locked reads the same "not accepted"
+    // sentence on the first attempt, not a claim that the room is gone -- this is the
+    // assertion that would have caught that false claim (review MUST FIX 1 of #88).
+    const locked_seen = [];
+    const locked_id = new_room_id();
+    const locked = relay_client({ type: "create", id: locked_id }, locked_seen);
+    await until("the locked room", () => locked_seen.some((msg) => msg.type === "joined"));
+    // A seat first: `ensure_host` only ever runs for a client holding one, and only the
+    // host may set a password (#38).
+    locked.send({ type: "seats", names: ["Lockman"] });
+    await until("its host on a seat", () =>
+        locked_seen.some((msg) => msg.type === "room" && msg.held.length && msg.host),
+    );
+    const before_lock = locked_seen.length;
+    locked.send({ type: "config", password: "hunter2" });
+    await until("the room to be locked", () => locked_seen.length > before_lock);
+    await click("Start over", browse_page);
+    await on("landing", browse_page);
+    await click("Join with a room code", browse_page);
+    await on("join", browse_page);
+    await screen("join", browse_page).locator("input").fill(locked_id);
+    await click("Continue", browse_page);
+    await on("password", browse_page);
+    await until("the refusal", async () => (await err_on("password", browse_page)) !== "");
+    assert.equal(
+        await err_on("password", browse_page),
+        FLOW_TEXT.not_accepted,
+        "a room that exists and is locked reads the same sentence as a mistyped code: not " +
+            "accepted, not claimed gone, before any password has been typed",
+    );
+    locked.close();
 
     assert.deepEqual(errors, [], "and the browse screen threw nothing");
 }
@@ -1573,6 +1870,240 @@ async function queueing() {
     assert.deepEqual(errors, [], "and neither page threw");
 }
 
+// One click, one room (#89). The connect path had no in-flight state and the button no
+// enable binding, so a second click opened a second socket -- and the abandoned one went
+// on answering the relay's pings, holding a room up in the public list with a host that
+// would never leave.
+async function double_click_create() {
+    // AC1's own claim, independent of the guard below: the button disables itself on the
+    // click that opens the socket, not on however long the answer takes -- Knockout's
+    // `enable` binding writes `disabled` synchronously inside the click handler's own turn.
+    // Its own page: a single click here is a real room, left up rather than raced with the
+    // double-click below.
+    //
+    // The relay is in-process and local, so an unslowed round trip can answer before this
+    // test ever gets to look -- proving nothing about whether the button waited for it or
+    // was never disabled at all. Delaying every message the relay sends this page opens a
+    // window wide enough to look inside.
+    const solo = await (await make_context("solo-create")).newPage();
+    await solo.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        relay.onMessage((frame) => setTimeout(() => ws.send(frame), 300));
+    });
+    await solo.goto(origin + "/");
+    await click("Create a room", solo);
+    await on("create", solo);
+    await click("Create", solo);
+    assert.equal(
+        await disabled(button("Create", solo)),
+        true,
+        "the button disables on the click itself, not on the relay's answer (#89)",
+    );
+    await on("names", solo);
+
+    const dbl = await (await make_context("double")).newPage();
+    const listed = async () =>
+        (await fetch(origin + "/api/rooms").then((res) => res.json())).map((room) => room.id);
+    await dbl.goto(origin + "/");
+    const before = await listed();
+    await click("Create a room", dbl);
+    await on("create", dbl);
+    // Listed, because the public list is where the orphan showed up. And no code typed: the
+    // relay generates one per create, so two clicks with a code of their own would collide
+    // on the second rather than make a second room.
+    await screen("create", dbl).locator('input[type="checkbox"]').check();
+    // Not two clicks: the second would fail Playwright's own enabled check and report a
+    // timeout instead of the thing under test. A double-click is what a player does, and it
+    // is dispatched without re-checking in between -- so the button really is asked twice,
+    // and what refuses the second one is the page.
+    await button("Create", dbl).dblclick();
+    await on("names", dbl);
+    // Proving something did not happen, which is the one place a fixed wait is right.
+    await settle();
+    const after = await listed();
+    assert.equal(
+        after.filter((id) => before.indexOf(id) < 0).length,
+        1,
+        "two clicks on Create, one room in the public list",
+    );
+}
+
+// AC2 on its own, with no second click for AC1's binding to intercept: a hash route
+// supersedes through the same `connect()` a button does, so this is `pending.close()`
+// itself under test, not the binding backstopping a double click (#89).
+async function superseded_create_closes() {
+    const sup = await (await make_context("superseded")).newPage();
+    await sup.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        relay.onMessage((frame) => setTimeout(() => ws.send(frame), 300));
+    });
+    const listed = async () =>
+        (await fetch(origin + "/api/rooms").then((res) => res.json())).map((room) => room.id);
+    await sup.goto(origin + "/");
+    const before = await listed();
+    await click("Create a room", sup);
+    await on("create", sup);
+    await screen("create", sup).locator('input[type="checkbox"]').check();
+    await click("Create", sup);
+    // Walked away before the create ever answered -- a room code hash, not a second click.
+    await sup.evaluate(() => (window.location.hash = "#ZZZZZ"));
+    // Both delayed answers land inside this: the abandoned create's, and the new join's.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const after = await listed();
+    assert.deepEqual(
+        after.filter((id) => before.indexOf(id) < 0),
+        [],
+        "a superseded create leaves no room in the public list (#89)",
+    );
+}
+
+// Rejoining a match that will not have you (#89). The ask set a flag cleared on three paths,
+// and a `start` that never became a match was none of them -- so a failed rejoin left the
+// button silently doing nothing for the rest of the match.
+//
+// Three failures, each arranged so it can only be reached by one production code path, and
+// a fourth press that recovers:
+//   1. the level fetch itself rejecting -- on the level the host's match is actually
+//      running, blocked from before this guest ever loads the room, because `get_level`
+//      caches a *successful* fetch for the page's lifetime and this is the only window in
+//      which one has not happened yet (AC5);
+//   2. a state `decode_snapshot` answers null for -- the early return out of `build`, above
+//      `on_match_start`, once the level above is let through (AC3/AC4);
+//   3. an ask the relay never hears -- nothing answers it and nothing fails it, so the only
+//      thing that ends it is the bound the client puts on it (AC4).
+async function rejoin_fails() {
+    const host = await (await make_context("rejoin-host")).newPage();
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_n);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+    // Caves, so failure 1 below has a level of its own to block the fetch of -- the same
+    // level the rest of the suite already exercises.
+    await open_settings(host);
+    await level_select(host).selectOption("caves");
+    await click("Apply to the next match", host);
+    await click("Start the match", host);
+    await on("play", host);
+
+    const guest = await (await make_context("rejoin-guest")).newPage();
+    // Failure 1, armed from before the guest ever loads the page: `get_level` never caches
+    // a rejected fetch (its catch deletes the entry), so every attempt while this is on
+    // fails afresh, and turning it off recovers rather than replaying a cached failure.
+    // Starts on: the lobby's own `preload` fetches this level the moment the room's config
+    // arrives, well before any of the failures below, and a fetch that succeeds once stays
+    // cached for the rest of the page's life -- this is the only window this failure is
+    // reachable in at all.
+    let block_level = true;
+    await guest.route("**/levels/caves/caves.dat", (route) =>
+        block_level ? route.abort() : route.continue(),
+    );
+    // Failure 2: corrupt every `start` carrying a snapshot, until told to stop. A counter
+    // rather than this flag would corrupt every attempt forever, including the one meant to
+    // recover (#89). Off at first: failure 1 above must be the only way the first ask fails.
+    let break_start = false;
+    // Failure 3: the ask nothing ever answers and nothing ever fails.
+    let deaf = false;
+    let broken = 0;
+    // Every `resync` this guest ever sends, counted regardless of `deaf`: proves the latch
+    // (#89 MUST FIX 3) below rather than just the visible error text, which a stray re-ask
+    // would show identically.
+    let resync_count = 0;
+    await guest.routeWebSocket(/\/ws/, (ws) => {
+        const relay = ws.connectToServer();
+        ws.onMessage((frame) => {
+            if (String(frame).includes('"resync"')) resync_count++;
+            if (deaf && String(frame).includes('"resync"')) return;
+            relay.send(frame);
+        });
+        relay.onMessage((frame) => {
+            const msg = JSON.parse(String(frame));
+            // A state `decode_snapshot` answers null for, which is the return out of
+            // `build` that happens above `on_match_start`.
+            if (break_start && msg.type === "start" && msg.snapshot) {
+                msg.snapshot = "not a snapshot";
+                broken++;
+            }
+            ws.send(JSON.stringify(msg));
+        });
+    });
+    const said = () => text(screen("room", guest).locator("p.err"));
+
+    await guest.goto(origin + "/#" + room_n);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    // Renamed: both couches default their first bunny to Dott, and the host already holds
+    // it, so taking the seat unrenamed is a collision (NAME_TAKEN) rather than the mid-match
+    // join this walk is about.
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    // Seated into a match already running, so the page asks to be let into it by itself,
+    // straight into the level fetch blocked above (AC5).
+    let t0 = Date.now();
+    // `get_level`'s own message, not `resume_failed`'s generic one: more specific, and
+    // "try again" would be wrong advice on a level that will not load.
+    await until("the failure on screen", async () => /would not load/.test(await said()));
+    // Under the 5s `RESUME_MS` bound with room to spare -- 2000-2900ms is the honest worst
+    // case (fast local setup, a late host snapshot) against this budget. Without
+    // `get_level`'s own rejection reaching `start_failed`, nothing shows this until that
+    // timeout backstops it, and the text alone would read the generic message either way --
+    // only the clock (and now the wording) tells the two apart.
+    assert.ok(
+        Date.now() - t0 < 4000,
+        "the level fetch's own rejection said so, not the 5s timeout (#89)",
+    );
+    assert.equal(resync_count, 1, "one ask, one failure, before anything re-arms it");
+
+    // MUST FIX 3 (#89): a room broadcast (a bystander taking a seat) must not retry the
+    // latched failure on its own -- only `rejoin_match` may.
+    const bystander_seen = [];
+    const bystander = relay_client({ type: "join", id: room_n }, bystander_seen);
+    await until("the bystander into the room", () =>
+        bystander_seen.some((msg) => msg.type === "joined"),
+    );
+    bystander.send({ type: "take", seat: 2, name: "Bystander" });
+    await until("the room to see the bystander seated", () =>
+        bystander_seen.some((msg) => msg.type === "room" && msg.seats[2] === "Bystander"),
+    );
+    assert.equal(resync_count, 1, "a room broadcast alone must not retry a failed ask (#89)");
+    bystander.close();
+
+    // Failure 2 (AC3): the level is let through now, so a fresh press succeeds at fetching
+    // it and fails only on the corrupted snapshot underneath.
+    block_level = false;
+    break_start = true;
+    t0 = Date.now();
+    await click("Rejoin the match", guest);
+    assert.equal(await said(), "", "pressing it again clears the last answer");
+    await until("the relay's answer, broken on the way in", () => broken > 0);
+    await until("the failure on screen", async () => /did not work/.test(await said()));
+    assert.ok(
+        Date.now() - t0 < 3000,
+        "the corrupted snapshot's own early return said so, not the 5s timeout (#89)",
+    );
+
+    // Failure 3 (AC4): the ask the relay never hears. Nothing answers it and nothing fails
+    // it, so the only thing that can end it is the bound the client puts on it -- this one
+    // is supposed to take the full timeout, unlike the two above.
+    deaf = true;
+    await click("Rejoin the match", guest);
+    await until("the ask to time out", async () => /did not work/.test(await said()));
+
+    // None of the three failures latched it: the fourth press is the one that works.
+    deaf = false;
+    break_start = false;
+    await click("Rejoin the match", guest);
+    await on("play", guest);
+}
+
 async function phone() {
     const phone_context = await make_context("phone", { viewport: { width: 390, height: 844 } });
     const phone_page = await phone_context.newPage();
@@ -1626,6 +2157,10 @@ async function reconnect() {
     const dropped = await context.newPage();
     const errors = [];
     dropped.on("pageerror", (error) => errors.push(error.message));
+    // AC4 (#92): the tick a resumed snapshot was packed on, against the tick it arrived
+    // with. Nothing else in this page reaches the console, so a match here is unambiguous.
+    const console_lines = [];
+    dropped.on("console", (msg) => console_lines.push(msg.text()));
 
     // Somebody else hosts, so the match this page drops out of goes on being played: a host
     // that leaves takes the match with it, and there would be nothing to come back to.
@@ -1654,9 +2189,12 @@ async function reconnect() {
     // in progress is given (#40): without one there is a seat to reclaim but no match to
     // play from. The relay never decodes a body, so an empty simulation of the right size is
     // as good as a played one.
+    // t: 5 on the wire, against an all-zero packed body -- `unpack_snapshot` reads its tick
+    // out of the body itself, so this one is packed at 0 and arrives claiming 5, which is
+    // exactly the disagreement AC4 exists to report (#92).
     host.send({
         type: "snapshot",
-        t: 0,
+        t: 5,
         matrix: new Array(16).fill(0),
         body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
     });
@@ -1679,6 +2217,17 @@ async function reconnect() {
         return !said.includes("Connection lost");
     });
     await on("play", dropped);
+    // Playwright's ConsoleMessage.text() does not do the browser's own %d substitution --
+    // it hands back the literal format string with the arguments appended, space-separated
+    // (`console.log`'s own template, then `0 5`, not "tick 0 arrived as tick 5").
+    assert.ok(
+        console_lines.some(
+            (line) =>
+                line.startsWith("snapshot packed at tick %d arrived as tick %d") &&
+                line.endsWith("0 5"),
+        ),
+        "AC4: the packed tick and the tick it arrived with disagree, and it says so (#92)",
+    );
     assert.deepEqual(
         host_saw.filter((msg) => msg.type === "room").pop().seats,
         ["Host", "Dott", null, null],
@@ -1713,6 +2262,690 @@ async function reconnect() {
     host.close();
 }
 
+// --- Back, Forward and reload (#87) -----------------------------------------------------
+// `goBack`/`goForward` across two hashes of one document are same-document navigations: no
+// reload, the Knockout instance survives, and the only thing that runs is the `hashchange`
+// listener at `apply_route` -- exactly where all three holes were. `reload()` is the other
+// animal: the document is destroyed and `apply_route` runs once from the constructor, with
+// only the hash and `sessionStorage` surviving; the socket does not, so the relay sees a
+// real disconnect and this is #42's reconnect path underneath.
+
+// Point A (host half) and C's Forward: the page hosts a room with a node-side second seat,
+// so the room outlives the page and "the match ended for everyone" is read off the relay's
+// own messages instead of the DOM.
+async function history_host_back() {
+    const context = await make_context("history_host_back");
+    const hpage = await context.newPage();
+    const errors = [];
+    hpage.on("pageerror", (error) => errors.push(error.message));
+
+    await hpage.goto(origin + "/");
+    await click("Create a room", hpage);
+    await on("create", hpage);
+    await screen("create", hpage).locator("input.code").fill(room_j);
+    await click("Create", hpage);
+    await on("names", hpage);
+    await hpage.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(hpage).count()) === 1);
+    await click("Take the seats", hpage);
+    await on("room", hpage);
+
+    // Hole C's own reproduction, before anything has started: a session exists from the
+    // lobby on (`apply_route`'s `room` branch), so "there is a game" never meant "a match
+    // is running" -- reaching for `#play` here must bounce, not draw chrome over a blank
+    // canvas (#87).
+    await hpage.evaluate(() => (window.location.hash = "play"));
+    await until(
+        "the lobby's own session not to make the match screen reachable (#87)",
+        async () => (await hash(hpage)) === "#room",
+    );
+
+    // A second, node-side seat, joined once the room exists, so the room outlives the page
+    // and so "the match ended for everyone" is read off the relay's own messages instead of
+    // the DOM.
+    const seen = [];
+    const mate = relay_client({ type: "join", id: room_j }, seen);
+    // The constructor's callback only ever sees `joined`/`room`/`error` (that is what
+    // `on_room` is); `start` and `match_end` are everything else, and reach `seen` only
+    // through this.
+    mate.receive((msg) => seen.push(msg));
+    await until("the mate to join", () => seen.some((msg) => msg.type === "joined"));
+    mate.send({ type: "seats", names: ["Ghost"] });
+    await until("the mate to sit down", () =>
+        seen.some((msg) => msg.type === "room" && (msg.seats || []).includes("Ghost")),
+    );
+    // Readied before the host's own Start, so the host's `start` message finds the room
+    // already `all_ready()` and begins at once, no countdown to wait out
+    // (server/index.js:1057-1061).
+    mate.send({ type: "ready", ready: true });
+
+    await click("Start the match", hpage);
+    await on("play", hpage);
+    await until("the relay to run the match", () => seen.some((msg) => msg.type === "start"));
+
+    await hpage.goBack(); // #play -> #room
+    await on("room", hpage);
+    await until("the room to hear the match end", () =>
+        seen.some((msg) => msg.type === "match_end" && msg.reason === "lobby"),
+    );
+    assert.equal(
+        last_room(seen).started,
+        false,
+        "browser Back out of a live match ends it for the room, exactly as the button does (#87)",
+    );
+
+    // Forward is hole C proving itself: the match is over, so `#play` must bounce straight
+    // back.
+    const before = (await hashes(hpage)).length;
+    await hpage.goForward(); // #room -> #play -> (bounce) -> #room
+    await until(
+        "the match screen to bounce back to the lobby",
+        async () => (await hashes(hpage)).length >= before + 2,
+    );
+    const walked = (await hashes(hpage)).slice(before);
+    assert.equal(walked[0], "#play", "Forward really re-entered the match route");
+    assert.equal(
+        await hash(hpage),
+        "#room",
+        "and a match that is over is not a match screen you can reach (#87)",
+    );
+
+    // Back once more, which guards the bounce's `replace`: both history entries now read
+    // "#room", so this Back fires no `hashchange` at all -- gated on the count, not the
+    // hash, or a regression bouncing a second time would read "#room" anyway (#87).
+    const n = (await hashes(hpage)).length;
+    await hpage.goBack();
+    await settle();
+    assert.equal(
+        (await hashes(hpage)).length,
+        n,
+        "the bounce replaced rather than pushed, so Back does not walk into it again (#87)",
+    );
+
+    // Reload, at #room, no match running -- the cheap half of the reload story.
+    const room_before = await room_view(hpage);
+    await hpage.reload();
+    await on("room", hpage);
+    assert.deepEqual(
+        await room_view(hpage),
+        room_before,
+        "a reload reclaims the seats from the token in sessionStorage and nothing else (#7)",
+    );
+
+    assert.deepEqual(errors, [], "and the page threw nothing");
+    mate.close();
+}
+
+// Point A (non-host half) and the reload out from under a live match: a node host runs the
+// room so it survives the page's reload, which is a real disconnect to the relay (#42).
+async function history_reload_in_match() {
+    const context = await make_context("history_reload_in_match");
+    const page2 = await context.newPage();
+    const errors = [];
+    page2.on("pageerror", (error) => errors.push(error.message));
+    // The wire itself, not just the room's reaction to it: `host &&` in `end_match`'s guard
+    // is backstopped by the relay's own `if (!client.host) return` on `match_end`, so a
+    // missing client-side term is invisible in `boss_saw` either way -- this is what
+    // actually kills that mutant (#87).
+    const sent = [];
+    page2.on("websocket", (ws) => ws.on("framesent", ({ payload }) => sent.push(String(payload))));
+
+    const boss_saw = [];
+    const boss = relay_client({ type: "create", id: room_k }, boss_saw);
+    // `match_end` and `driver` are not `joined`/`room`/`error`, so they only ever reach
+    // `boss_saw` through this.
+    boss.receive((msg) => boss_saw.push(msg));
+    await until("the room", () => boss_saw.some((msg) => msg.type === "joined"));
+    boss.send({ type: "seats", names: ["Boss"] });
+    await until("the boss to sit down", () =>
+        boss_saw.some((msg) => msg.type === "room" && msg.host),
+    );
+
+    await page2.goto(origin + "/");
+    await click("Join with a room code", page2);
+    await on("join", page2);
+    await screen("join", page2).locator("input").fill(room_k);
+    await click("Continue", page2);
+    await on("names", page2);
+    await page2.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(page2).count()) === 1);
+    await click("Take the seats", page2);
+    await on("room", page2);
+    await click("Ready", page2);
+    boss.send({ type: "start", seed: 4321, settings: {}, held: [] });
+    await on("play", page2);
+
+    // Snapshotted on a loop rather than once, because a reload's `resync` is answered by
+    // the relay's *next* snapshot when it lands before one exists (server/index.js:757-760):
+    // the loop is what makes "the page gets back into the match" a fact rather than a race
+    // between two sockets.
+    const snapshots = setInterval(
+        () =>
+            boss.send({
+                type: "snapshot",
+                t: 0,
+                matrix: new Array(16).fill(0),
+                body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
+            }),
+        200,
+    );
+
+    await page2.reload();
+    // Both terms are load-bearing, not redundant: a reload preserves the hash, so
+    // `hash === "#play"` alone is already true the instant the page comes back, before
+    // `apply_route` has done anything -- and `on("play")` would pass just as vacuously, on
+    // the brief `#play` chrome `apply_route` paints before routing back through `#room` and
+    // out to the match again. `routes` (deferred, reset by the reload like everything but
+    // the hash and `sessionStorage`) is what pins down that the page actually walked
+    // through both screens rather than sitting on the one it reloaded with.
+    await until("the page back into the match it reloaded out of", async () => {
+        const walked = await routes(page2);
+        return walked.length >= 2 && (await hash(page2)) === "#play";
+    });
+    await on("play", page2);
+    assert.equal(
+        last_room(boss_saw).seats[1],
+        "Dott",
+        "a reload is a disconnect, and the seat was reserved for the token it came back with (#42)",
+    );
+    assert.ok(
+        !boss_saw.some((msg) => msg.type === "match_end"),
+        "and nothing ended the match on the room's behalf",
+    );
+
+    // The non-host half of AC1: Back out of a match this page does not host.
+    const seats_before = boss_saw.length;
+    await page2.goBack(); // #play -> #room
+    await on("room", page2);
+    // The negative made deterministic by ordering, not a timer: `release_seats()`'s
+    // `driver:"ai"` stamp is sent in the same `end_match` call an announce would have been,
+    // and it is waited for first -- an announce would already be in `boss_saw` by the time
+    // the driver stamp is.
+    await until("the seat handed to the AI", () =>
+        boss_saw.slice(seats_before).some((msg) => msg.type === "driver" && msg.driver === "ai"),
+    );
+    assert.ok(
+        !boss_saw.some((msg) => msg.type === "match_end"),
+        "a non-host leaving the match does not end it for everybody else (#22, #87)",
+    );
+    assert.equal(last_room(boss_saw).started, true, "the room is still playing it");
+    assert.ok(
+        !sent.some((f) => f.includes('"match_end"')),
+        "a non-host does not even say it (#22, #87)",
+    );
+
+    // Forward must bounce -- the page left the match, so its new lobby session has
+    // `in_match === false`.
+    const n = (await hashes(page2)).length;
+    await page2.goForward();
+    await until("the bounce", async () => (await hashes(page2)).length >= n + 2);
+    assert.equal(
+        await hash(page2),
+        "#room",
+        "Forward does not walk a client back into a match it left (#37, #87)",
+    );
+
+    clearInterval(snapshots);
+    assert.deepEqual(errors, [], "and the page threw nothing");
+    boss.close();
+}
+
+// Point B: a room link followed while seated must leave the room being left at once, not
+// on reservation expiry.
+async function history_link_while_seated() {
+    const context = await make_context("history_link_while_seated");
+    const page3 = await context.newPage();
+    const errors = [];
+    page3.on("pageerror", (error) => errors.push(error.message));
+
+    // The room being left, held open by a node client so it outlives the page and so its
+    // `room` messages are still readable once the page has gone.
+    const left_saw = [];
+    const left_client = relay_client({ type: "create", id: room_l }, left_saw);
+    await until("the room", () => left_saw.some((msg) => msg.type === "joined"));
+    // The room being followed into, which has to actually exist on the relay or the join
+    // is refused and lands on the password screen rather than the names screen.
+    const other_saw = [];
+    const other_client = relay_client({ type: "create", id: room_m }, other_saw);
+    await until("the other room", () => other_saw.some((msg) => msg.type === "joined"));
+
+    await page3.goto(origin + "/");
+    await click("Join with a room code", page3);
+    await on("join", page3);
+    await screen("join", page3).locator("input").fill(room_l);
+    await click("Continue", page3);
+    await on("names", page3);
+    await page3.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(page3).count()) === 1);
+    await click("Take the seats", page3);
+    await on("room", page3);
+    await until("the room to seat the page", () =>
+        (last_room(left_saw)?.seats || []).includes("Dott"),
+    );
+
+    // The link to another room, as a player follows one: a fragment navigation in the page
+    // it is already on, not a fresh load -- a fresh load is the reload case below (#87).
+    await page3.evaluate((id) => (window.location.hash = id), room_m);
+
+    // The whole of AC2, and its deterministic form of "immediately rather than on
+    // reservation expiry": this loop's ceiling is a small fraction of `reserve_ms()`'s 60s
+    // default, so a pass means the `{type:"leave"}` really was sent and a regression times
+    // out rather than sitting through the window.
+    await until("the abandoned room to free the seat at once", () =>
+        last_room(left_saw).seats.every((name) => name !== "Dott"),
+    );
+
+    await on("names", page3); // the new room grants nothing yet
+    await page3.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(page3).count()) === 1);
+    await click("Take the seats", page3);
+    await on("room", page3); // history: #room(l), #join/#names, #room(m)
+    const view_before = await room_view(page3);
+
+    await page3.goBack();
+    await on("names", page3); // a couch with participants renders as itself
+    await page3.goForward();
+    await on("room", page3);
+    assert.deepEqual(
+        await room_view(page3),
+        view_before,
+        "and Forward comes back to the same room",
+    );
+
+    await page3.reload();
+    await on("room", page3);
+    assert.equal(await hash(page3), "#room");
+    assert.deepEqual(
+        await room_view(page3),
+        view_before,
+        "a reload reclaims the new room's seat from its own token (#7)",
+    );
+    assert.ok(
+        last_room(left_saw).seats.every((name) => name !== "Dott"),
+        "and the room that was left never gets it back (#87)",
+    );
+
+    assert.deepEqual(errors, [], "and the page threw nothing");
+    left_client.close();
+    other_client.close();
+}
+
+// --- a reload into a room that is not there (#88) ---------------------------------------
+// The third of the three paths that end on the landing screen, and the cheapest to provoke:
+// a reload reads the room id out of `sessionStorage`, so seeding one that was never created
+// is the same arrival as a room that ended while the tab was shut. The landing screen had no
+// error line at all before #88, so this is also what proves the new one is bound.
+async function reload_into_a_dead_room() {
+    const gone = await (await make_context("reload_into_a_dead_room")).newPage();
+    const errors = [];
+    gone.on("pageerror", (error) => errors.push(error.message));
+    const dead = new_room_id();
+
+    // MF3 (#90 review): `room_gone` is one of six FLOW_TEXT messages set a route before the
+    // pane they land in is revealed -- the reveal-case AC3's live regions cannot announce on
+    // their own. Cheapest live-region observation point in the suite: a real reload, not the
+    // #42 socket-drop rig. `addInitScript` because the reload below is a fresh document, so
+    // anything attached after it would be gone before the mutation it is here to see.
+    await gone.addInitScript(() => {
+        window.__when = [];
+        const sel = "div[data-bind*=\"screen() === 'landing'\"] p.err";
+        // A bootstrap observer just to catch the node existing (it is static markup, present
+        // before Knockout binds anything), then the real one is scoped to that node alone --
+        // watching the whole document would also fire on an unrelated mutation elsewhere
+        // once the pane happens to be visible, which proves nothing about this node.
+        const attach = () => {
+            const p = document.querySelector(sel);
+            if (!p) return false;
+            new MutationObserver(() =>
+                window.__when.push([p.textContent, !!p.offsetParent]),
+            ).observe(p, { childList: true, characterData: true, subtree: true });
+            return true;
+        };
+        if (!attach()) {
+            const bootstrap = new MutationObserver(() => attach() && bootstrap.disconnect());
+            bootstrap.observe(document, { childList: true, subtree: true });
+        }
+    });
+
+    await gone.goto(origin + "/");
+    await gone.evaluate(
+        (id) => sessionStorage.setItem("jnb:room", JSON.stringify({ id: id })),
+        dead,
+    );
+    await gone.goto(origin + "/#room");
+
+    await until("the landing screen", async () => (await hash(gone)) === "#landing");
+    assert.equal(
+        await err_on("landing", gone),
+        FLOW_TEXT.room_gone,
+        "a reload into a room that will not have it back says so, rather than dropping the " +
+            "player on a silent title screen (#88)",
+    );
+    const when = await gone.evaluate(() => window.__when);
+    assert.ok(
+        when.some(([shown, visible]) => visible && shown.includes("would not")),
+        "the message is re-touched once its pane is visible, not left silent behind the " +
+            "screen it was set on one route earlier (#90): " +
+            JSON.stringify(when),
+    );
+    assert.deepEqual(errors, [], "and the page threw nothing on the way out");
+    await gone.close();
+}
+
+// --- the reservation window runs out (#42, #88) -----------------------------------------
+// The first of the three paths that end on the landing screen, and the one that has a
+// sentence of its own: the retries did not get back in before the seats stopped being this
+// client's, so what it lost is the seats. Its own page, on a fake clock: giving up is the
+// *page's* decision, taken against the window the relay named on the way in, so winding
+// that page's clock past the window runs it out. Writing `RESERVE_MS` here instead would
+// be a no-op in CI, where the relay is in a container and this process's env reaches
+// nothing -- which is how this walk came to pass locally and time out there.
+async function reconnect_gives_up() {
+    const context = await make_context("reconnect_gives_up");
+    // The same socket recorder `reconnect()` installs: the last socket the page opened is
+    // the transport the room is on, and closing it is a real disconnect the relay sees.
+    await context.addInitScript(() => {
+        const Native = window.WebSocket;
+        window.__sockets = [];
+        window.WebSocket = function (...args) {
+            const socket = new Native(...args);
+            window.__sockets.push(socket);
+            return socket;
+        };
+        window.WebSocket.prototype = Native.prototype;
+        Object.assign(window.WebSocket, Native);
+    });
+    const abandoned = await context.newPage();
+    const errors = [];
+    abandoned.on("pageerror", (error) => errors.push(error.message));
+
+    // Somebody else hosts, so the room outlives the page that walks out of it.
+    const room_id = new_room_id();
+    const host_saw = [];
+    const host = relay_client({ type: "create", id: room_id }, host_saw);
+    await until("the room", () => host_saw.some((msg) => msg.type === "joined"));
+    host.send({ type: "seats", names: ["Hosty"] });
+    await until("the host on a seat", () =>
+        host_saw.some((msg) => msg.type === "room" && msg.held.length),
+    );
+
+    // Installed before the first navigation, as `self_ending_match()` does it, and on a
+    // page of its own because the clock is the context's.
+    await abandoned.clock.install();
+    await abandoned.goto(origin + "/#" + room_id);
+    await on("names", abandoned);
+    await abandoned.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(abandoned).count()) === 1);
+    await click("Take the seats", abandoned);
+    await on("room", abandoned);
+
+    await abandoned.evaluate(() => window.__sockets[window.__sockets.length - 1].close());
+    // Wound only once the page has taken the drop: `reconnect_until` is set when the socket
+    // dies, so a wind before that would be wound off a clock the deadline is then measured
+    // from. The overlay is hidden on the lobby screen -- `textContent` reads it anyway, and
+    // that it is bound at all is `reconnect()`'s.
+    await until("the page to say the connection went", async () =>
+        (await text(abandoned.locator(".reconnecting"))).includes("Connection lost"),
+    );
+    // Two minutes in no real time, which has to outrun whatever `reserve` the relay named
+    // (sixty seconds by default). A jump fires the armed retry once, at the far end of the
+    // jump, where it is already past the deadline: this is `give_up`, not the reconnect
+    // `reconnect()` proves. A relay whose window ever outgrows this fails here as a
+    // timeout rather than quietly reconnecting instead.
+    await abandoned.clock.fastForward("02:00");
+    await until("the landing screen", async () => (await hash(abandoned)) === "#landing");
+    assert.equal(
+        await err_on("landing", abandoned),
+        FLOW_TEXT.gave_up,
+        "the title screen a spent reconnect gives up onto says what was lost, not just that " +
+            "a socket went (#42, #88)",
+    );
+    assert.deepEqual(errors, [], "and the page threw nothing while it was away");
+    host.close();
+    await abandoned.close();
+}
+
+// --- keyboard only, and announced (#90) -------------------------------------------------
+// Driven by keys and nothing else: every screen change asserts where focus landed, every
+// text box is submitted with Enter, and a mouse click anywhere in it fails the last
+// assertion. The role sweep at the end is markup-presence, not audibility -- it proves every
+// live-region node the flow reports through carries the attribute, not that a screen reader
+// speaks it (no AT runs in CI).
+async function keyboard_only() {
+    const kb = await (await make_context("keyboard")).newPage();
+    const errors = [];
+    kb.on("pageerror", (error) => errors.push(error.message));
+    // Playwright's role engine skips hidden elements, so this resolves only while the
+    // region really is in the page and carrying the text -- a `visible:`-toggled paragraph
+    // and a paragraph with no `role` both match nothing.
+    const said = (name, root = kb) => screen(name, root).getByRole("alert").allInnerTexts();
+
+    // 1. Load: focus on a cold load, through the `queueMicrotask` ordering. Not `on()` -- a
+    // cold load never writes the hash, so it stays "" rather than becoming "#landing".
+    await kb.goto(origin + "/");
+    await screen("landing", kb).waitFor({ state: "visible" });
+    assert.equal(await focused(kb), "BUTTON.pri:Quick Join", "focus on a cold load");
+    await kb.evaluate(() => (window.__same_page = true));
+
+    // 2. Landing -> create by key.
+    await tab_to("Create a room", kb);
+    await kb.keyboard.press("Enter");
+    await on("create", kb);
+    assert.equal(await focused(kb), "INPUT.code:text");
+
+    // 3. AC1 in place, AC3 in place. The empty-region assertion runs *before* the Enter --
+    // Knockout's `text` binding writes synchronously, so asserting it after would only prove
+    // the refusal landed, not that the region was there to hear it in.
+    assert.deepEqual(
+        await said("create", kb),
+        [""],
+        "the alert region is in the page, empty, before anything is typed into it",
+    );
+    await kb.keyboard.type("ABC");
+    await kb.keyboard.press("Enter");
+    await until("the refusal", async () =>
+        (await said("create", kb)).some((line) => line.includes("5 letters")),
+    );
+
+    // 4. Create for real.
+    await kb.keyboard.press("Control+A");
+    await kb.keyboard.type(room_o);
+    await kb.keyboard.press("Enter");
+    await on("names", kb);
+
+    // 5. The names exception: focus lands on the pane, not a control, or the couch keys
+    // below would be swallowed by a focused text box (`is_typing`, game_session.js).
+    assert.equal(await focused(kb), "DIV.kiosk");
+    await kb.keyboard.press("ArrowUp");
+    await until("the first participant", async () => (await seats(kb).count()) === 1);
+
+    // 6. AC1 on the names form.
+    await kb.keyboard.press("Tab");
+    assert.equal(await focused(kb), "INPUT.grow:text");
+    await kb.keyboard.press("Enter");
+    await on("room", kb);
+
+    // 7. Lobby focus.
+    assert.equal(await focused(kb), "BUTTON.sm:Copy join link");
+
+    // 8. A keeper client so the room outlives this walk's own `Leave` at step 12. No seats,
+    // so it neither readies nor blocks a start.
+    const keeper_saw = [];
+    const keeper = relay_client({ type: "join", id: room_o }, keeper_saw);
+    await until("the keeper in the room", () => keeper_saw.some((msg) => msg.type === "joined"));
+
+    // 9. AC1 on the settings form, AC3 on the staged banner. "Bumps to win" gets a value
+    // past its `max="99"` on purpose (review MUST FIX 3): a blank number box is valid and
+    // submits, so only an out-of-range one makes the `novalidate` mutation fail. "Minutes"
+    // carries a real, in-range change so the staged banner has something to stage even
+    // though the relay's own `config_diff` drops the out-of-range field silently.
+    await tab_to("Room settings", kb);
+    await kb.keyboard.press("Enter"); // native <details>
+    await tab_to(":number", kb);
+    await kb.keyboard.press("Control+A");
+    await kb.keyboard.type("999");
+    await kb.keyboard.press("Tab");
+    await kb.keyboard.press("Control+A");
+    await kb.keyboard.type("3");
+    await kb.keyboard.press("Enter");
+    await until(
+        "the staged change",
+        async () =>
+            (await screen("room", kb)
+                .getByRole("status")
+                .filter({ hasText: "Host staged" })
+                .count()) > 0,
+    );
+
+    // 10. AC1 on the password form, AC3 on the notice -- #88's review item. The `isVisible()`
+    // before the Enter is the whole point: false the moment anybody restores `visible:
+    // notice`, and false if the `.notice` min-height rule is dropped.
+    await tab_to(":password", kb);
+    await kb.keyboard.type("hunter2");
+    const live = screen("room", kb).locator('p[data-bind*="text: notice"]');
+    assert.equal(await text(live), "", "nothing said yet");
+    assert.ok(
+        await live.isVisible(),
+        "and the region is already in the page: a live region is announced on a change while " +
+            "it is there, never on being revealed with the message already inside it (#88, #90)",
+    );
+    await kb.keyboard.press("Enter");
+    await until("password set", async () => (await notice(kb)) === "Password set.");
+    assert.equal(
+        await screen("room", kb).getByRole("status").filter({ hasText: "Password set." }).count(),
+        1,
+        "said through a live region, not just rendered",
+    );
+
+    // Review MUST FIX 4: a route onto the screen already showing must not steal focus from a
+    // box somebody is typing in. Deleting the `activeElement` early return in `focus_screen`
+    // turns this red -- focus would jump to `Copy join link` instead.
+    await kb.evaluate(() => window.dispatchEvent(new HashChangeEvent("hashchange")));
+    assert.equal(
+        await focused(kb),
+        "INPUT:password",
+        "a route onto the screen already showing does not steal the box",
+    );
+
+    // 11. AC4 to a match. Ready is *above* the settings in document order, so backwards --
+    // and it reads "Ready", not "Not ready", because step 9's staged change just cleared
+    // everyone's ready flag, this client's included.
+    await tab_to("Ready", kb, "Shift+Tab");
+    await kb.keyboard.press("Enter");
+    const ready_button = screen("room", kb).locator('button[data-bind*="toggle_ready"]');
+    await until("ready", async () => (await text(ready_button)) === "Not ready");
+    await tab_to("Start the match", kb);
+    await kb.keyboard.press("Enter");
+    await on("play", kb);
+
+    // 12. AC2's deliberate no-op, and out again.
+    assert.equal(await focused(kb), "BODY", "the match screen focuses nothing of its own");
+    await tab_to("Back to the lobby", kb);
+    await kb.keyboard.press("Enter");
+    await on("room", kb);
+    await tab_to("Leave", kb);
+    await kb.keyboard.press("Enter");
+    await on("landing", kb);
+    assert.equal(await focused(kb), "BUTTON.pri:Quick Join");
+
+    // 13. AC1 on the join and password screens -- the room now has a password, so the relay
+    // refuses and the flow lands on the password screen rather than straight into names.
+    await tab_to("Join with a room code", kb);
+    await kb.keyboard.press("Enter");
+    await on("join", kb);
+    assert.equal(await focused(kb), "INPUT.code:text");
+    await kb.keyboard.type(room_o);
+    await kb.keyboard.press("Enter");
+    await on("password", kb);
+    assert.equal(await focused(kb), "INPUT:password");
+    // Reveal-case, not a second in-place refusal like step 3's: `not_accepted` is set on the
+    // join screen (viewmodels.js:952) one route before `go("password", true)` shows the
+    // pane it lands in, so this only proves the text arrives -- it is not peer evidence for
+    // AC3's announce-case, which step 3's create refusal is the walk's one instance of.
+    await until("the refusal", async () =>
+        (await said("password", kb)).some((line) => line.includes("not accepted")),
+    );
+    await kb.keyboard.type("hunter2");
+    await kb.keyboard.press("Enter");
+    await on("names", kb);
+
+    // 14. The two sweeps, because AC3 is an "every" criterion.
+    const unroled = await kb.evaluate(
+        () =>
+            [...document.querySelectorAll('div[data-bind*="screen() ==="] p.err')].filter(
+                (el) => el.getAttribute("role") !== "alert",
+            ).length,
+    );
+    assert.equal(unroled, 0, "every screen's error line is an alert region (#90)");
+
+    // The paragraphs the flow reports an outcome through, each found by its own binding.
+    // Presence, not audibility: a change-detector on the markup shape (edit this list when a
+    // line's data-bind changes), not an invariant on behaviour -- two of these ten roles are
+    // checked in place above too (staged_text at step 9, notice at step 10); this is what
+    // covers the other eight.
+    const LIVE = [
+        "text: connection_text", // the match's reconnect line
+        "visible: pending_id", // Connecting...
+        "visible: match_running", // the names screen's
+        "visible: disconnected", // connection lost
+        "visible: staged_text", // the host staged a change
+        "visible: match_running() &&", // the lobby's
+        "visible: queued", // the queue
+        "text: waiting_text", // who the room waits on
+        "text: notice", // ready cleared, password set
+        "text: result_text", // how the last match ended
+    ];
+    const roles = await kb.evaluate(
+        (binds) =>
+            binds.map((bind) => {
+                const el = document.querySelector('[data-bind*="' + bind + '"]');
+                return el ? el.getAttribute("role") : "missing";
+            }),
+        LIVE,
+    );
+    assert.deepEqual(
+        roles,
+        [
+            "status",
+            "status",
+            "status",
+            "alert",
+            "status",
+            "status",
+            "status",
+            "status",
+            "status",
+            "status",
+        ],
+        "every line the flow reports an outcome through is a live region (#90)",
+    );
+
+    // 15. The two guards.
+    assert.ok(await kb.evaluate(() => window.__same_page === true), "no form ever navigated");
+    assert.equal(await kb.evaluate(() => window.__mouse), 0, "and no step used the mouse");
+    assert.deepEqual(errors, [], "and the page threw nothing");
+
+    // 16. Browse: names' first control is already pinned exactly by step 5's `focused`
+    // assertion, but browse's is whatever rooms the rest of the suite left up, so this is
+    // "somewhere in the pane" rather than a named target. Also closes §4.3's unwalked-path
+    // gap: AC4's walk otherwise never sets a keyboard foot on the browse screen.
+    await tab_to("Start over", kb);
+    await kb.keyboard.press("Enter");
+    await on("landing", kb);
+    await tab_to("Browse rooms", kb);
+    await kb.keyboard.press("Enter");
+    await on("browse", kb);
+    assert.ok(
+        await screen("browse", kb).evaluate(
+            (pane) =>
+                pane.contains(document.activeElement) && document.activeElement !== document.body,
+        ),
+        "focus landed somewhere inside the browse pane",
+    );
+
+    keeper.close();
+}
+
 // --- run -------------------------------------------------------------------------------
 
 try {
@@ -1720,10 +2953,19 @@ try {
     await self_ending_match();
     await two_pages();
     await reconnect();
+    await reconnect_gives_up();
+    await history_host_back();
+    await history_reload_in_match();
+    await history_link_while_seated();
+    await reload_into_a_dead_room();
     await sound();
     await browse();
     await queueing();
+    await double_click_create();
+    await superseded_create_closes();
+    await rejoin_fails();
     await phone();
+    await keyboard_only();
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
             "two pages agree on one room, the mp3s really play, and the page fits a phone",
@@ -1737,7 +2979,13 @@ try {
             showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
                 .filter((el) => el.offsetParent !== null)
                 .map((el) => el.getAttribute("data-bind").match(/screen\(\) === '(\w+)'/)[1]),
-            error: document.querySelector("p.err")?.textContent.trim() || "",
+            // Every `p.err`, not just the first in document order, now that every screen has
+            // one: an empty one contributes nothing, so this is never longer than it needs
+            // to be for whichever screen the page was actually on.
+            error: [...document.querySelectorAll("p.err")]
+                .map((el) => el.textContent.trim())
+                .filter(Boolean)
+                .join(" | "),
             // The participant rows are the `participants` array, and an empty one is what
             // bounces the lobby back to the names screen.
             participants: document.querySelectorAll("div[data-bind*=\"screen() === 'names'\"] li")

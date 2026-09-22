@@ -2,7 +2,7 @@ import { create_default_level } from "../asset_data/default_levelmap.js";
 import { Dat_Level_Loader } from "../resource_loading/dat_level_loader.js";
 import { Game_Session, Game_State, is_typing } from "../interaction/game_session.js";
 import { Scores_ViewModel, match_result, BUNNY_NAMES } from "../interaction/scores_viewmodel.js";
-import { screen_of } from "../interaction/router.js";
+import { screen_of, FLOW_TEXT, waiting_for } from "../interaction/router.js";
 import { jump_scheme } from "../game/keyboard.js";
 import { Loopback_Transport } from "../net/loopback_transport.js";
 import { WebSocket_Transport } from "../net/websocket_transport.js";
@@ -27,12 +27,9 @@ function relay_url() {
 // scheme (#32).
 var SCHEME_NAMES = ["Arrows", "A D W", "NumPad 4 6 8", "J L I"];
 var CODE_HINT = "A code is 5 letters, no I and no O.";
-// One answer for a wrong password and for a room that is not there: telling them apart is
-// what would make an unlisted room's id worth guessing at (#8).
 // Nobody holds a seat, so nobody is keeping the room waiting: an AI-filled seat is ready
 // by definition (#37).
 var ALL_READY = [true, true, true, true];
-var UNAVAILABLE = "That room is not available. Check the code, and the password if it has one.";
 // The settings panel's own wording. The relay validates the keys and never renders them,
 // so the labels live here and nowhere near the wire (#38).
 var LABELS = {
@@ -100,6 +97,11 @@ function ViewModel() {
     // answered by the one it happens to hold.
     var resuming = false;
     var in_match_with = "";
+    // How long the ask is given before it is called a failure. The relay answers on the
+    // host's next snapshot, which is two seconds away at worst, and the level was preloaded
+    // in the lobby -- so past this it is an answer that is not coming rather than a slow one.
+    var RESUME_MS = 5000;
+    var resume_timer = null;
     // The room id this client has already spent its no-password attempt on, so Back onto
     // the same link does not open a second socket to be refused by the same room.
     var attempted_id = null;
@@ -131,12 +133,24 @@ function ViewModel() {
     this.code = ko.observable("");
     this.listed = ko.observable(false);
     this.rooms = ko.observableArray([]);
+    // A failed fetch and an empty list are the same empty array otherwise, so which one it
+    // was is remembered rather than inferred (#88). Its own observable, not `error`: Browse
+    // deliberately keeps a refused join's message across a refresh (#43), and a refresh
+    // that works has to clear this one without clearing that one.
+    this.rooms_error = ko.observable("");
     this.queued = ko.observable(false);
     this.password = ko.observable("");
     this.error = ko.observable("");
+    // A connection attempt in flight, which is all three submit buttons' enabled state:
+    // nothing visibly changed on the first click, so the player clicked again and got a
+    // second socket (#89).
+    this.connecting = ko.observable(false);
     this.room_id = ko.observable(null);
     this.pending_id = ko.observable(null);
     this.is_host = ko.observable(true);
+    // The seat the room says its host is on, or null in a local room, which has no relay
+    // to ask and no host to wait for.
+    this.host_seat = ko.observable(null);
     this.participants = ko.observableArray([]);
     // Every seat in the room, by the username of the participant on it -- null for a seat
     // nobody holds, which is the AI's (#36).
@@ -375,6 +389,14 @@ function ViewModel() {
         });
     });
 
+    // Who the lobby is waiting on, by the name the room knows them under -- not the
+    // board's label, which would read "Zip (AI) to start" for a host whose socket is out
+    // (#88).
+    this.waiting_text = ko.computed(function () {
+        var seat = self.host_seat();
+        return waiting_for(seat == null ? null : self.seat_names()[seat]);
+    });
+
     // The live match's board while one is up, and the board of the last match once it is
     // over: the lobby's session has not been played, so its zeroes are not the answer.
     this.scores_viewmodel = ko.computed(function () {
@@ -438,6 +460,9 @@ function ViewModel() {
         // for a reload (#17). The relay cannot tell the two apart without being told.
         if (self.room_id() && transport.send) transport.send({ type: "leave" });
         if (transport.close) transport.close();
+        if (pending) pending.close();
+        pending = null;
+        self.connecting(false);
         transport = new Loopback_Transport();
         host = true;
         self.is_host(true);
@@ -472,7 +497,7 @@ function ViewModel() {
         token = null;
         // The match in progress belonged to the room, so the next one is asked about from
         // scratch (#40).
-        resuming = false;
+        stop_resuming();
         in_match_with = "";
         remember("room", { id: null });
     }
@@ -519,6 +544,19 @@ function ViewModel() {
 
     function end_match() {
         var game = self.current_game();
+        // Only the host ends the match for everyone; anybody else is just leaving it, and
+        // their seat goes quiet until the next one (#22). Said here, not on the button:
+        // browser Back is the same way out of a match, and used to just tear the session
+        // down while the relay went on believing it was running (#87).
+        // `game_state() !== Not_Started` guards the window before `build()`: a connected
+        // host parked in `start_when_ready` who Backs `#play` -> `#room` here would
+        // otherwise announce nothing and strand the match for everyone else, same as the
+        // hole this fixes -- microtask-wide in practice, and backstopped by the relay's own
+        // `host_left` if the socket goes instead.
+        // Above the read below, not beside the button: a local room echoes the announcement
+        // back synchronously, and that echo is what names the reason and carries the board.
+        if (game && game.in_match && host && game.game_state() !== Game_State.Not_Started)
+            game.announce_end("lobby");
         // Read once and forgotten here, before the guard: the reason and the board belong
         // to the match being left, and must not be waiting for the next one.
         var reason = ended_because;
@@ -601,7 +639,7 @@ function ViewModel() {
             in_match_with = granted().join(",");
             // Asked and answered: the next ask is a seat this client did not have when the
             // match was handed to it (#42).
-            resuming = false;
+            stop_resuming();
             // A match beginning outranks the last one's frozen frame: the hold must not
             // walk this client out of the match it just started.
             clearTimeout(leaving);
@@ -618,6 +656,11 @@ function ViewModel() {
             self.current_game(game);
             go("play");
         };
+        // A `start` that never became a match: the level would not load, or the state it
+        // carried could not be replayed. Both were silent, and a client that had asked to
+        // be let into this one is waiting on exactly this answer, and there is no second
+        // telling (#89).
+        game.on_start_failed = resume_failed;
         self.current_game(game);
         // Built into a room with a match already running: this is the session that will
         // hear the answer, so this is where the asking belongs.
@@ -649,7 +692,28 @@ function ViewModel() {
         if (granted().join(",") === in_match_with) return;
         if (!current) return;
         resuming = true;
+        resume_timer = setTimeout(resume_failed, RESUME_MS);
         current.resume();
+    }
+
+    // One place the ask stops being in flight, because the timer bounding it has to stop
+    // with it: one left running would call the *next* ask a failure.
+    function stop_resuming() {
+        clearTimeout(resume_timer);
+        resume_timer = null;
+        resuming = false;
+    }
+
+    // It neither landed nor came back. `resuming` is left latched rather than cleared:
+    // `apply_room` calls `ask_to_resume` on every room broadcast (a seat taken, ready
+    // toggled, countdown, host migration), and clearing it here would re-arm this timer
+    // and re-show this error on each one. Only `rejoin_match` re-opens it (#89).
+    function resume_failed() {
+        if (!resuming) return;
+        // A level that would not load already said so (viewmodels.js's own `get_level`
+        // catch) -- more specific than this, and "try again" is wrong advice on it, since a
+        // retry refetches the same broken level.
+        if (!self.error()) self.error("Getting back into the match did not work. Try again.");
     }
 
     // The relay's picture of the room: which seats exist, who is on them, which ones this
@@ -664,16 +728,26 @@ function ViewModel() {
         if (msg.started && !self.match_running()) {
             self.board(null);
             self.board_reason(null);
+            // The last match's announcement goes with its board: the ready it was about
+            // has been pressed again by now.
+            self.notice("");
         }
+        // Ready clears for everyone when a match ends, and cleared checkboxes alone read
+        // as a bug rather than as the rule they are -- the same reason a staged config
+        // change says so (#10, #38, #88). Gated on held seats: a queued client has no
+        // Ready button to press for the next one.
+        if (self.match_running() && !msg.started && msg.held.length)
+            self.notice(FLOW_TEXT.ready_cleared);
         self.match_running(!!msg.started);
         // The match this client was in is over, so the next one is a match it has not been
         // in and has not asked about.
         if (!msg.started) {
-            resuming = false;
+            stop_resuming();
             in_match_with = "";
         }
         host = msg.host;
         self.is_host(host);
+        self.host_seat(msg.host_seat);
         granted(msg.held);
         self.ready(!!msg.you_ready);
         self.seat_ready(msg.ready || ALL_READY);
@@ -700,11 +774,16 @@ function ViewModel() {
             // Every seat gone: un-ready at countdown zero, which reserves nothing. The
             // client is still in the room, so the names screen is where it asks for seats
             // again rather than the landing page (#37, #17).
+            // ponytail: names the countdown because it is the only way a seated client is
+            // left holding nothing today; upgrade path is a reason on the room view if a
+            // second way ever appears.
             if (
                 self.participants().length &&
                 (self.screen() === "room" || self.screen() === "play")
-            )
+            ) {
+                self.error(FLOW_TEXT.vacated);
                 go("names", true);
+            }
             return;
         }
         if (self.participants().length) {
@@ -745,7 +824,19 @@ function ViewModel() {
         ask_to_resume();
     }
 
+    // The attempt that has not answered yet. A second one supersedes it rather than racing
+    // it: an abandoned socket goes on ponging the relay whether or not it is still the
+    // transport, so the room it created stays up -- in the public list, with a host that
+    // never leaves, and picked first by Quick Join for having four free seats (#89).
+    // ponytail: short of `go_landing` (which now closes it, below), a socket that neither
+    // opens nor closes leaves the buttons disabled until the browser gives up on it.
+    // upgrade path: a bound of its own if anybody ever sees one -- the page is served by
+    // the relay it dials, so an unreachable relay is a page that never loaded.
+    var pending = null;
+
     function connect(entry) {
+        if (pending) pending.close();
+        self.connecting(true);
         self.error("");
         // Which build of the simulation this page is running. Two builds in one lockstep
         // room desync -- the same seed drawn through different code is a different match --
@@ -759,6 +850,11 @@ function ViewModel() {
             function (msg) {
                 var reconnected = false;
                 if (msg.type === "joined") {
+                    // Belt and braces against clearing a successor's state (#89).
+                    if (pending === socket) {
+                        pending = null;
+                        self.connecting(false);
+                    }
                     // Only once the new room is in: a refused join leaves this client in the
                     // room it already had, rather than in neither.
                     if (leaving.close) leaving.close();
@@ -794,6 +890,12 @@ function ViewModel() {
                 go(msg.held.length ? "room" : "names", true);
             },
             function (code) {
+                // Belt and braces against clearing a successor's state (#89). Before the
+                // retry early return, so a reconnect attempt that fails always re-arms.
+                if (pending === socket) {
+                    pending = null;
+                    self.connecting(false);
+                }
                 // A retry that did not get in -- the socket died again, or the room would
                 // not have it yet -- is answered by the next retry and by nothing on
                 // screen: the overlay is already up, and the window is what ends this.
@@ -807,7 +909,7 @@ function ViewModel() {
                     // or already left -- has nothing to reconnect into: there is no seat
                     // reserved anywhere and the landing screen is where that ends.
                     if (transport === socket) leave_room();
-                    self.error("The connection dropped.");
+                    self.error(FLOW_TEXT.dropped);
                     if (self.screen() === "play" || self.screen() === "room") go("landing", true);
                 } else if (code === "NAME_TAKEN") {
                     self.error("Somebody in this room already has that name.");
@@ -825,26 +927,34 @@ function ViewModel() {
                 } else if (entry.type === "create") {
                     self.error(code === "ID_TAKEN" ? "That code is taken." : CODE_HINT);
                 } else if (self.screen() === "room" || self.screen() === "play") {
-                    // A reload into a room that has since gone: there is nothing to reclaim
-                    // and no password worth asking for.
+                    // A reload into a room that will not have it back -- ended, or a
+                    // password gained while this client was away, one relay code for both
+                    // (#8). Either way there is nothing to reclaim.
+                    self.error(FLOW_TEXT.room_gone);
                     go("landing", true);
                 } else if (self.screen() === "password") {
-                    self.error(UNAVAILABLE);
+                    self.error(FLOW_TEXT.unavailable);
                 } else if (browsed) {
                     // The list said this room had no password, so a refusal can only mean
                     // it is gone: a password screen for a password that does not exist is
                     // the wrong place to land. A locked row still lands there, because
                     // there a dead room and a wrong password stay indistinguishable (#8).
                     browsed = false;
-                    self.error(UNAVAILABLE);
+                    self.error(FLOW_TEXT.unavailable);
                     go("browse", true);
                 } else {
-                    // Which of the two it was is exactly what is not said: the password
-                    // screen is where both answers land (#8).
+                    // Which of the two it was is exactly what is not said, but that it was
+                    // refused is: the password screen is where both answers land, and
+                    // silence there reads as a locked room rather than a guess at whether
+                    // one exists (#8, #88). No password has been typed yet here, so the
+                    // sentence cannot claim the room is gone -- the commonest reason to
+                    // land here is a locked room that opens on the very next screen.
+                    self.error(FLOW_TEXT.not_accepted);
                     go("password", true);
                 }
             },
         );
+        pending = socket;
     }
 
     // 1, 2, 4 and then 5 seconds apart, and it gives up when the reservation window the
@@ -869,7 +979,9 @@ function ViewModel() {
 
     function give_up() {
         leave_room();
-        self.error("The connection dropped.");
+        // Not "the connection dropped": the retries ran the whole reservation window out,
+        // and what the player lost is the seats (#42).
+        self.error(FLOW_TEXT.gave_up);
         go("landing", true);
     }
 
@@ -886,7 +998,7 @@ function ViewModel() {
         self.current_game(null);
         // The match is the room's, and this client is being let back into it rather than
         // one it remembers having played and must not be walked back into (#40).
-        resuming = false;
+        stop_resuming();
         in_match_with = "";
         retry();
     }
@@ -904,11 +1016,53 @@ function ViewModel() {
     // of the state that screen is about: no participants, and no room to rejoin, since the
     // only thing that survives a reload is the hash. Each of those falls back one step
     // rather than rendering a screen with nothing behind it (#42 is what would change it).
+
+    // Focus follows the screen, or a keyboard player tabs down from the top of the page after
+    // every transition (#90). No table of screens: the panes are in document order and
+    // Knockout hides the ones it is not showing, so the first control still laid out belongs
+    // to the screen just routed to. A pane with a `tabindex` of its own is taken instead of
+    // its first control -- the names screen's form *is* the keyboard, and `is_typing`
+    // (game_session.js:511) would swallow the jump keys into a focused text box. The match
+    // screen has no control inside a `.kiosk`, so this is a no-op there, which is what the
+    // issue's "in-game controls are out of scope" asks for.
+    function focus_screen() {
+        // Only when focus has nowhere to be. The screen that went took its control's focus
+        // with it, so this is the transition case; a route onto the screen already showing
+        // (`go("room")` from a match that ended) must not steal the box somebody is typing in.
+        // `checkVisibility()`, not `offsetParent`: a closed `<details>` keeps an offset parent
+        // in Chromium (`content-visibility: hidden`) but fails this check, so a route that
+        // lands the loop on a control inside the collapsed room settings does not silently
+        // leave focus on `<body>`.
+        var here = document.activeElement;
+        if (here && here !== document.body && here.checkVisibility()) return;
+        var targets = document.querySelectorAll(
+            ".kiosk[tabindex], .kiosk input, .kiosk select, .kiosk button",
+        );
+        for (var i = 0; i < targets.length; i++)
+            if (targets[i].checkVisibility() && !targets[i].matches(":disabled"))
+                return targets[i].focus();
+    }
+
     function apply_route() {
         var route = screen_of(window.location.hash);
         if (route.screen !== "play") end_match();
         if (route.screen === "landing" || route.screen === "browse") leave_room();
+        // A room-code hash is a join route, not one of the two screen names above, so
+        // following somebody else's link while seated used to leave the old room holding an
+        // empty bunny for the whole reservation window (#87). `self.room_id()` keeps a cold
+        // load off this path -- it holds no relay seat and needs no leave -- and `!==` keeps
+        // re-following your own link the no-op `enter()` already makes of it.
+        if (route.room_id && self.room_id() && route.room_id !== self.room_id()) leave_room();
         self.screen(route.screen);
+        // Six FLOW_TEXT messages (dropped/room_gone/gave_up -> landing, vacated -> names,
+        // both unavailable/not_accepted refusals -> browse/password) are set one route
+        // before this line, so their `role="alert"`/`role="status"` region is still
+        // `display: none` when the text lands -- measured in reload_into_a_dead_room():
+        // `offsetParent` is false at the exact moment `room_gone` writes. Re-touching the
+        // observable now that the pane is up re-fires the live region.
+        // ponytail: unconditional, so an unrelated route can re-announce an error that did
+        // not change. upgrade path: clear `self.error` on route change instead.
+        self.error.valueHasMutated();
         if (route.screen === "browse") self.refresh_rooms();
         if (route.screen === "password" && !self.pending_id()) return go("landing", true);
         if (route.screen === "room" || route.screen === "play")
@@ -927,10 +1081,17 @@ function ViewModel() {
         // transport, and the one the reconnect builds would never replace it (#42).
         if (route.screen === "room" && !self.disconnected()) session();
         if (route.screen === "play") {
-            if (!self.current_game()) return go("room", true);
+            // A session exists from the lobby on (line above), so "there is a game" never
+            // meant "a match is running": `in_match` is a `start` having landed on this
+            // session and not yet ended (#40, #87). Without it the lobby's own session made
+            // the match screen reachable, drawing a clock and a Back link over a blank canvas.
+            if (!self.current_game() || !self.current_game().in_match) return go("room", true);
             self.current_game().start();
         }
         if (route.room_id) enter(route.room_id);
+        // Queued, not immediate: this function also runs once from the constructor (below),
+        // before `ko.applyBindings` has hidden a single pane.
+        queueMicrotask(focus_screen);
     }
 
     window.addEventListener("hashchange", apply_route);
@@ -978,9 +1139,13 @@ function ViewModel() {
             .then(function (res) {
                 return res.json();
             })
-            .then(self.rooms)
+            .then(function (list) {
+                self.rooms_error("");
+                self.rooms(list);
+            })
             .catch(function () {
                 self.rooms([]);
+                self.rooms_error(FLOW_TEXT.rooms_failed);
             });
     };
     // Clicking a row is the same join as typing the code.
@@ -989,12 +1154,9 @@ function ViewModel() {
         attempted_id = null;
         go(row.id);
     };
+    // A route and nothing else: what leaving a match tells the room is `end_match`'s job now,
+    // so this button and the browser's own Back say the same thing (#87).
     this.go_lobby = function () {
-        // Only the host ends the match for everyone; anybody else is just leaving it, and
-        // their seat goes quiet until the next one (#22).
-        var game = self.current_game();
-        if (host && game && game.game_state() !== Game_State.Not_Started)
-            game.announce_end("lobby");
         go("room");
     };
     // Offline is the same flow over the loopback: names, lobby, match, board (#16).
@@ -1106,7 +1268,13 @@ function ViewModel() {
     // this is the client saying it wants exactly that. Forgetting which seats it was last in
     // the match with is the whole of it: the relay hands its bunnies back off the AI on the
     // same `resume` a mid-match joiner asks for (#40, #42).
+    //
+    // The one place `resuming`'s latch re-opens after a failure (#89): `apply_room`'s own
+    // calls to `ask_to_resume` must not, or a failed ask would retry itself on every room
+    // broadcast.
     this.rejoin_match = function () {
+        self.error("");
+        stop_resuming();
         in_match_with = "";
         ask_to_resume();
     };
@@ -1152,6 +1320,10 @@ function ViewModel() {
     // player on this couch has no key of its own to press (#7, #37).
     this.toggle_ready = function () {
         transport.send({ type: "ready", ready: !self.ready() });
+        // Only its own instruction, not an unrelated confirmation still on screen (a
+        // password just set) -- otherwise "Press Ready for the next one." stands until
+        // the match after this one.
+        if (self.notice() === FLOW_TEXT.ready_cleared) self.notice("");
     };
     this.cancel_countdown = function () {
         transport.send({ type: "cancel" });

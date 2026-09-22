@@ -312,7 +312,15 @@ export function Room(transport, read_input) {
         // ticks before anybody has stamped a frame at all, and a relay frame that has not
         // landed yet -- which is the same value, so it cannot manufacture a divergence.
         drivers.forEach(function (driver, seat) {
-            if (driver !== "local" || frames[seat]) return;
+            // The table and the frame set are one answer to one question, reconciled here
+            // because this is the only place both are in hand. A frame for a seat the room
+            // has since handed over was stamped d ticks ago, while the seat was still its
+            // sender's; the relay's own `substitute` never synthesises a released frame for
+            // a non-local seat, so keeping it makes the sender -- and any peer the fan-out
+            // reached in time, and a joiner replaying the ring -- the only clients running
+            // that bunny on keys (#110, #7).
+            if (driver !== "local") return void delete frames[seat];
+            if (frames[seat]) return;
             frames[seat] = RELEASED;
             // Not the first d ticks, where every seat is substituted for by definition, and
             // not a replayed gap, whose holes are the relay's ring rather than this

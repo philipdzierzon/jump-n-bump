@@ -32,13 +32,6 @@ const reserve_ms = () => Number(process.env.RESERVE_MS || 60000);
 // deployment-level knob: it is not room config and never on the wire, and it is read per
 // countdown rather than once, so it is tunable on a running relay (#11, #37).
 const countdown_ms = () => Number(process.env.COUNTDOWN_MS || 10000);
-// The input ring: every frame the relay has fanned out since the host's last snapshot, so
-// a client joining mid-match gets the gap between that state and now (#40). The host
-// snapshots every 2s, which is ~120 ticks of frames from up to four clients.
-// ponytail: a hard cap on entries rather than on bytes, in case a host stops snapshotting
-// -- the ring then holds the newest ~500 ticks and the oldest fall off the front. Upgrade
-// path: drop the room's snapshot and stop ringing at all if that is ever a real state.
-const MAX_RING = 2000;
 // A snapshot body is ~10 KB of base64 the relay never decodes. Bounded because it is
 // client input the relay stores and hands to the next joiner.
 const MAX_SNAPSHOT = 64 * 1024;
@@ -140,6 +133,10 @@ function create(client, msg) {
         seed: 0,
         snapshot: null,
         inputs: [],
+        // The newest tick the ring's own count cap has ever evicted -- a snapshot at or
+        // behind this tick cannot be served, count-cap-safe or not (#92 review). -1, not 0:
+        // a legitimate first snapshot lands at tick 0, and 0 is a real tick, not "never".
+        holed: -1,
         // The host's hash for each of the last CHECKSUM_WINDOW checksummed ticks, and
         // nobody else's: a client cannot push an entry in here, so it cannot flush the
         // reference out of it either (#41). `desyncs` is the room's own counter, which is
@@ -163,6 +160,19 @@ function create(client, msg) {
         substituted: 0,
         late: 0,
         forged: 0,
+        // What each token has spent of its repair allowance, and whether the relay has given
+        // up repairing it this match (#41, #93). Keyed by token, not kept on the socket: the
+        // socket is what a reload replaces, so a counter on it counts reloads, not repairs.
+        // Emptied at `begin`, which is the fresh start a new match is. Not a growth bound: a
+        // room that never starts one, or an endless match, accumulates one entry per token
+        // admitted. Bounded with the rest of abuse (#47).
+        //
+        // ponytail: the token is accepted from the client verbatim (`admit`), so a client that
+        // wants a fresh allowance sends a fresh one and re-takes the seat it just gave up
+        // (`leave` frees it now, `take_seats` re-grants it mid-match). Closes the accidental
+        // reload, deters nothing deliberate. upgrade path: an identity the client cannot choose
+        // (#7), or rate limiting (#47).
+        allowances: new Map(),
         // The whole phase model: a room is in lobby or in-game, and there is no third
         // (#21). The countdown is part of the lobby, not a phase of its own.
         started: false,
@@ -223,12 +233,22 @@ function name_taken(room, names) {
     return new Set(all).size !== all.length;
 }
 
+// Which seat the host is sitting on. `host` in the room view is the recipient's own answer,
+// so a client that is not the host is told there is one and never which (#88).
+// ponytail: the first of the host's seats, so a couch is named after its first participant;
+// upgrade path is sending every seat it holds if the sentence ever names more than one.
+function host_seat(room) {
+    for (const client of room.clients)
+        if (client.host && client.seats.length) return client.seats[0];
+    return null;
+}
+
 // Host is a property of the client, not of a seat or a participant, and it always holds at
 // least one seat -- which is also why it cannot drop its last one: a client's seat count is
 // fixed for the room's lifetime (#7, #14). It migrates to the oldest remaining seat-holding
 // client, so a stranger who leaves does not evaporate a live match.
 function ensure_host(room) {
-    for (const client of room.clients) if (client.host && client.seats.length) return;
+    if (host_seat(room) !== null) return;
     let successor = null;
     for (const client of room.clients)
         if (client.seats.length && (!successor || client.arrived < successor.arrived))
@@ -307,7 +327,7 @@ function seat_labels(room) {
     const online = online_seats(room);
     const dropped = new Set();
     for (const client of room.clients)
-        if (client.dropped) for (const seat of client.seats) dropped.add(seat);
+        if (client.allowance.dropped) for (const seat of client.seats) dropped.add(seat);
     return room.last_names.map((name, seat) =>
         !name
             ? null
@@ -376,6 +396,9 @@ function room_view(room, client) {
         labels: seat_labels(room),
         held: client.seats,
         host: !!client.host,
+        // Which seat that host is on, so the lobby can name the player everyone is
+        // waiting for: the flag above names nobody (#88).
+        host_seat: host_seat(room),
         started: room.started,
         ready: ready_seats(room),
         you_ready: !!client.ready,
@@ -509,6 +532,14 @@ function vacate(client) {
     seat_queue(room);
 }
 
+// One record per token, made on the way in so nothing downstream has to test for it -- and
+// found again rather than remade on a reconnect, which is the whole of #93.
+function allowance_of(room, token) {
+    let spent = room.allowances.get(token);
+    if (!spent) room.allowances.set(token, (spent = { repairs: 0, at: 0, dropped: false }));
+    return spent;
+}
+
 function admit(client, room, msg) {
     client.room = room;
     client.arrived = ++arrivals;
@@ -516,6 +547,9 @@ function admit(client, room, msg) {
     // browser is one socket and one reconnect, so the token reclaims every seat that client
     // held. A username is guessable by anyone in the room and is never an identity (#7).
     client.token = String(msg.token || "") || randomUUID();
+    // The repair allowance is the player's, not the socket's: a reconnect on the same token
+    // comes back to what it has spent rather than to a fresh five (#93).
+    client.allowance = allowance_of(room, client.token);
     // A seat whose holder is connected is not reclaimable: duplicating a tab copies
     // sessionStorage, and two sockets driving one seat is a desync, not a rejoin.
     const online = online_seats(room);
@@ -659,15 +693,23 @@ function holder_of(room, seat) {
     return null;
 }
 
-// Who was driving a seat on a tick that has not been stepped everywhere yet. The table is
-// updated the moment a change is stamped, but the change itself lands 2d ticks later, so
-// the ticks in between are still the old driver's -- and substituting for a seat the room
-// has not handed to the AI yet is exactly what those ticks need (#7, #42).
-function driver_at(room, seat, t) {
-    let driver = room.drivers[seat];
+// The driver table as it was on a tick the room has not finished with. The table itself is
+// updated the moment a change is stamped, but the change lands 2d ticks later, so the ticks
+// in between are still the old driver's -- and substituting for a seat the room has not
+// handed to the AI yet is exactly what those ticks need (#7, #42).
+//
+// All four seats in one pass. It answered a seat at a time, which was this scan four times
+// on every tick of a catch-up run, over an array that only shrank when a snapshot landed
+// (#92). `resume` had the same loop written out inline; it calls this now.
+//
+// ponytail: still a scan of the array, once per substitute call rather than four times a
+// tick. upgrade path: a table kept alongside `room.due` and advanced with it, if a room
+// ever holds enough stamped changes for the pass to show up.
+function drivers_at(room, t) {
+    const drivers = room.drivers.slice();
     for (let i = room.stamped.length - 1; i >= 0; i--)
-        if (room.stamped[i].seat === seat && room.stamped[i].t > t) driver = room.stamped[i].was;
-    return driver;
+        if (room.stamped[i].t > t) drivers[room.stamped[i].seat] = room.stamped[i].was;
+    return drivers;
 }
 
 // The relay substitutes, never the client (#42 corrects #6). A client-local substitution
@@ -684,16 +726,27 @@ function driver_at(room, seat, t) {
 //
 // ponytail: two ceilings, both sized for four seats. A room whose every client stops sending
 // at once stops substituting and never hands a seat over -- a room with nobody left in the
-// match to notice -- and `holder_of` and `driver_at` are linear scans run per seat per tick.
+// match to notice -- and `holder_of` is a linear scan run per seat per tick.
 // upgrade path: a 60 Hz interval per started room, and a seat -> holder map, if a room ever
 // has a spectator watching four AI bunnies play on after everybody dropped.
 function substitute(room) {
     const limit = room.tick - room.d - 1;
+    if (room.due > limit) return;
+    // The table as of the first tick still to cover, and the changes that land inside the
+    // run bucketed by the tick they land on: one pass over the stamped changes for the
+    // whole run instead of one per seat on every tick of it (#92). A change stamped from
+    // inside this loop -- the AI taking a seat over below -- is for `room.tick + 2d`, which
+    // is past `limit`, so it lands after the run either way.
+    const drivers = drivers_at(room, room.due);
+    const landing = {};
+    for (const change of room.stamped)
+        if (change.t > room.due) (landing[change.t] = landing[change.t] || []).push(change);
     while (room.due <= limit) {
         const t = room.due++;
+        for (const change of landing[t] || []) drivers[change.seat] = change.driver;
         const seats = {};
         for (let seat = 0; seat < SEATS; seat++) {
-            if (driver_at(room, seat, t) !== "local") continue;
+            if (drivers[seat] !== "local") continue;
             const holder = holder_of(room, seat);
             // A motionless player is holding no keys and still sending a frame every tick,
             // so it is never this: a drop is a missing frame, never a missing keypress
@@ -729,8 +782,29 @@ function substitute(room) {
         if (!Object.keys(seats).length) continue;
         broadcast_frame(room, { type: "input", t, seats });
         room.inputs.push({ t, seats });
-        if (room.inputs.length > MAX_RING) room.inputs.shift();
+        prune(room);
     }
+}
+
+// Everything the next resume could need and nothing older: the frames and the driver
+// changes between the host's last snapshot and now, floored rather than counted so a
+// throttled host does not outrun a fixed cap (#40, #70, #92). The ring is not sorted by
+// tick, so a filter prunes it, guarded behind a prefix check since the floor rarely moves.
+//
+// ponytail: MAX_RING is the honest-client ceiling behind that floor -- a client resending
+// frames at the tip forever never lets the floor catch up. What it evicts is not silent:
+// `room.holed` remembers the newest tick lost that way, and both catch-up-ceiling guards
+// refuse a snapshot at or behind it, so a resume never ships the hole this cap cuts.
+// upgrade path: merge same-tick frames, four fifths of the memory, if a relay ever runs
+// short.
+const MAX_RING = MAX_CATCH_UP * (SEATS + 1);
+function prune(room) {
+    const floor = Math.max(room.snapshot ? room.snapshot.t : 0, room.tick - MAX_CATCH_UP);
+    if (room.inputs.length && room.inputs[0].t < floor)
+        room.inputs = room.inputs.filter((frame) => frame.t >= floor);
+    while (room.inputs.length > MAX_RING) room.holed = Math.max(room.holed, room.inputs.shift().t);
+    if (room.stamped.length && room.stamped[0].t <= floor)
+        room.stamped = room.stamped.filter((change) => change.t > floor);
 }
 
 // The host's simulation state, every 2s, and only the host's: whoever holds host holds
@@ -754,8 +828,7 @@ function keep_snapshot(client, msg) {
     // The frames and the driver changes that state already accounts for are the ones
     // nobody will ever ask for again: what both lists are for is the gap between it and
     // now, and the snapshot's tick is where that gap starts.
-    room.inputs = room.inputs.filter((frame) => frame.t >= msg.t);
-    room.stamped = room.stamped.filter((change) => change.t > msg.t);
+    prune(room);
     // A client that asked before there was anything to answer with: the first two seconds
     // of a match are exactly when a seat is taken, and an ask the relay drops is one
     // nobody repeats (#40).
@@ -775,11 +848,29 @@ function resume(client) {
     if (!room.started || !room.snapshot) return;
     // Out of this match for good: a client the relay gave up repairing must not be handed
     // the match back by an ask still in flight, or by the next snapshot answering it (#41).
-    if (client.dropped) return void (client.waiting = false);
+    if (client.allowance.dropped) return void (client.waiting = false);
     // A client waiting for a seat has nothing to resume into, and asks on the way *out* of
     // the queue instead -- `seat_client` clears `queued`, and the ask that follows is the
     // one every mid-match arrival makes (#40, #44).
     if (client.queued.length) return void (client.waiting = false);
+    // Further back than the ring can reach: the frames between the snapshot and now are
+    // what close the gap, and past the catch-up ceiling there are not all of them any more
+    // -- a payload with a hole behind the state, which the joiner replays as released keys
+    // (#92). Left standing rather than refused: `waiting` is already set by every caller, so
+    // the host's next snapshot moves the floor up and answers this ask, exactly as it
+    // answers one made before there was any snapshot at all (#40). The client keeps its seat
+    // and its place in the room -- being out of a match is never being out of the room (#41,
+    // #42).
+    //
+    // ponytail: a host that never snapshots again leaves the ask standing for the rest of
+    // the match, silently, which is what a room with no snapshot at all already does.
+    // upgrade path: tell the client, if a room ever sits in that state long enough for
+    // anybody to ask why.
+    if (room.tick - room.snapshot.t > MAX_CATCH_UP) return;
+    // The floor missed one anyway: the ring's own count cap evicted a frame past this
+    // snapshot's tick before the snapshot even existed, and `room.holed` is the newest tick
+    // it took with it. A snapshot at or behind that is a hole no floor can undo (#92 review).
+    if (room.snapshot.t <= room.holed) return;
     client.waiting = false;
     // Every hash this client stamped for a tick at or before now belongs to the state being
     // replaced, and some of it is still in flight: counting it would spend a second of the
@@ -798,11 +889,10 @@ function resume(client) {
     const until = Math.max(room.snapshot.t, room.tick - room.d - 1);
     // The driver table as it was on the tick the snapshot was taken, which is the tick the
     // replay starts from: every change stamped since -- pruned to exactly those when that
-    // snapshot landed -- undone, newest first, and handed down as a change instead, to be
-    // applied on the tick every other client applies it on.
+    // snapshot landed -- undone, and handed down as a change instead, to be applied on the
+    // tick every other client applies it on.
     const ahead = room.stamped;
-    const drivers = room.drivers.slice();
-    for (let i = ahead.length - 1; i >= 0; i--) drivers[ahead[i].seat] = ahead[i].was;
+    const drivers = drivers_at(room, room.snapshot.t);
     send(client, {
         type: "start",
         // The tick the snapshot was taken on, and the tick to replay the gap up to. A
@@ -840,7 +930,7 @@ function keep_checksum(client, msg) {
     if (!room.started) return;
     if (!Number.isInteger(msg.t) || !Number.isInteger(msg.h)) return;
     if (!client.host) {
-        if (client.dropped || msg.t <= (client.resync_t || 0)) return;
+        if (client.allowance.dropped || msg.t <= (client.resync_t || 0)) return;
         const reference = room.checksums.find((one) => one.t === msg.t);
         // Held one deep rather than queued: a client has one tick in flight at a time, and
         // a hash it sent for a tick the host has not reached yet is the newer question.
@@ -865,24 +955,36 @@ function keep_checksum(client, msg) {
 // a desync correction and a lag correction look alike from the inside.
 function desync(client, t) {
     const room = client.room;
+    // The player's record, not this socket's: a reload is a new socket on the same token and
+    // comes back to what that token has spent (#93).
+    const spent = client.allowance;
     // A hash held for a host hash that arrived after its sender went is nobody's
     // disagreement any more, and must not spend a repair.
-    if (!room.clients.has(client) || client.dropped) return;
+    if (!room.clients.has(client) || spent.dropped) return;
     // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
     // and the first hashes are half a second in, so the whole allowance would be spent
     // before a single repair could be sent. Marked instead, and answered by that first
     // snapshot exactly as a mid-match joiner's ask is (#40).
     if (!room.snapshot) return void (client.waiting = true);
+    // Same shape, one snapshot later: a resume `room.tick - room.snapshot.t` this far past
+    // cannot be served either, and spending a repair on an ask that comes back with nothing
+    // is how a client starves its way to `drop_from_match` without ever having been repaired
+    // (#92).
+    if (room.tick - room.snapshot.t > MAX_CATCH_UP) return void (client.waiting = true);
+    // Same reason, same shape: the ring's count cap can evict past this snapshot's tick
+    // before the ceiling above even trips, and spending a repair on that is spending it on
+    // nothing (#92 review).
+    if (room.snapshot.t <= room.holed) return void (client.waiting = true);
     const now = Date.now();
-    const since = now - (client.repaired_at || 0);
+    const since = now - spent.at;
     // Quiet for long enough: the run this client was in is over, and the repair that ended
     // it worked. What is starting now gets the whole allowance.
-    if (since > repair_reset_ms()) client.repairs = 0;
+    if (since > repair_reset_ms()) spent.repairs = 0;
     // Still the same unrepaired desync, seen again 30 ticks later: the last repair has not
     // had a fresh snapshot to have worked from yet, so this is not a second one.
     else if (since < repair_cooldown_ms()) return;
     room.desyncs++;
-    if (client.repairs >= MAX_REPAIRS) {
+    if (spent.repairs >= MAX_REPAIRS) {
         console.log(
             "room %s desync %d at tick %d, dropped after %d repairs with no let-up",
             room.id,
@@ -897,11 +999,11 @@ function desync(client, t) {
         room.id,
         room.desyncs,
         t,
-        client.repairs + 1,
+        spent.repairs + 1,
         MAX_REPAIRS,
     );
-    client.repairs++;
-    client.repaired_at = now;
+    spent.repairs++;
+    spent.at = now;
     client.waiting = true;
     resume(client);
 }
@@ -916,9 +1018,14 @@ function desync(client, t) {
 // #39).
 function drop_from_match(client) {
     const room = client.room;
-    client.dropped = true;
+    client.allowance.dropped = true;
     client.waiting = false;
-    send(client, { type: "match_end", reason: "desync", matrix: last_board(room) });
+    // Every client on this token, not only the one that spent the last repair: a duplicated
+    // tab (#93) shares the record, so a desync in one is a desync for both, and the other
+    // must hear it too or it sits repaired-forever on a `dropped` record it never sees change.
+    for (const other of room.clients)
+        if (other.allowance === client.allowance)
+            send(other, { type: "match_end", reason: "desync", matrix: last_board(room) });
     // The seat reads `(out of sync)` from here on, which is a change to the room.
     broadcast_state(room);
 }
@@ -939,6 +1046,7 @@ function begin(room, msg) {
     room.seed = msg && msg.seed;
     room.snapshot = null;
     room.inputs = [];
+    room.holed = -1;
     room.stamped = [];
     room.checksums = [];
     room.desyncs = 0;
@@ -947,6 +1055,10 @@ function begin(room, msg) {
     room.due = 0;
     room.missing = new Array(SEATS).fill(0);
     room.substituted = room.late = room.forged = 0;
+    // A fresh match is a legitimately fresh allowance -- for every token in the room, dropped
+    // or not (#41, #93). Cleared before the walk below, or the re-point it does is thrown
+    // away again.
+    room.allowances.clear();
     // Nobody is waiting to be let into a match that has not started yet: every client in
     // the room is being handed this one.
     // With the tick counter, since the next match counts from zero again: a client resynced
@@ -957,9 +1069,7 @@ function begin(room, msg) {
         other.pending = null;
         // A client dropped out of the last match plays this one: being out of step is the
         // match's state, never the room's (#41).
-        other.dropped = false;
-        other.repairs = 0;
-        other.repaired_at = 0;
+        other.allowance = allowance_of(room, other.token);
         // No frame in for a tick of a match that has not been stepped yet (#42).
         other.last_t = -1;
     }
@@ -1131,7 +1241,7 @@ function relay(client, msg) {
             // Rung as well as fanned out, the sender's own frames included: a joiner needs
             // every seat's input for the gap, not just the ones somebody else sent (#40).
             room.inputs.push({ t: msg.t, seats });
-            if (room.inputs.length > MAX_RING) room.inputs.shift();
+            prune(room);
             // An arriving frame is what moves the room's clock on, so it is also what makes
             // another client's missing one late (#42).
             substitute(room);

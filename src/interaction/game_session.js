@@ -9,6 +9,7 @@ import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
 import {
     bump_matrix,
+    checksum_ban_map,
     checksum_snapshot,
     decode_snapshot,
     encode_snapshot,
@@ -19,8 +20,6 @@ import { make_rnd } from "../game/rnd.js";
 import { MAX_CATCH_UP } from "../net/room_config.js";
 import { Room } from "../net/room.js";
 import ko from "knockout";
-
-function noop() {}
 
 // How often the host packs its simulation and hands it to the relay, which caches the
 // latest one for the next client to join the match (#40).
@@ -85,17 +84,34 @@ export function Game_Session(get_level, config, muted, transport) {
     // with, so it hashes nothing (#16). The host hashes too -- its own is the reference.
     if (!config.local)
         room.checksum = function (t) {
-            return checksum_snapshot(pack_snapshot(rnd, objects, t));
+            return checksum_snapshot(pack_snapshot(rnd, objects, t), level_hash);
         };
 
     var game = null;
     var sfx = null;
-    var sound_player = null;
+    // One per session, which is one per lobby visit: the six elements hold nothing to do
+    // with a match, so `build` making a set per match left the outgoing set paused, decoded
+    // and alive -- ninety of them a minute on a client being repaired every two seconds,
+    // which is exactly the client that could least afford them (#30, #91).
+    var sound_player = new Sound_Player(muted);
     // The two halves of the simulation a snapshot is packed from and unpacked into: the
     // objects and the RNG's own state. The players are the `player` array, which is the
     // module's rather than this session's (#5).
     var objects = null;
     var rnd = null;
+    // The ban map this match is being played on, hashed once when the level is built and
+    // chained into every tick's checksum. The level crosses the wire as a name and each
+    // client fetches the bytes behind it for itself, so two clients that resolved one name
+    // to two different `.dat` bodies disagree on every hash from tick 0 rather than on the
+    // first tick a bunny happens to touch the tile that differs (#95). Zero until a level
+    // is built, which is before any tick is stepped.
+    //
+    // ponytail: the relay cannot tell a wrong ban map from a determinism bug, so a client
+    // on a stale level is repaired five times from a snapshot that cannot fix it -- about
+    // twelve seconds -- before it is dropped from the match. upgrade path: a `level`
+    // message of its own that the relay compares at match start and answers with one
+    // refusal, if that window ever turns up in a log.
+    var level_hash = 0;
     var snapshot_timer = null;
     var start_when_ready = false;
     var board_timer = null;
@@ -126,6 +142,10 @@ export function Game_Session(get_level, config, muted, transport) {
     // when the bunnies jump (#41).
     this.reconnecting = ko.observable(false);
     this.on_match_start = null;
+    // A `start` that never became a match: the level would not load, or the state it
+    // carried could not be replayed. Both were silent, and a client that had asked to be
+    // let into this match was waiting on exactly this answer (#89).
+    this.on_start_failed = null;
     // Whether a `start` has landed on this session: it is playing a match, or building
     // one, rather than sitting in the lobby waiting for the next (#40).
     this.in_match = false;
@@ -138,6 +158,10 @@ export function Game_Session(get_level, config, muted, transport) {
     // board travels with it (#22, #19). It comes back to the announcer too, which is what
     // makes every client leave the match on the same message rather than on its own.
     room.on_match_end = function (msg) {
+        // Where a session stops being one that is in a match. Every client hears the same
+        // message, so this is the one place both readers of the flag agree on: the way out
+        // of the match screen, and the announcement that way out makes (#87).
+        self.in_match = false;
         if (self.on_match_end) self.on_match_end(msg);
     };
     // A client that stops simulating hands its seats over rather than leaving them frozen.
@@ -152,6 +176,12 @@ export function Game_Session(get_level, config, muted, transport) {
             }),
         );
     };
+
+    // A `start` that never became a match, said once regardless of which of the two ways
+    // it failed (#89).
+    function start_failed() {
+        if (self.on_start_failed) self.on_start_failed();
+    }
 
     // A socket answers `start` a round trip later than a loopback does, so the whole
     // simulation is built out of what the relay handed down rather than out of `config`
@@ -171,11 +201,11 @@ export function Game_Session(get_level, config, muted, transport) {
         // pump loop would go on stepping the `player` array the new one replaces, and its
         // music would go on playing.
         if (game) game.pause();
-        // Which it really did: `build` makes a Sound_Player per match, so the outgoing
-        // one's looping music has to be stopped here rather than on the way to the lobby.
-        // Leaving the match muted the old one by accident; a resync never passes through
-        // the lobby at all, and doubled the music instead (#28, #40).
-        if (sound_player) sound_player.set_muted(true);
+        // The simulation about to be replaced must not be heard over the gap: the pump is
+        // paused above, the level is still to resolve, and a load that fails leaves the
+        // match here. `play` un-mutes it again, from where the track had got to rather than
+        // from the top (#28, #40, #91).
+        sound_player.set_muted(true);
         // With it goes its snapshot timer: the tick counter belongs to the match that is
         // starting and the simulation still in these variables belongs to the last one, so
         // a snapshot taken between here and `build` would be the old match's state under
@@ -187,9 +217,14 @@ export function Game_Session(get_level, config, muted, transport) {
         // `.dat` has to be fetched and decoded before anything can be built on it (#38).
         // A client that cannot load it stays where it is rather than playing a different
         // map: a differing ban map is a desync, not a degraded picture.
-        get_level(room.settings.level).then(function (level) {
-            if (mine === starting) build(level);
-        }, noop);
+        get_level(room.settings.level).then(
+            function (level) {
+                if (mine === starting) build(level);
+            },
+            function () {
+                if (mine === starting) start_failed();
+            },
+        );
     };
 
     // What a repair costs the machine least able to pay it, split three ways: building the
@@ -251,8 +286,18 @@ export function Game_Session(get_level, config, muted, transport) {
         var t0 = performance.now();
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
         var gap = room.gap();
-        if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return;
+        if (room.resume && (!resumed || gap > MAX_CATCH_UP)) return start_failed();
+        // A key tapped in the lobby has no tick to be read on yet -- it would otherwise sit
+        // latched and land on this match's first tick, a spurious jump/step nobody pressed
+        // just then (#86). `clear_taps`, not `release_all`: a key held into the countdown
+        // is this match's real tick-0 input (a level sample, not a latch), and wiping
+        // `keys_pressed` too would strand it with no keydown left to set it again --
+        // including on a repair, where the player never stopped holding it.
+        keyboard.clear_taps();
         var t1 = performance.now();
+        // After the guards above: a `start` this client refuses to build must leave the
+        // hash on the level its simulation is still running (#95).
+        level_hash = checksum_ban_map(level.ban_map);
         rnd = make_rnd(room.seed);
         var settings = room.settings;
 
@@ -267,7 +312,6 @@ export function Game_Session(get_level, config, muted, transport) {
         objects = new Objects(rnd);
         var ai = new AI();
         var animation = new Animation(renderer, img, objects, rnd);
-        sound_player = new Sound_Player(muted);
         sfx = new Sfx(sound_player);
         var movement = new Movement(sfx, objects, settings, rnd);
         game = new Game(movement, ai, animation, renderer, objects, room, level, true, rnd);
@@ -280,7 +324,19 @@ export function Game_Session(get_level, config, muted, transport) {
         // tick-0 simulation just built, and the gap between the two is replayed at once.
         if (resumed) {
             var t2 = performance.now();
-            unpack_snapshot(resumed, rnd, objects);
+            var packed_t = unpack_snapshot(resumed, rnd, objects);
+            // Two numbers for one tick: the packed state carries the tick it was taken on,
+            // and the relay carried the same tick in plaintext beside the body because it
+            // never decodes one (#12). Until now the packed one was read out of the buffer
+            // and thrown away, so a body and a tick from different moments would have
+            // replayed the gap from the wrong end of it with nothing to say so (#92).
+            //
+            // ponytail: reported and then played anyway -- nobody has ever seen one, and
+            // refusing would put a client out of a match over a log line. upgrade path:
+            // refuse the payload, the way a body that will not decode is refused above, if
+            // one ever turns up.
+            if (packed_t !== room.now())
+                console.log("snapshot packed at tick %d arrived as tick %d", packed_t, room.now());
             // Hundreds of ticks of history must not replay as a burst of deaths and
             // splashes, so the catch-up is silent and `play` is what un-mutes it (#28).
             sound_player.set_muted(true);
@@ -387,7 +443,11 @@ export function Game_Session(get_level, config, muted, transport) {
         board_timer = setInterval(snapshot, 250);
     };
     this.hide_board = function () {
-        if (game) play();
+        if (!game) return;
+        // A local board pauses the sim (`show_board` above): no tick runs while it is up,
+        // so a tap on it would otherwise latch and land on the tick that unpauses (#86).
+        keyboard.clear_taps();
+        play();
     };
     // The way out of the match, whichever screen it is leaving for. The board is not that
     // any more: in a networked room it never stopped the simulation (#37).
@@ -411,7 +471,7 @@ export function Game_Session(get_level, config, muted, transport) {
         }
         // The match is over for this client, so its music is over with it: muting used to
         // ride along with the board, and the board stopped pausing anything (#37).
-        if (sound_player) sound_player.set_muted(true);
+        sound_player.set_muted(true);
         if (game) game.pause();
     };
     // Pressed before `start` has come back, which is a round trip on a socket: remembered

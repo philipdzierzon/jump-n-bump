@@ -11,11 +11,13 @@ import { Animation } from "../src/game/animation.js";
 import { Movement } from "../src/game/movement.js";
 import { make_rnd } from "../src/game/rnd.js";
 import { env } from "../src/game/env.js";
-import { default_ban_map } from "../src/asset_data/default_levelmap.js";
+import { default_ban_map, LEVEL_WIDTH } from "../src/asset_data/default_levelmap.js";
+import { BAN_ICE } from "../src/game/level.js";
 import { Renderer } from "../src/interaction/renderer.js";
 import { Room } from "../src/net/room.js";
 import { Loopback_Transport } from "../src/net/loopback_transport.js";
 import {
+    checksum_ban_map,
     checksum_snapshot,
     decode_snapshot,
     encode_snapshot,
@@ -87,7 +89,14 @@ const no_sfx = { jump() {}, death() {}, spring() {}, splash() {}, fly() {}, musi
 // `held` is the seats this client holds; control scheme n drives held[n] (#32). Input
 // reaches the simulation only through the room, over a loopback transport -- the same path
 // a networked room takes, with a different transport under it (#16, #33).
-function start(seed, settings, held, transport = new Loopback_Transport(), renderer = no_renderer) {
+function start(
+    seed,
+    settings,
+    held,
+    transport = new Loopback_Transport(),
+    renderer = no_renderer,
+    ban_map = default_ban_map(),
+) {
     const keyboard = new Keyboard([]);
     const room = new Room(transport, (scheme) => keyboard.input_frame(scheme));
     room.start({ seed, settings, held });
@@ -100,7 +109,7 @@ function start(seed, settings, held, transport = new Loopback_Transport(), rende
         renderer,
         objects,
         room,
-        { ban_map: default_ban_map() },
+        { ban_map },
         true,
         rnd,
     );
@@ -230,6 +239,80 @@ assert.deepEqual(
     delayed_room.stats(),
     { substituted: 2, arrived: 1, late: 1, worst_margin: -3, late_by: { "-3": 1 }, holes: 0 },
     "a frame arriving after the tick it was stamped for is counted, with its slack",
+);
+
+// Input edge latch: a tap that begins and ends between two loop wakeups, and a key really
+// held across the same batch (#86). The pump steps a whole catch-up batch synchronously, so
+// no key event can land inside one -- which is exactly N back-to-back `room.step()` calls
+// with no key event between them, and needs no fake clock.
+const batch_transport = (d, held, drivers) => ({
+    receive(fn) {
+        this.to_client = fn;
+    },
+    send(msg) {
+        if (msg.type !== "start") return;
+        this.to_client({ type: "start", t: 0, d, seed: 1, settings: {}, held, drivers });
+    },
+});
+
+function batch_frames(d, ticks) {
+    const keyboard = new Keyboard([]);
+    const room = new Room(batch_transport(d, [0], ["local", "ai", "ai", "ai"]), (scheme) =>
+        keyboard.input_frame(scheme),
+    );
+    room.start({ seed: 1, settings: {}, held: [0] });
+    keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[0][1] }); // right, held across the batch
+    keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[0][2] }); // up, tapped and released inside
+    keyboard.onKeyUp({ keyCode: CONTROL_SCHEMES[0][2] }); //   the gap between two wakeups
+    return [...Array(ticks)].map(() => room.step()[0]);
+}
+
+const batch = batch_frames(0, 4);
+assert.deepEqual(
+    batch.map((f) => f.up),
+    [true, false, false, false],
+    "a tap between two wakeups reaches exactly one tick of the batch, rather than none",
+);
+assert.deepEqual(
+    batch.map((f) => f.right),
+    [true, true, true, true],
+    "and a key really held is delivered once per tick -- one tick is one 60th of the wall clock the batch owes",
+);
+
+// The same key timeline through a transport with an input delay: the same one-tick pulse,
+// translated by d and nothing else. Local and networked are one code path with two
+// transports under it, and the latch sits below the room, so it cannot tell them apart
+// (#16, #33).
+assert.deepEqual(
+    batch_frames(2, 5).map((f) => f.up),
+    [false, false, true, false, false],
+    "a tap delivers one tick over a delayed transport too, d ticks later -- and d is the design",
+);
+
+// Four humans on one keyboard is one client holding four seats, so one tick reads four
+// frames. The latch clears per scheme: a tap on scheme 1 must survive scheme 0's read of
+// the same tick (#32).
+const couch_keyboard = new Keyboard([]);
+const couch_room = new Room(batch_transport(0, [0, 1], ["local", "local", "ai", "ai"]), (scheme) =>
+    couch_keyboard.input_frame(scheme),
+);
+couch_room.start({ seed: 1, settings: {}, held: [0, 1] });
+[0, 1].forEach((scheme) => {
+    couch_keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[scheme][0] }); // left
+    couch_keyboard.onKeyUp({ keyCode: CONTROL_SCHEMES[scheme][0] });
+    couch_keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[scheme][2] }); // up
+    couch_keyboard.onKeyUp({ keyCode: CONTROL_SCHEMES[scheme][2] });
+});
+const couch = couch_room.step();
+assert.deepEqual(
+    [couch[0].up, couch[1].up],
+    [true, true],
+    "one tick reads a frame per held seat, and one seat's read must not eat another's tap",
+);
+assert.deepEqual(
+    [couch[0].left, couch[1].left],
+    [true, true],
+    "the latch is not wired to `up` alone -- `left` and `right` tap the same way",
 );
 
 // The pump keeps up with the room, not with its own clock (#42). A client resumed into a
@@ -367,6 +450,120 @@ assert.equal(
     late.step()[1],
     undefined,
     "a seat the room handed the AI seven ticks ago is the AI's here too, not a released frame",
+);
+
+// The d-tick tail: a frame that was local when it was consumed -- not merely when it was
+// scheduled -- outliving the handover. Two routes stamp such a frame, exercised here: this
+// client's own schedule (seat 1, d ticks ahead of the handover) and the relay's resend ring
+// (seat 2, landing on the handover tick itself, same as the live fan-out would). step is the
+// only place the driver table and the frame set are both in hand to reconcile them (#110).
+const handover_transport = function (extra) {
+    return {
+        receive(fn) {
+            this.to_client = fn;
+        },
+        send(msg) {
+            if (msg.type !== "start") return;
+            this.to_client(
+                Object.assign(
+                    {
+                        type: "start",
+                        t: 0,
+                        d: 2,
+                        seed: 1,
+                        settings: {},
+                        held: [0, 1],
+                        drivers: ["local", "local", "local", "ai"],
+                        changes: [
+                            { t: 2, seat: 1, driver: "ai" },
+                            { t: 2, seat: 2, driver: "ai" },
+                        ],
+                        inputs: [{ t: 2, seats: { 2: { left: true, right: false, up: false } } }],
+                    },
+                    extra || {},
+                ),
+            );
+        },
+    };
+};
+const handover = new Room(handover_transport(), no_keys);
+handover.start({ seed: 1, settings: {}, held: [0, 1] });
+handover.step();
+handover.step();
+assert.deepEqual(
+    Object.keys(handover.step()),
+    ["0"],
+    "a seat handed to the AI keeps no frame, whoever stamped it -- this client d ticks ago, or the relay's ring (#110)",
+);
+
+// The same reconciliation on the replay path, not only the live one: a joiner's catch-up
+// steps through the same `step`, so the ring's stale frame for seat 2 must not survive
+// being replayed into a fresh room either.
+const replayed = new Room(handover_transport({ until: 3 }), no_keys);
+replayed.start({ seed: 1, settings: {}, held: [0, 1] });
+let replayed_last = null;
+replayed.catch_up(function () {
+    replayed_last = replayed.step();
+});
+assert.deepEqual(
+    Object.keys(replayed_last),
+    ["0"],
+    "and replayed through catch_up, the ring's stale frame is dropped there too (#110)",
+);
+
+// What discriminates "local at the tick it was stamped for" from "local at the tick it is
+// consumed" -- the wrong invariant and the right one -- is a window shorter than d: seat 1
+// goes local -> ai at t=2 and back ai -> local at t=4, so the frame this client scheduled
+// at t=0 for t=2 was stamped while local but must not survive to be consumed, and the frame
+// it schedules once local again must reach the seat exactly as if it had never left.
+const window_transport = {
+    receive(fn) {
+        this.deliver = fn;
+    },
+    send() {},
+};
+const windowed = new Room(window_transport, (scheme) => ({
+    left: scheme === 1,
+    right: false,
+    up: false,
+}));
+window_transport.deliver({
+    type: "start",
+    t: 0,
+    d: 2,
+    seed: 1,
+    settings: {},
+    held: [0, 1],
+    drivers: ["local", "local", "ai", "ai"],
+    changes: [
+        { t: 2, seat: 1, driver: "ai" },
+        { t: 4, seat: 1, driver: "local" },
+    ],
+});
+const seen = {};
+for (let t = 0; t <= 6; t++) {
+    const frames = windowed.step();
+    if (t === 2 || t === 4 || t === 6) seen[t] = frames;
+}
+assert.deepEqual(
+    Object.keys(seen[2]),
+    ["0"],
+    "the frame stamped at t=0 for t=2, while seat 1 was still local, does not survive the ai it became by t=2 (#110)",
+);
+assert.deepEqual(
+    Object.keys(seen[4]),
+    ["0", "1"],
+    "and once local again the d-tick floor releases it exactly as any seat with no frame yet does",
+);
+assert.equal(
+    seen[4][1].left,
+    false,
+    "released, not stale keys: nothing was ever scheduled for this tick while the seat was away",
+);
+assert.equal(
+    seen[6][1].left,
+    true,
+    "and the seat's own keys reach it again once local has had d ticks to schedule one",
 );
 
 // #83: one simulation tick that costs more than a frame must not lock the loop. The pump
@@ -661,6 +858,44 @@ assert.equal(hashed()[0].t, HALF * 2 + 30, "stamped with the tick it hashed, not
 for (let tick = 0; tick < 29; tick++) joiner.game.step();
 assert.equal(hashed().length, 1, "and on no tick in between");
 
+// A level edited under the same name -- a tile retyped by a deploy, which is the shape the
+// stale cache serves -- is what the hash over the state alone cannot see (#95). SOLID and
+// ICE are interchangeable in both clauses of `position_player`'s spawn test, so the two
+// clients draw the same cells from the same seed and pack a byte-identical tick 0; a bunny
+// has to slide on that one tile before the states part. Last, because building a Game
+// replaces the `player` array that `pack_snapshot` reads, so each state is packed before
+// the next Game is built.
+const edited_map = default_ban_map();
+edited_map[2 + 11 * LEVEL_WIDTH] = BAN_ICE;
+const stale = start(2468, {}, [0]);
+const stale_state = pack_snapshot(stale.rnd, stale.objects, 0);
+const fresh = start(2468, {}, [0], new Loopback_Transport(), no_renderer, edited_map);
+const fresh_state = pack_snapshot(fresh.rnd, fresh.objects, 0);
+assert.equal(
+    checksum_snapshot(fresh_state),
+    checksum_snapshot(stale_state),
+    "one tile apart, two clients are in the same state at tick 0: the state alone cannot see it",
+);
+// The expression the room builds, by hand -- same as the joiner's above.
+assert.notEqual(
+    checksum_snapshot(fresh_state, checksum_ban_map(edited_map)),
+    checksum_snapshot(stale_state, checksum_ban_map(default_ban_map())),
+    "and chaining the ban map's hash in front of it makes them disagree from tick 0 (#95)",
+);
+
+// The simulation-level half of the same fact (#110): `player[i].ai` is `!frame`, so the
+// reconciliation in `step` above has to reach `game.js` too. Last, because building a Game
+// replaces the `player` array.
+const handover_game = start(1, {}, [0, 1], handover_transport());
+handover_game.game.step();
+handover_game.game.step();
+handover_game.game.step();
+assert.deepEqual(
+    player.map((p) => p.ai),
+    [false, true, true, true],
+    "and the AI steers it on this client too, which is what every other client is doing (#110)",
+);
+
 console.log(
-    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, and a snapshot plus the input gap lands in the host's state",
+    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, a snapshot plus the input gap lands in the host's state, and a seat handed to the AI keeps no stale frame",
 );

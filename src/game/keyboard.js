@@ -12,6 +12,12 @@ export const CONTROL_SCHEMES = [
 export function Keyboard(key_function_mappings) {
     "use strict";
     var keys_pressed = {};
+    // A key that went down since this scheme last handed a frame to a tick, whether or not
+    // it is still down now. `Room.step` samples `keys_pressed` live once per tick, but a
+    // catch-up batch is N synchronous ticks with no DOM event between them, so a tap that
+    // begins and ends inside one leaves `keys_pressed` exactly as it found it -- the jump
+    // that never happens during a stutter (#86). Cleared by the read, not by a clock.
+    var tapped = {};
 
     // One input frame, the wire format: 3 bits, unconditionally, whether or not anything
     // changed. Null for a scheme this client does not have -- the one guard, so callers
@@ -19,15 +25,25 @@ export function Keyboard(key_function_mappings) {
     this.input_frame = function (scheme) {
         var keys = CONTROL_SCHEMES[scheme];
         if (!keys) return null;
-        return {
-            left: !!keys_pressed[keys[0]],
-            right: !!keys_pressed[keys[1]],
-            up: !!keys_pressed[keys[2]],
+        var frame = {
+            left: !!(keys_pressed[keys[0]] || tapped[keys[0]]),
+            right: !!(keys_pressed[keys[1]] || tapped[keys[1]]),
+            up: !!(keys_pressed[keys[2]] || tapped[keys[2]]),
         };
+        // Cleared per scheme, not wholesale: couch play is one client holding up to four
+        // seats, so one tick makes up to four `input_frame` calls, and a latch the first
+        // call wiped would eat the other seats' taps (#32).
+        // ponytail: a latch, not a count -- two taps of the same key inside one batch
+        // deliver as one. upgrade path: a per-key pending count, if that ever matters.
+        keys.forEach(function (key) {
+            tapped[key] = false;
+        });
+        return frame;
     };
 
     this.onKeyDown = function (evt) {
         keys_pressed[evt.keyCode] = true;
+        tapped[evt.keyCode] = true;
     };
 
     this.onKeyUp = function (evt) {
@@ -40,9 +56,19 @@ export function Keyboard(key_function_mappings) {
     // switched away from never delivers the keyup for the key that was held, and the map
     // would go on reporting it pressed for every tick of it (#85). Not a loop of `onKeyUp`,
     // which would fire M's and P's actions -- a flush is the keys being let go of, not the
-    // player pressing them.
+    // player pressing them. The latch goes with it: a tap that landed a moment before the
+    // blur must not steer the bunny for a tick after it (#86).
     this.release_all = function () {
         keys_pressed = {};
+        tapped = {};
+    };
+
+    // The latch alone, for a boundary that must not deliver a stale tap but must not
+    // strand a held key either: a match start or an unpause has no tick before it for a
+    // pre-boundary tap to land on, but a held key is real input this tick and
+    // `release_all` would wipe it with no keydown left to set it again (#86).
+    this.clear_taps = function () {
+        tapped = {};
     };
 }
 
