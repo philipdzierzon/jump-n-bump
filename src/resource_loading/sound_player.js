@@ -1,14 +1,22 @@
 // Every sound the game owns. Preloaded once and reused: play_sound used to create an
 // <audio> element per event and reclaim it only once it reached `ended`, which an
 // autoplay-blocked or still-loading element never does -- so elements accumulated
-// until the main thread died (#30). The owner is the session rather than the match, for
-// the same reason one level up: a repair rebuilt the match, and its six elements with it
-// (#91).
+// until the main thread died (#30). The owner rose from the match to the session next,
+// because a repair rebuilt the match and its six elements with it (#91), and from the
+// session to the page after that, because nothing ever released a session's set and a
+// room entry builds a session (#123).
+//
+// It is not reached through `new` any more, and that is the point: `shared_sound_player`
+// below is the only way in, so there is no second set of elements to leak.
 const SFX_NAMES = ["bump", "death", "fly", "jump", "splash", "spring"];
 
-export function Sound_Player(muted) {
+function Sound_Player() {
     var self = this;
     var sounds = {};
+    // Where the page's mute preference lives now. It used to be handed in and shadowed by
+    // whichever session held the player; a session is one room entry, and this outlives
+    // every one of them (#123).
+    var muted = false;
 
     var sfx_extension = document.createElement("audio").canPlayType("audio/mpeg") ? "mp3" : "ogg";
     for (var i = 0; i < SFX_NAMES.length; i++) {
@@ -52,4 +60,17 @@ export function Sound_Player(muted) {
         audio.currentTime = 0;
         if (!muted) play(audio);
     };
+}
+
+// One player, built on the first room entry that needs it and kept for the tab. A session
+// is one room entry and nothing ever tore its player down, so browsing in and out of rooms
+// cost a set of six decoded elements per entry, for good (#123).
+//
+// Sharing is right here and was wrong one level down: what `Sfx` holds is a match's, and a
+// repair rebuilds the match (#91). What this holds is the six files and the mute
+// preference, and neither of those is a match's or a room's.
+var shared = null;
+export function shared_sound_player() {
+    if (!shared) shared = new Sound_Player();
+    return shared;
 }

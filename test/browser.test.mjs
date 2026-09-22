@@ -91,8 +91,13 @@ function record_audio() {
     // nothing plays again, and Sound_Player keeps them out of the document, so there is
     // nothing to querySelectorAll for (#91).
     // ponytail: this counts elements made, not elements still alive -- it proves a repair
-    // makes none, which is the fix, rather than that a made one was freed. upgrade path: a
-    // heap snapshot through CDP if a leak ever survives this.
+    // makes none, which is the fix, rather than that a made one was freed. upgrade path:
+    // count the elements that have *played*, which `__audio` below holds a reference to, so
+    // one that is in it is one that exists. Not a heap snapshot: a `WeakRef` per element and
+    // a forced `HeapProfiler.collectGarbage` were measured against the leak in #123 and said
+    // six alive whether or not it was fixed, because the sets a retired session left behind
+    // are collectable the moment nothing reaches the session -- the cost is real between
+    // collections, and invisible to a count taken after one (#123).
     window.__audio_made = 0;
     const create = document.createElement.bind(document);
     document.createElement = function (tag) {
@@ -261,9 +266,11 @@ const music = (root = page) =>
     });
 
 // How far into the track this session is. `music` takes the first element it finds, which
-// on a page that has walked through several sessions is an old one, paused where its match
-// left it; the one playing now is the newest. Zero for a track that never played, so a poll
-// on this times out on its own wait rather than on a `TypeError` (#91).
+// on a page that has walked through several sessions used to be an old one, paused where
+// its match left it; the one playing now is the newest. A page holds one player and one
+// such element now, so the two agree (#123) -- what this still adds is a zero for a track
+// that never played, so a poll on it times out on its own wait rather than on a `TypeError`
+// (#91).
 const music_t = (root = page) =>
     root.evaluate(
         () => [...window.__audio].filter((a) => /bump\.\w+$/.test(a.src)).pop()?.currentTime ?? 0,
@@ -1790,6 +1797,105 @@ async function sound() {
     assert.deepEqual(await sounding(sound_page), [], "a match that is over sounds nothing");
     assert.deepEqual(errors, [], "with nothing thrown on the way");
     await sound_page.close();
+}
+
+// --- the sound player outlives the room (#123) -------------------------------------------
+// #91 moved the six <audio> elements up from the match to the session, and stopped there. A
+// session is one room entry, and nothing ever released one: browse in, browse out, and the
+// set stays -- paused, decoded, and never asked for again. A match walked back to the lobby
+// costs a second set, because that is a new session too. The fix is the same move one level
+// further up, to the page.
+//
+// Offline rooms, and no clock to pin: nothing below turns on which bunny bumps which, only
+// on the music being asked for in two different room entries.
+//
+// The two counts are deliberately different questions. `audio_made` is every element this
+// page ever created, which is what says no new set was built. `__audio` is every element
+// that has ever been *played*, held in a Set by the recorder -- so an element in it exists,
+// and counting the ones that play the music says how many decoders of that file the page is
+// carrying, rather than how many it once made.
+async function sound_outlives_the_room() {
+    const hop = await (await make_context("sound-lifetime")).newPage();
+    const errors = [];
+    hop.on("pageerror", (error) => errors.push(error.message));
+    await hop.goto(origin + "/");
+
+    async function enter_lobby() {
+        await click("Play offline", hop);
+        await on("names", hop);
+        await hop.keyboard.press("ArrowUp");
+        await until("the participant", async () => (await seats(hop).count()) === 1);
+        await click("Take the seats", hop);
+        await on("room", hop);
+    }
+    async function leave_lobby() {
+        await click("Leave", hop);
+        await on("landing", hop);
+    }
+    // Every element that has played the music, which the recorder holds a reference to --
+    // so this counts elements that are still there, not elements that once were.
+    const music_elements = (root) =>
+        root.evaluate(() => [...window.__audio].filter((a) => /bump\.\w+$/.test(a.src)).length);
+    // Whether anything is playing the music this instant. `sounding` rather than `music`,
+    // which takes the *first* element it ever saw play the file -- and that there is only
+    // one such element is the claim under test. A wait must not rest on it: a page that went
+    // back to a set per room entry would leave that first element paused for good, and the
+    // wait below would report the regression as a timeout of its own rather than letting the
+    // count that names it be what goes red.
+    const music_playing = async (root) =>
+        (await sounding(root)).some((name) => name.startsWith("bump."));
+
+    await enter_lobby();
+    // Six sounds plus the element `canPlayType` is probed on, which is one player's worth.
+    // Pinned to the number rather than merely remembered, because every comparison below is
+    // against it: a recorder that had stopped counting would hand them all a zero that
+    // agrees with itself.
+    const one_set = await audio_made(hop);
+    assert.equal(one_set, 7, "a room entry sounds six files, off one player (#91)");
+
+    await leave_lobby();
+    await enter_lobby();
+    await leave_lobby();
+    await enter_lobby();
+    assert.equal(
+        await audio_made(hop),
+        one_set,
+        "three room entries and still one set of <audio>: the player is the page's (#123)",
+    );
+
+    // Two matches, in two different room entries, with a walk back to the lobby between
+    // them -- which is itself a new session, and used to be a set of its own.
+    await click("Start the match", hop);
+    await on("play", hop);
+    await until("the music", async () => await music_playing(hop));
+    await click("Back to the lobby", hop);
+    await on("room", hop);
+    await leave_lobby();
+    await enter_lobby();
+    await click("Start the match", hop);
+    await on("play", hop);
+    await until("the music again", async () => await music_playing(hop));
+
+    assert.equal(
+        await music_elements(hop),
+        1,
+        "one <audio> is playing this file, not one per match: the second match picked up " +
+            "the first one's element rather than decoding 54.8 seconds again (#123)",
+    );
+    assert.equal(
+        await audio_made(hop),
+        one_set,
+        "and two matches in four room entries made no element the first lobby had not (#123)",
+    );
+    // The half of sharing that could have gone wrong: the session pressing M is not the
+    // session that built the player.
+    await hop.keyboard.press("m");
+    await until("the music to stop", async () => !(await music_playing(hop)));
+    await hop.keyboard.press("m");
+    await until("the music to come back", async () => await music_playing(hop));
+
+    assert.deepEqual(errors, [], "with nothing thrown on the way");
+    await hop.close();
 }
 
 // --- a phone (#66) ---------------------------------------------------------------------
@@ -3919,6 +4025,7 @@ try {
     await reload_into_a_dead_room();
     await reload_into_a_locked_room();
     await sound();
+    await sound_outlives_the_room();
     await browse();
     await queueing();
     await waitlisted_seat();

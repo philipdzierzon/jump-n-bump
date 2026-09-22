@@ -3,7 +3,7 @@ import { Objects } from "../game/objects.js";
 import { Keyboard } from "../game/keyboard.js";
 import { AI } from "../game/ai.js";
 import { Animation } from "../game/animation.js";
-import { Sound_Player } from "../resource_loading/sound_player.js";
+import { shared_sound_player } from "../resource_loading/sound_player.js";
 import { Sfx } from "../game/sfx.js";
 import { Movement } from "../game/movement.js";
 import { Game, player } from "../game/game.js";
@@ -89,11 +89,14 @@ export function Game_Session(get_level, config, muted, transport) {
 
     var game = null;
     var sfx = null;
-    // One per session, which is one per lobby visit: the six elements hold nothing to do
-    // with a match, so `build` making a set per match left the outgoing set paused, decoded
-    // and alive -- ninety of them a minute on a client being repaired every two seconds,
-    // which is exactly the client that could least afford them (#30, #91).
-    var sound_player = new Sound_Player(muted);
+    // The page's, not this session's. The six elements hold nothing to do with a match, so
+    // `build` making a set per match left the outgoing set paused, decoded and alive --
+    // ninety of them a minute on a client being repaired every two seconds, which is exactly
+    // the client that could least afford them (#30, #91). They hold nothing to do with a
+    // room either, and a session is one room entry: owning them here left a set behind per
+    // entry, and walking a match back to the lobby rebuilds the session, so it cost two
+    // (#123).
+    var sound_player = shared_sound_player();
     // The two halves of the simulation a snapshot is packed from and unpacked into: the
     // objects and the RNG's own state. The players are the `player` array, which is the
     // module's rather than this session's (#5).
