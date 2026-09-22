@@ -150,7 +150,7 @@
         <p class="muted">Leave it blank to be given a code, or pick your own.</p>
         <input class="code" maxlength="5" placeholder="CODE" data-bind="value: code, valueUpdate: 'input'" />
         <label><input type="checkbox" data-bind="checked: listed" /> Show it in the public list</label>
-        <button class="pri" data-bind="click: create_room">Create</button>
+        <button class="pri" data-bind="click: create_room, enable: !connecting()">Create</button>
         <p class="err" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Back</button>
     </div>
@@ -171,7 +171,7 @@
         </div>
         <p class="muted centre">Enter the room's password, if it has one.</p>
         <input type="password" placeholder="Password" data-bind="value: password, valueUpdate: 'input'" />
-        <button class="pri" data-bind="click: submit_password">Continue</button>
+        <button class="pri" data-bind="click: submit_password, enable: !connecting()">Continue</button>
         <p class="err" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Start over</button>
     </div>
@@ -189,7 +189,7 @@
         <p class="muted" data-bind="visible: participants().length === 0">Nobody yet.</p>
         <p class="muted" data-bind="visible: seated">These seats are taken and keep their names for as long as you are in the room.</p>
         <p class="muted" data-bind="visible: match_running">A match is in progress; you are in for the next one.</p>
-        <button class="pri" data-bind="click: take_seats, enable: participants().length > 0, text: seated() ? 'Back to the lobby' : 'Take the seats'"></button>
+        <button class="pri" data-bind="click: take_seats, enable: participants().length > 0 &amp;&amp; !connecting(), text: seated() ? 'Back to the lobby' : 'Take the seats'"></button>
         <p class="err" data-bind="text: error"></p>
         <button class="sm" data-bind="click: go_landing">Start over</button>
     </div>
