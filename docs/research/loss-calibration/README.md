@@ -47,7 +47,7 @@ If `tc` cannot attach netem, the container says so and exits. On a Linux host, r
   latency on one shared clock.
 - For every cell it reports:
     - latency over the configured delay (p50 to max), in ms
-    - the frames that arrived 1-3, 4-7, 8-15 or 16+ ticks late
+    - the frames that arrived 1-3, 4-7, 8-15, 16-29 or 30+ ticks late
     - stalls: runs of consecutive frames that each arrived more than a tick late
     - the kernel's TCP recovery counters (`/proc/net/netstat`), diffed across the cell
 - It also records the kernel version and the TCP sysctls, because they decide the RTO and the
