@@ -1298,8 +1298,21 @@ function relay(client, msg) {
             // `started` beside it is the guard `keep_snapshot` and `keep_checksum` already
             // open with, and it is the half the counter cannot cover: between matches the
             // room is still on the match that ended, so its number alone would let a frame
-            // from it move a lobby's clock. `input` is the one message that moves that
-            // clock, and it was the one without the guard.
+            // from it move a lobby's clock -- `substitute` walking a lobby, handing seats to
+            // the AI and ringing invented frames at clients picking a level. `input` is the
+            // one message that moves that clock, and it was the one without the guard.
+            //
+            // Counted either way, but only the in-match half is ever reported: `report_match`
+            // returns early while the room is not started, and `begin` zeroes the count, so a
+            // refusal between matches goes into a number no log line prints. The same is
+            // already true of `late` and `forged`, which can only happen in a match at all.
+            //
+            // ponytail: a frame with no `match` on it is refused like any other, and a page
+            // on a bundle that predates this field sends nothing else -- a match that never
+            // moves rather than the `OUT_OF_DATE` it deserves. `join` compares builds only
+            // when both ends declared one and `create` never compares at all, so the tab that
+            // slips through is one that *creates* a room during a relay upgrade. upgrade path:
+            // compare the build on the way in for real (#29).
             if (!room.started || msg.match !== room.match) return void room.stale++;
             // Past its deadline: the relay already put a released frame in for this tick and
             // the room stepped it, so the real one is for a tick that never comes round

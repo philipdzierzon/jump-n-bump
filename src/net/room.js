@@ -75,6 +75,12 @@ export function Room(transport, read_input) {
     // refused there rather than believed (#122). Kept across `match_end`, because a match
     // that is over is still the match this client was last in -- which is what tells a
     // `start` for it from one that begins the next.
+    //
+    // Two things it does not say. Zero until the first `start`, so a page that opens into a
+    // match already running sees a number above its own on the first `start` it ever gets:
+    // "not the match I am in" rather than "the match after it". And the relay counts one per
+    // `begin` while the loopback counts one per `start` it is sent, which are the same number
+    // only because a local room has no countdown to begin a match without one.
     this.match = 0;
     this.settings = {};
     // The host's packed simulation state, when this `start` is one that joins a match

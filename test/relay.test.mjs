@@ -259,8 +259,22 @@ late.socket.close();
 
 // The host announces the end -- the relay cannot read the simulation, so the final board
 // travels with the message -- and the announcement is over with it (#22).
+// Under the capture, because the line the match ends on is also where this room says
+// whether the relay took the 41 frames the `Room` above sent it. A client that stamped the
+// wrong match -- or none -- has every frame refused in silence, and the only place that is
+// visible is this count (#122).
+const qmftx_said = [];
+const qmftx_spoke = console.log;
+console.log = (...args) => qmftx_said.push(format(...args));
 host_room.end_match("lobby", [[0, 1]]);
 await new Promise((resolve) => setTimeout(resolve, 100));
+console.log = qmftx_spoke;
+assert.ok(
+    qmftx_said.some((line) => /^room QMFTX match over: .*, 0 stale$/.test(line)),
+    "the relay took every frame the client sent: a real `Room` stamps the match it is in " +
+        "(#122) -- said instead: " +
+        qmftx_said.join(" | "),
+);
 const ended = seen.find((msg) => msg.type === "match_end");
 assert.equal(ended.reason, "lobby", "the reason is relayed verbatim");
 assert.deepEqual(ended.matrix, [[0, 1]], "and so is the board the host counted");
@@ -684,7 +698,7 @@ assert.ok(payload, "a client that asks is handed the match in progress");
 assert.equal(payload.t, 3, "on the tick the host's snapshot was taken");
 assert.equal(
     payload.match,
-    snap_start.match,
+    1,
     "and the match it is a resume of: a joiner stamps its frames for the match it landed in (#122)",
 );
 assert.equal(payload.snapshot, "SNAPSHOT-BODY", "with the host's body, opaque and unread");
@@ -1656,6 +1670,22 @@ await until_seen(
     relit.guest_saw,
     (msg) => msg.type === "match_end" && msg.reason === "bumps",
     "the first match to end",
+);
+// The other half of the guard, and the half the counter cannot cover: between matches the
+// room is still on the match that ended, so its number alone would let that match's frames
+// move a *lobby* room's clock -- `substitute` walking a lobby, handing seats to the AI and
+// ringing invented frames at clients who are picking a level. It is the frame a client left
+// on the match screen goes on sending (#124), and it cannot be asserted through the counter:
+// `report_match` returns early while the room is not started and `begin` zeroes the count,
+// so a lobby refusal is counted into a number no log line ever prints. Fan-out is the whole
+// of what is observable.
+const lobby_before = relit.guest_saw.filter((msg) => msg.type === "input").length;
+relit.host.socket.send({ type: "input", match: 1, t: 2800, seats: { 0: pressed_key } });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(
+    relit.guest_saw.filter((msg) => msg.type === "input").length,
+    lobby_before,
+    "a frame arriving between matches moves nothing: there is no match for it to belong to",
 );
 // The lobby un-readies every client, so the second match begins the way the first did.
 relit.guest.socket.send({ type: "ready", ready: true });
