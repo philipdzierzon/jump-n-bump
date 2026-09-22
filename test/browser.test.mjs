@@ -3506,8 +3506,12 @@ async function waitlisted_seat() {
 // screen that replaces it. The other five are asserted where they already live:
 // `room_gone` in reload_into_a_dead_room(), `gave_up` in reconnect_gives_up(), `vacated` in
 // two_pages(), `not_accepted` again in browse() and keyboard_only(). `dropped` and
-// `unavailable` have no walk of their own in this suite and take the same
-// `self.error(...); go(...)` shape as the four that do.
+// `unavailable` have no walk of their own in this suite, and they are the two that do *not*
+// take the plain `self.error(...); go(...)` shape: `unavailable` is set in place on the
+// password screen with no `go` at all, and `dropped` navigates only from play or room. Both
+// land on the same rule anyway -- a message set without a `go` leaves `carried` untouched,
+// shows where it was set, and is cleared by the next route change, which is the second half
+// above. Argued, not asserted: the thinnest corner of this fix's coverage.
 async function error_dies_with_its_route() {
     const back = await (await make_context("error_dies_with_its_route")).newPage();
     const errors = [];
