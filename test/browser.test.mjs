@@ -1393,8 +1393,19 @@ async function sound() {
     await open_settings(sound_page);
     await tick("AI on the empty seats", false, sound_page);
     await click("Apply to the next match", sound_page);
+    // A tap in the lobby, before "Start the match" -- the negative to the held-jump
+    // control right below it: no tick has run yet for it to land on, so it must not ride
+    // a latch onto the match's first one (#86).
+    await sound_page.keyboard.down("ArrowUp");
+    await sound_page.keyboard.up("ArrowUp");
+    await forget_sounds(sound_page);
     await click("Start the match", sound_page);
     await on("play", sound_page);
+    await sound_page.clock.fastForward(200);
+    assert.ok(
+        !(await sounds(sound_page)).includes("jump.mp3"),
+        "a key tapped in the lobby does not survive onto the match it starts (#86)",
+    );
 
     // Held down rather than pressed: no tick passes between a keydown and the keyup that
     // follows it on a fake clock, so a press is a key the simulation never sees.

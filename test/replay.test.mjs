@@ -241,6 +241,80 @@ assert.deepEqual(
     "a frame arriving after the tick it was stamped for is counted, with its slack",
 );
 
+// Input edge latch: a tap that begins and ends between two loop wakeups, and a key really
+// held across the same batch (#86). The pump steps a whole catch-up batch synchronously, so
+// no key event can land inside one -- which is exactly N back-to-back `room.step()` calls
+// with no key event between them, and needs no fake clock.
+const batch_transport = (d, held, drivers) => ({
+    receive(fn) {
+        this.to_client = fn;
+    },
+    send(msg) {
+        if (msg.type !== "start") return;
+        this.to_client({ type: "start", t: 0, d, seed: 1, settings: {}, held, drivers });
+    },
+});
+
+function batch_frames(d, ticks) {
+    const keyboard = new Keyboard([]);
+    const room = new Room(batch_transport(d, [0], ["local", "ai", "ai", "ai"]), (scheme) =>
+        keyboard.input_frame(scheme),
+    );
+    room.start({ seed: 1, settings: {}, held: [0] });
+    keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[0][1] }); // right, held across the batch
+    keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[0][2] }); // up, tapped and released inside
+    keyboard.onKeyUp({ keyCode: CONTROL_SCHEMES[0][2] }); //   the gap between two wakeups
+    return [...Array(ticks)].map(() => room.step()[0]);
+}
+
+const batch = batch_frames(0, 4);
+assert.deepEqual(
+    batch.map((f) => f.up),
+    [true, false, false, false],
+    "a tap between two wakeups reaches exactly one tick of the batch, rather than none",
+);
+assert.deepEqual(
+    batch.map((f) => f.right),
+    [true, true, true, true],
+    "and a key really held is delivered once per tick -- one tick is one 60th of the wall clock the batch owes",
+);
+
+// The same key timeline through a transport with an input delay: the same one-tick pulse,
+// translated by d and nothing else. Local and networked are one code path with two
+// transports under it, and the latch sits below the room, so it cannot tell them apart
+// (#16, #33).
+assert.deepEqual(
+    batch_frames(2, 5).map((f) => f.up),
+    [false, false, true, false, false],
+    "a tap delivers one tick over a delayed transport too, d ticks later -- and d is the design",
+);
+
+// Four humans on one keyboard is one client holding four seats, so one tick reads four
+// frames. The latch clears per scheme: a tap on scheme 1 must survive scheme 0's read of
+// the same tick (#32).
+const couch_keyboard = new Keyboard([]);
+const couch_room = new Room(batch_transport(0, [0, 1], ["local", "local", "ai", "ai"]), (scheme) =>
+    couch_keyboard.input_frame(scheme),
+);
+couch_room.start({ seed: 1, settings: {}, held: [0, 1] });
+[0, 1].forEach((scheme) => {
+    couch_keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[scheme][0] }); // left
+    couch_keyboard.onKeyUp({ keyCode: CONTROL_SCHEMES[scheme][0] });
+    couch_keyboard.onKeyDown({ keyCode: CONTROL_SCHEMES[scheme][2] }); // up
+    couch_keyboard.onKeyUp({ keyCode: CONTROL_SCHEMES[scheme][2] });
+});
+const couch = couch_room.step();
+assert.deepEqual(
+    [couch[0].up, couch[1].up],
+    [true, true],
+    "one tick reads a frame per held seat, and one seat's read must not eat another's tap",
+);
+assert.deepEqual(
+    [couch[0].left, couch[1].left],
+    [true, true],
+    "the latch is not wired to `up` alone -- `left` and `right` tap the same way",
+);
+
 // The pump keeps up with the room, not with its own clock (#42). A client resumed into a
 // match already running replays to the tick the room was on when the relay built the
 // payload, and decoding that state, building the object graph and replaying the gap all
