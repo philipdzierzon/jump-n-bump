@@ -8,6 +8,11 @@ export function Loopback_Transport() {
     "use strict";
     var listener = null;
     var current_tick = 0;
+    // The relay counts the room's matches so a frame that crossed the start of the next one
+    // can be refused (#122). There is no wire here to cross and nothing to refuse -- this
+    // keeps the number on `start` meaning the same thing in a local room as in a real one,
+    // so what reads it above does not need to know which transport it is on.
+    var match = 0;
 
     // d = 0: the floor of 2 is jitter insurance, and there is no jitter in the same tab
     // (#16 amends #12).
@@ -38,6 +43,7 @@ export function Loopback_Transport() {
                 to_client({
                     type: "start",
                     t: 0,
+                    match: ++match,
                     d: d,
                     seed: msg.seed,
                     settings: msg.settings,

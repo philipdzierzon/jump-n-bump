@@ -127,6 +127,12 @@ function create(client, msg) {
         drivers: new Array(SEATS).fill(null),
         tick: 0,
         d: 2,
+        // Which match the room is on, counted from 1 at the first `begin`. It rides on every
+        // `start` and comes back on every frame, and that is the whole of it: the room's two
+        // clocks below are both zeroed at `begin`, so they cannot tell a frame still in
+        // flight from the last match from one for this one, and `started` cannot either --
+        // the room *is* started when that frame lands (#122).
+        match: 0,
         // The seed the running match was started on, and the host's last snapshot with the
         // frames since it: the three things a client joining that match needs on top of
         // what a `start` already carries (#40).
@@ -155,17 +161,22 @@ function create(client, msg) {
         // The relay's own deadline, and what it has spent on it (#42). `due` is the tick
         // every client's frame for was needed by, and is where substitution has got to;
         // `missing` counts, per seat, how many ticks in a row the relay has had to put a
-        // released frame in for -- thirty of them hands that seat to the AI. `late` and
-        // `forged` are the two ways a frame is dropped silently, counted per room and read
-        // from the log line the match ends on. Both are incremented where the frame is
-        // refused, which is the same rule `desyncs` above keeps: a counter counts what the
-        // relay saw, and the log line says what it did about it. A counter added here goes
-        // at its own refusal site, not after whatever the refusal led to (#118, #126).
+        // released frame in for -- thirty of them hands that seat to the AI. `late`,
+        // `forged` and `stale` are the three ways a frame is dropped silently, counted per
+        // room and read from the log line the match ends on. All are incremented where the
+        // frame is refused, which is the same rule `desyncs` above keeps: a counter counts
+        // what the relay saw, and the log line says what it did about it. A counter added
+        // here goes at its own refusal site, not after whatever the refusal led to
+        // (#118, #126).
         due: 0,
         missing: new Array(SEATS).fill(0),
         substituted: 0,
         late: 0,
         forged: 0,
+        // Frames stamped for another match than the one running, counted in the match that
+        // refused them: the stale frame arrives after `begin`, so the match it lands in is
+        // the one whose log line says how many there were (#122).
+        stale: 0,
         // What each token has spent of its repair allowance, and whether the relay has given
         // up repairing it this match (#41, #93). Keyed by token, not kept on the socket: the
         // socket is what a reload replaces, so a counter on it counts reloads, not repairs.
@@ -379,11 +390,12 @@ function reset_ready(room) {
 function report_match(room) {
     if (!room.started) return;
     console.log(
-        "room %s match over: %d frames substituted, %d late, %d forged",
+        "room %s match over: %d frames substituted, %d late, %d forged, %d stale",
         room.id,
         room.substituted,
         room.late,
         room.forged,
+        room.stale,
     );
 }
 
@@ -932,6 +944,10 @@ function resume(client) {
         // every client in the room does for a client more than d ticks behind, joiner or
         // no joiner (#6, #17).
         t: room.snapshot.t,
+        // The match in progress, which is the match this payload is a resume of: one
+        // payload, two triggers, and both of them join the match the room is on right now
+        // (#122, #40).
+        match: room.match,
         until,
         d: room.d,
         seed: room.seed,
@@ -1097,6 +1113,10 @@ function begin(room, msg) {
         room.staged = null;
     }
     room.tick = 0;
+    // Before the clocks are zeroed under it: from here on a frame stamped for the match
+    // that just ended names a match the room is no longer on, which is the one thing that
+    // tells it apart from a frame for this one (#122).
+    room.match++;
     room.d = input_delay(room);
     room.started = true;
     // The match that is beginning is not the one the cached state belongs to.
@@ -1111,7 +1131,7 @@ function begin(room, msg) {
     // one's (#42).
     room.due = 0;
     room.missing = new Array(SEATS).fill(0);
-    room.substituted = room.late = room.forged = 0;
+    room.substituted = room.late = room.forged = room.stale = 0;
     // A fresh match is a legitimately fresh allowance -- for every token in the room, dropped
     // or not (#41, #93). Cleared before the walk below, or the re-point it does is thrown
     // away again.
@@ -1157,6 +1177,12 @@ function begin(room, msg) {
             send(other, {
                 type: "start",
                 t: 0,
+                // Which match this is. Stamped back on every frame the client sends, so a
+                // frame that crossed the start of this one is refused rather than believed
+                // (#122). A client keeps it for as long as it keeps the match, `match_end`
+                // included: what tells a `start` for the match it is already in from one
+                // that begins the next is this number and nothing else.
+                match: room.match,
                 d: room.d,
                 seed: msg.seed,
                 // The room's, never the proposer's: a client that configured itself -- an
@@ -1259,6 +1285,22 @@ function relay(client, msg) {
             // move the room's clock on: `tick` is taken before any seat is looked at, so a
             // queued client could make every real client's frames late (#44).
             if (client.queued.length) return;
+            // A frame for another match than the one being played. `begin` zeroes both the
+            // clock bounds below, so a frame stamped in match 1 and still in flight when it
+            // ran is measured against match 2's fresh clock: for tick 2700 it is not late
+            // (`2700 < 0`) and not forged (a match is capped well inside MAX_CATCH_UP, so
+            // the gap from tick 0 never trips it), and the line below would raise the room's
+            // clock to 2701 -- `substitute` then walks every tick in between, broadcasting
+            // one frame each, and drags every client's high-water mark after it. One round
+            // trip at the moment the host presses Start is the whole window, and an honest
+            // room reaches it (#122, and #84 from the client side).
+            //
+            // `started` beside it is the guard `keep_snapshot` and `keep_checksum` already
+            // open with, and it is the half the counter cannot cover: between matches the
+            // room is still on the match that ended, so its number alone would let a frame
+            // from it move a lobby's clock. `input` is the one message that moves that
+            // clock, and it was the one without the guard.
+            if (!room.started || msg.match !== room.match) return void room.stale++;
             // Past its deadline: the relay already put a released frame in for this tick and
             // the room stepped it, so the real one is for a tick that never comes round
             // again. Dropped silently and counted, because a client cannot be told to send

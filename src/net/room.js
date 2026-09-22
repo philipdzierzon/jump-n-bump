@@ -70,6 +70,12 @@ export function Room(transport, read_input) {
     // on the first kill (#12, #5).
     this.d = 0;
     this.seed = 0;
+    // Which match of the room this is, counted by the relay from 1 and stamped back on
+    // every frame this client sends: a frame that crossed the start of the next match is
+    // refused there rather than believed (#122). Kept across `match_end`, because a match
+    // that is over is still the match this client was last in -- which is what tells a
+    // `start` for it from one that begins the next.
+    this.match = 0;
     this.settings = {};
     // The host's packed simulation state, when this `start` is one that joins a match
     // already running or replaces a state that has gone wrong -- one payload, two
@@ -107,6 +113,7 @@ export function Room(transport, read_input) {
                 // for that same tick is a message for a tick already stepped past (#34).
                 drivers = msg.drivers.slice();
                 self.d = msg.d;
+                self.match = msg.match;
                 self.seed = msg.seed;
                 self.settings = msg.settings;
                 held = msg.held;
@@ -299,7 +306,7 @@ export function Room(transport, read_input) {
             // trip; never echoed back to its sender, so this client schedules its own
             // (#12, #6).
             schedule_input(tick + self.d, seats);
-            transport.send({ type: "input", t: tick + self.d, seats: seats });
+            transport.send({ type: "input", match: self.match, t: tick + self.d, seats: seats });
             // On the same tick on every client, and from the same point in it: the state
             // hashed here is every tick before this one applied and none of this one, which
             // is a state each client reaches in its own time and all of them agree on. Not
