@@ -109,3 +109,39 @@ red. That is what caught the last two, and it is cheap.
 `FINDINGS.md` — 8 corrections to issue bodies and 5 genuinely new bugs, each confirmed by a second
 agent, none in scope of the issue that surfaced it. Nothing there has been filed except the
 correction to #83, which is already a comment on that issue.
+
+---
+
+## Status as of 2026-09-22 — the chain has shipped; this branch is now an archive
+
+All fifteen issues (#82–#96) plus #110 are merged into `master` (`c01d3dd`) and closed. Nothing in
+`plans/` or `issues/` is live work any more; they are kept as the record of how each fix was reasoned
+about, next to the PR bodies that carry the measured results.
+
+**`FINDINGS.md` has been actioned.** Each item was re-checked against merged `master` and either
+filed or discarded:
+
+- §B9 → #122 (relay `input` has no `started` guard)
+- §B10 → #124 (a resume landing after `match_end` strands the client)
+- §B11 → #123 (sound players accumulate per room entry)
+- §B12 → **no longer applies.** #95 landed the reload clause in `scores_viewmodel.js:70-77`, which is
+  the exit this finding asked for.
+- §B13 → **no longer applies.** #89's `resume_failed` says so, and `can_rejoin` shows the way out.
+- §A1 → already filed as a comment on #83. §A2–A8 correct the bodies of issues that have since
+  shipped and closed; the PR bodies are the operative record, so they were **not** re-filed.
+- §C14–C18 (contract lines that could not be tested) are recorded here and nowhere else — that was
+  the point of writing them down, and they stay here.
+- §D (the process findings on vacuous assertions) is carried into the mutation-testing acceptance
+  criterion every issue filed on 2026-09-22 now has.
+
+Findings that surfaced later, during implementation and review rather than planning, were filed the
+same day: #116–#121, plus four relay abuse surfaces as a comment on #47.
+
+## What was added on 2026-09-22
+
+- `plans/90-*.md` and `plans/110-*.md` — the last two plan/review pairs, which only ever lived in a
+  session scratchpad
+- `evidence-96/` — the run logs, the packed-state byte diff and `ISSUE.md` behind #110's diagnosis
+
+**The Playwright trace zips are deliberately not here** (22 MB of binaries against 400 KB of text).
+They are regenerable: the suite writes `trace-*.zip` on failure, and CI uploads them as artifacts.

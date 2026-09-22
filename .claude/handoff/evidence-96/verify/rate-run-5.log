@@ -1,0 +1,48 @@
+room FBQQC created
+room FBQQC ended
+room ABTCK created
+room ABTCK ended
+room BTAYY created
+room BTAYY match over: 135 frames substituted, 0 late, 0 forged
+room BTAYY ended
+room JPTVS created
+room JPTVS desync 1 at tick 30, repair 1 of 5
+room JPTVS match over: 49 frames substituted, 0 late, 0 forged
+room JPTVS ended
+room CTGXT created
+room CTGXT desync 1 at tick 120, repair 1 of 5
+DEBUG lie=true samples=3 after_repair=211
+DEBUG pairs=[[240,1103286083,1103286083,"same"],[270,-342504489,-342504489,"same"],[300,-578711239,-578711239,"same"]]
+DEBUG disagreements=[]
+DEBUG host_all=[0,30,60,90,120,150,180,210,240,270,300] guest_all=[0,30,60,90,120,150,180,210,240,270,300]
+room CTGXT match over: 12 frames substituted, 3 late, 0 forged
+room NCWVC created
+room WHMDF created
+room WHMDF match over: 2 frames substituted, 0 late, 0 forged
+room QKDEJ created
+room YXQWH created
+room YGRRQ created
+room YXQWH ended
+room NAJWQ created
+room NAJWQ ended
+room NAJWQ created
+room NAJWQ ended
+room WWVVU created
+room FAUTF created
+room FAUTF ended
+room BWSFE created
+room MNJCE created
+room SWWPD created
+OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; two pages agree on one room, the mp3s really play, and the page fits a phone
+room YGRRQ ended
+room WHMDF ended
+room BWSFE ended
+room MNJCE ended
+room QKDEJ match over: 5 frames substituted, 0 late, 0 forged
+room QKDEJ ended
+room CTGXT ended
+room WWVVU ended
+room NCWVC match over: 12 frames substituted, 0 late, 0 forged
+room NCWVC ended
+room SWWPD match over: 427 frames substituted, 3 late, 0 forged
+room SWWPD ended

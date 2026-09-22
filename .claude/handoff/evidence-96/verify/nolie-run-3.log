@@ -1,0 +1,163 @@
+room RZDTP created
+room RZDTP ended
+room ZLKYH created
+room ZLKYH ended
+room SGUZP created
+room SGUZP match over: 135 frames substituted, 0 late, 0 forged
+room SGUZP ended
+room BWVKN created
+room BWVKN desync 1 at tick 30, repair 1 of 5
+room BWVKN match over: 49 frames substituted, 0 late, 0 forged
+room BWVKN ended
+room TDZJJ created
+DEBUG lie=false samples=3 after_repair=151
+DEBUG pairs=[[180,-641375262,-641375262,"same"],[210,-2023158002,-2023158002,"same"],[240,-83978985,-83978985,"same"]]
+DEBUG disagreements=[]
+DEBUG timeline host #1 <- start t=0 until=undefined d=2 snapshot=false held=[0] drivers=["local","local","ai","ai"] changes=undefined inputs=0 input_ticks=[]
+DEBUG timeline host #2 -> checksum t=0 h=1023483895
+DEBUG timeline host #5 -> checksum t=30 h=-316701056
+DEBUG timeline host #7 -> checksum t=60 h=-1618504201
+DEBUG timeline host #9 -> checksum t=90 h=-255964136
+DEBUG timeline host #11 <- driver t=104 seat=1 ai
+DEBUG timeline host #13 -> checksum t=120 h=-2138034491
+DEBUG timeline host #14 <- driver t=127 seat=1 local
+DEBUG timeline host #18 -> checksum t=150 h=310495603
+DEBUG timeline host #19 <- driver t=159 seat=1 ai
+DEBUG timeline host #21 <- driver t=163 seat=1 local
+DEBUG timeline host #23 <- driver t=163 seat=2 local
+DEBUG timeline host #26 -> checksum t=180 h=-641375262
+DEBUG timeline host #28 -> checksum t=210 h=-2023158002
+DEBUG timeline host #30 -> checksum t=240 h=-83978985
+DEBUG timeline guest #3 <- start t=0 until=undefined d=2 snapshot=false held=[1] drivers=["local","local","ai","ai"] changes=undefined inputs=0 input_ticks=[]
+DEBUG timeline guest #4 -> checksum t=0 h=1023483895
+DEBUG timeline guest #6 -> checksum t=30 h=-316701056
+DEBUG timeline guest #8 -> checksum t=60 h=-1618504201
+DEBUG timeline guest #10 -> checksum t=90 h=-255964136
+DEBUG timeline guest #12 <- driver t=104 seat=1 ai
+DEBUG timeline guest #15 <- driver t=127 seat=1 local
+DEBUG timeline guest #16 <- start t=121 until=121 d=2 snapshot=true held=[1] drivers=["local","ai","ai","ai"] changes=[{"t":127,"seat":1,"driver":"local"}] inputs=2 input_ticks=[121,122]
+DEBUG timeline guest #17 -> checksum t=150 h=310495603
+DEBUG timeline guest #20 <- driver t=159 seat=1 ai
+DEBUG timeline guest #22 <- driver t=163 seat=1 local
+DEBUG timeline guest #24 <- driver t=163 seat=2 local
+DEBUG timeline guest #25 <- start t=121 until=156 d=2 snapshot=true held=[1,2] drivers=["local","ai","ai","ai"] changes=[{"t":127,"seat":1,"driver":"local"},{"t":159,"seat":1,"driver":"ai"},{"t":163,"seat":1,"driver":"local"},{"t":163,"seat":2,"driver":"local"}] inputs=72 input_ticks=[121,122,123,123,124,124,125,125,126,126,127,127,128,128,129,129,130,130,131,131,132,132,133,133,134,134,135,135,136,136,137,137,138,138,139,139,140,140,141,141,142,142,143,143,144,144,145,145,146,146,147,147,148,148,149,149,150,150,151,151,152,152,153,153,154,155,156,154,157,155,158,156]
+DEBUG timeline guest #27 -> checksum t=180 h=-641375262
+DEBUG timeline guest #29 -> checksum t=210 h=-2023158002
+DEBUG timeline guest #31 -> checksum t=240 h=-83978985
+DEBUG host_all=[0,30,60,90,120,150,180,210,240] guest_all=[0,30,60,90,150,180,210,240]
+DEBUG level_hash host=-1236555343 guest=-1236555343
+DEBUG ai_diff t=96 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=97 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=98 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=99 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=100 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=101 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=102 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=103 host=--|--|AI|AI guest=undefined
+DEBUG ai_diff t=104 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=105 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=106 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=107 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=108 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=109 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=110 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=111 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=112 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=113 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=114 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=115 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=116 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=117 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=118 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=119 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=120 host=--|AI|AI|AI guest=undefined
+DEBUG ai_diff t=243 host=--|--|--|AI guest=undefined
+DEBUG step host 215 ---A local,local,local,ai at=
+DEBUG step host 216 ---A local,local,local,ai at=
+DEBUG step host 217 ---A local,local,local,ai at=
+DEBUG step host 218 ---A local,local,local,ai at=
+DEBUG step host 219 ---A local,local,local,ai at=
+DEBUG step host 220 ---A local,local,local,ai at=
+DEBUG step host 221 ---A local,local,local,ai at=
+DEBUG step host 222 ---A local,local,local,ai at=
+DEBUG step host 223 ---A local,local,local,ai at=
+DEBUG step host 224 ---A local,local,local,ai at=
+DEBUG step host 225 ---A local,local,local,ai at=
+DEBUG step host 226 ---A local,local,local,ai at=
+DEBUG step host 227 ---A local,local,local,ai at=
+DEBUG step host 228 ---A local,local,local,ai at=
+DEBUG step host 229 ---A local,local,local,ai at=
+DEBUG step host 230 ---A local,local,local,ai at=
+DEBUG step host 231 ---A local,local,local,ai at=
+DEBUG step host 232 ---A local,local,local,ai at=
+DEBUG step host 233 ---A local,local,local,ai at=
+DEBUG step host 234 ---A local,local,local,ai at=
+DEBUG step host 235 ---A local,local,local,ai at=
+DEBUG step host 236 ---A local,local,local,ai at=
+DEBUG step host 237 ---A local,local,local,ai at=
+DEBUG step host 238 ---A local,local,local,ai at=
+DEBUG step host 239 ---A local,local,local,ai at=
+DEBUG step host 240 ---A local,local,local,ai at=
+DEBUG step host 241 ---A local,local,local,ai at=
+DEBUG step host 242 ---A local,local,local,ai at=
+DEBUG step host 243 ---A local,local,local,ai at=
+DEBUG step host 244 ---A local,local,local,ai at=
+DEBUG step guest 215 ---A local,local,local,ai at=
+DEBUG step guest 216 ---A local,local,local,ai at=
+DEBUG step guest 217 ---A local,local,local,ai at=
+DEBUG step guest 218 ---A local,local,local,ai at=
+DEBUG step guest 219 ---A local,local,local,ai at=
+DEBUG step guest 220 ---A local,local,local,ai at=
+DEBUG step guest 221 ---A local,local,local,ai at=
+DEBUG step guest 222 ---A local,local,local,ai at=
+DEBUG step guest 223 ---A local,local,local,ai at=
+DEBUG step guest 224 ---A local,local,local,ai at=
+DEBUG step guest 225 ---A local,local,local,ai at=
+DEBUG step guest 226 ---A local,local,local,ai at=
+DEBUG step guest 227 ---A local,local,local,ai at=
+DEBUG step guest 228 ---A local,local,local,ai at=
+DEBUG step guest 229 ---A local,local,local,ai at=
+DEBUG step guest 230 ---A local,local,local,ai at=
+DEBUG step guest 231 ---A local,local,local,ai at=
+DEBUG step guest 232 ---A local,local,local,ai at=
+DEBUG step guest 233 ---A local,local,local,ai at=
+DEBUG step guest 234 ---A local,local,local,ai at=
+DEBUG step guest 235 ---A local,local,local,ai at=
+DEBUG step guest 236 ---A local,local,local,ai at=
+DEBUG step guest 237 ---A local,local,local,ai at=
+DEBUG step guest 238 ---A local,local,local,ai at=
+DEBUG step guest 239 ---A local,local,local,ai at=
+DEBUG step guest 240 ---A local,local,local,ai at=
+DEBUG step guest 241 ---A local,local,local,ai at=
+DEBUG step guest 242 ---A local,local,local,ai at=
+room TDZJJ match over: 15 frames substituted, 2 late, 0 forged
+room DLXKG created
+room TDXFY created
+room TDXFY match over: 3 frames substituted, 0 late, 0 forged
+room KBEKA created
+room GENGC created
+room BUXWZ created
+room GENGC ended
+room TTPUL created
+room TTPUL ended
+room TTPUL created
+room TTPUL ended
+room JQJKG created
+room HWAWL created
+room HWAWL ended
+room JVQQV created
+room VPLGY created
+room PQQBC created
+OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; two pages agree on one room, the mp3s really play, and the page fits a phone
+room BUXWZ ended
+room DLXKG match over: 10 frames substituted, 0 late, 0 forged
+room DLXKG ended
+room TDXFY ended
+room JVQQV ended
+room PQQBC match over: 427 frames substituted, 2 late, 0 forged
+room PQQBC ended
+room KBEKA match over: 4 frames substituted, 0 late, 0 forged
+room KBEKA ended
+room JQJKG ended
+room TDZJJ ended
+room VPLGY ended

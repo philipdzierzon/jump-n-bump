@@ -1,0 +1,91 @@
+room QZNWM created
+room QZNWM ended
+room ULJMS created
+room ULJMS ended
+room BVYDD created
+room BVYDD match over: 133 frames substituted, 0 late, 0 forged
+room BVYDD ended
+room LGLLG created
+room LGLLG desync 1 at tick 30, repair 1 of 5
+room LGLLG match over: 51 frames substituted, 0 late, 0 forged
+room LGLLG ended
+room ARBBS created
+room ARBBS desync 1 at tick 120, repair 1 of 5
+room ARBBS desync 2 at tick 240, repair 2 of 5
+DEBUG lie=true samples=3 after_repair=211
+DEBUG pairs=[[240,-917540434,1853399818,"DIFF"],[270,2025970918,2025970918,"same"],[300,2051607079,2051607079,"same"]]
+DEBUG disagreements=[240]
+DEBUG host_all=[0,30,60,90,120,150,180,210,240,270,300] guest_all=[0,30,60,90,120,150,180,210,240,270,300]
+main page was at: {"hash":"#landing","showing":["landing"],"error":"","participants":0}
+routes the page took (last 20):
+  #room shown=room participants=1
+  #landing shown=landing participants=0
+  #join shown=join participants=0
+  #ULJMS shown=join participants=0
+  #names shown=names participants=0
+  #room shown=room participants=1
+  #landing shown=landing participants=0
+  #create shown=create participants=0
+  #names shown=names participants=0
+  #room shown=room participants=1
+  #play shown=play,play participants=1
+  #room shown=room participants=1
+  #landing shown=landing participants=0
+  #join shown=join participants=0
+  #LGLLG shown=join participants=0
+  #names shown=names participants=0
+  #room shown=room participants=1
+  #play shown=play,play participants=1
+  #room shown=room participants=1
+  #landing shown=landing participants=0
+last frames the page was sent:
+  s4 <- {"type":"input","t":42,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":45,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":43,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":46,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":44,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":47,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":45,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":48,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":46,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":49,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":47,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":50,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":48,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":51,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":49,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 -> {"type":"input","t":52,"seats":{"1":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"input","t":50,"seats":{"0":{"left":false,"right":false,"up":false}}}
+  s4 <- {"type":"ping","at":1790046679046}
+  s4 -> {"type":"pong","at":1790046679046}
+  s4 -> {"type":"driver","seat":1,"driver":"ai"}
+  s4 <- {"type":"driver","t":57,"seat":1,"driver":"ai"}
+  s4 <- {"type":"room","seats":["Boss","Dott",null,null],"labels":["Boss","Dott (AI)",null,null],"held":[1],"host":false,"host_seat":0,"started":true,"ready":[true,true,true,true],"you_ready":true,"queued":fa
+  s4 <- {"type":"room","seats":["Boss","Dott",null,null],"labels":["Boss (AI)","Dott (AI)",null,null],"held":[1],"host":true,"host_seat":1,"started":true,"ready":[true,true,true,true],"you_ready":true,"queued
+  s4 -> {"type":"leave"}
+  s4 closed
+traces written: trace-flow.zip, trace-clock.zip, trace-host.zip, trace-guest.zip -- npx playwright show-trace <file>
+room ARBBS match over: 10 frames substituted, 4 late, 0 forged
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: a client resumed from the host's snapshot hashes to the host's, tick for tick (#40)
+[32m+ actual[39m [31m- expected[39m
+
+[32m+[39m [
+[32m+[39m   240
+[32m+[39m ]
+[31m-[39m []
+
+    at two_pages [90m(file:///tmp/check96/dirty/[39mtest/browser.test.mjs:1388:12[90m)[39m
+    at async [90mfile:///tmp/check96/dirty/[39mtest/browser.test.mjs:2417:5 {
+  generatedMessage: [33mfalse[39m,
+  code: [32m'ERR_ASSERTION'[39m,
+  actual: [ [33m240[39m ],
+  expected: [],
+  operator: [32m'deepStrictEqual'[39m,
+  diff: [32m'simple'[39m
+}
+
+Node.js v22.22.1

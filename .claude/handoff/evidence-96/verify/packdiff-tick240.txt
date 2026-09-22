@@ -1,0 +1,60 @@
+tick [33m240[39m ints [33m2486[39m
+host hash [33m81211042[39m guest hash [33m-1763680651[39m
+DIFF [1] rnd.state: host=1303184589 guest=-1629195420
+DIFF [36] player[1].x.pos: host=6197248 guest=6248448
+DIFF [104] object[1].x.pos: host=2115124 guest=2114968
+DIFF [105] object[1].x.velocity: host=-4679 guest=-4787
+DIFF [106] object[1].x.acceleration: host=273 guest=206
+DIFF [107] object[1].y.pos: host=1385883 guest=1385758
+DIFF [108] object[1].y.velocity: host=23 guest=-16
+DIFF [109] object[1].y.acceleration: host=-145 guest=-127
+DIFF [116] object[2].x.pos: host=2144945 guest=2144966
+DIFF [117] object[2].x.velocity: host=7818 guest=7805
+DIFF [118] object[2].x.acceleration: host=-39 guest=-66
+DIFF [119] object[2].y.pos: host=14561037 guest=14561186
+DIFF [120] object[2].y.velocity: host=-1153 guest=-1068
+DIFF [121] object[2].y.acceleration: host=45 guest=79
+DIFF [128] object[3].x.pos: host=7632975 guest=7633445
+DIFF [129] object[3].x.velocity: host=32430 guest=32691
+DIFF [130] object[3].x.acceleration: host=-91 guest=10
+DIFF [131] object[3].y.pos: host=14570837 guest=14570569
+DIFF [132] object[3].y.velocity: host=-2058 guest=-2200
+DIFF [133] object[3].y.acceleration: host=91 guest=29
+DIFF [140] object[4].x.pos: host=10182411 guest=10182542
+DIFF [141] object[4].x.velocity: host=-7986 guest=-7930
+DIFF [142] object[4].x.acceleration: host=-47 guest=-28
+DIFF [143] object[4].y.pos: host=4362736 guest=4362648
+DIFF [144] object[4].y.velocity: host=-15740 guest=-15783
+DIFF [145] object[4].y.acceleration: host=-337 guest=-365
+DIFF [182] object[8].used: host=1 guest=0
+DIFF [183] object[8].type: host=2 guest=7
+DIFF [184] object[8].anim: host=2 guest=7
+DIFF [185] object[8].frame: host=1 guest=4
+DIFF [186] object[8].ticks: host=3 guest=0
+DIFF [187] object[8].image: host=16 guest=79
+DIFF [188] object[8].x.pos: host=6619136 guest=7340032
+DIFF [191] object[8].y.pos: host=8454144 guest=14221312
+DIFF [192] object[8].y.velocity: host=-19232 guest=0
+DIFF [194] object[9].used: host=1 guest=0
+DIFF [197] object[9].frame: host=0 guest=4
+DIFF [198] object[9].ticks: host=3 guest=0
+DIFF [199] object[9].image: host=76 guest=79
+DIFF [200] object[9].x.pos: host=6815744 guest=7208960
+DIFF [203] object[9].y.pos: host=15663104 guest=14483456
+total differing ints: [33m41[39m
+objects used host= [33m11[39m guest= [33m9[39m
+tick [33m240[39m ints [33m2486[39m
+host hash [33m1293850804[39m guest hash [33m808020089[39m
+DIFF [33] player[1].anim: host=2 guest=3
+DIFF [35] player[1].frame_tick: host=5 guest=7
+DIFF [36] player[1].x.pos: host=13570048 guest=13631488
+DIFF [37] player[1].x.velocity: host=-12288 guest=0
+DIFF [38] player[1].y.pos: host=-1080512 guest=500736
+DIFF [39] player[1].y.velocity: host=-120256 guest=113216
+DIFF [65] player[3].action_left: host=1 guest=0
+DIFF [66] player[3].action_right: host=0 guest=1
+DIFF [71] player[3].direction: host=1 guest=0
+DIFF [78] player[3].x.pos: host=11083776 guest=11098112
+DIFF [79] player[3].x.velocity: host=47104 guest=61440
+total differing ints: [33m11[39m
+objects used host= [33m5[39m guest= [33m5[39m
