@@ -14,3 +14,6 @@ game/jnb.html
 server/node_modules
 .env
 .claude/worktrees/
+# Orchestrator handoff artifacts: scaffolding for one task, dead once the PR is
+# open. The PR is the record, not the plan that produced it.
+.handoff/

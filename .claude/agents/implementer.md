@@ -92,3 +92,8 @@ about a destructive or irreversible step. Resume after.
 
 Report back: what changed by path, which test proves it and its result, what
 you skipped and when to add it, anything you could not verify.
+
+Caller names a path under `.handoff/` -> that report goes in the file, and the
+reply is **one line plus the path**. The caller is an orchestrator keeping its
+context empty; a full report in the reply defeats that. Never overwrite an
+earlier numbered file. No path named -> report inline as usual.
