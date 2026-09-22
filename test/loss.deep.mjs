@@ -159,6 +159,7 @@ for (const [one_way, loss_pct] of CONDITIONS) {
         one_way,
         loss_pct,
         losses: proxies.reduce((sum, proxy) => sum + proxy.losses(), 0),
+        desyncs: count(/ desync \d+ /),
         repairs: count(/repair \d+ of/),
         dropped: count(/dropped after/),
         to_ai: count(/to the AI/),
@@ -175,13 +176,13 @@ for (const [one_way, loss_pct] of CONDITIONS) {
 
 print(`\n${SECONDS} s per condition, seed ${SEED}. Per-second samples for overlay and left.\n`);
 print(
-    "| one-way ms | loss % | losses | own frames released (host+guest) | repairs | dropped | " +
+    "| one-way ms | loss % | losses | own frames released (host+guest) | desyncs | repairs | dropped | " +
         "seat to AI | overlay s | left s | page errors |",
 );
-print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
 for (const r of rows)
     print(
-        `| ${r.one_way} | ${r.loss_pct} | ${r.losses} | ${r.substituted} | ${r.repairs} | ${r.dropped} | ` +
+        `| ${r.one_way} | ${r.loss_pct} | ${r.losses} | ${r.substituted} | ${r.desyncs} | ${r.repairs} | ${r.dropped} | ` +
             `${r.to_ai} | ${r.overlay_s} | ${r.left_s} | ${r.errors} |`,
     );
 await browser.close();
