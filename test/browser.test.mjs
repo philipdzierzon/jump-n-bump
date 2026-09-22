@@ -709,37 +709,6 @@ async function walk() {
     await until("the walk-in", () => walk_in_saw.some((msg) => msg.type === "joined"));
     walk_in.close();
 
-    // The board of a match this client never simulated: it was in the lobby for all of it, so
-    // the matrix it shows is the one the host counted and announced (#19, #39).
-    guest.send({
-        type: "match_end",
-        t: 900,
-        reason: "time",
-        matrix: [
-            [0, 1, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ],
-    });
-    await until("the announced board", () => board_panel().isVisible());
-    assert.equal(
-        await text(board_panel().locator("p.banner")),
-        "Dott wins with 1 bump.",
-        "a client that never played the match still gets its board, because the host sent one",
-    );
-    assert.deepEqual(
-        (await grid(board_panel())).slice(1),
-        [
-            ["Dott", "0", "1", "0", "0", "1"],
-            ["Zip", "0", "0", "0", "0", "0"],
-            ["Fizz", "0", "0", "0", "0", "0"],
-            ["Miji", "0", "0", "0", "0", "0"],
-            ["Total deaths", "0", "1", "0", "0", "1"],
-        ],
-        "seat-keyed and headed by the username on each seat, kills across and deaths down (#13)",
-    );
-
     guest.close();
     await click("Leave");
     await on("landing");
@@ -803,6 +772,39 @@ async function walk() {
         await level_select().inputValue(),
         "green",
         "and the read-only panel follows it, so the banner and the rows never disagree",
+    );
+
+    // The board of a match this client never simulated: it was in the lobby for all of it, so
+    // the matrix it shows is the one the host counted and announced (#19, #39). It has to be
+    // this room rather than the one above, because a `match_end` is the host's to send and
+    // the relay drops one from anybody else -- which is the whole of #82.
+    chief.send({
+        type: "match_end",
+        t: 900,
+        reason: "time",
+        matrix: [
+            [0, 1, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ],
+    });
+    await until("the announced board", () => board_panel().isVisible());
+    assert.equal(
+        await text(board_panel().locator("p.banner")),
+        "Chief wins with 1 bump.",
+        "a client that never played the match still gets its board, because the host sent one",
+    );
+    assert.deepEqual(
+        (await grid(board_panel())).slice(1),
+        [
+            ["Chief", "0", "1", "0", "0", "1"],
+            ["Dott", "0", "0", "0", "0", "0"],
+            ["Fizz", "0", "0", "0", "0", "0"],
+            ["Miji", "0", "0", "0", "0", "0"],
+            ["Total deaths", "0", "1", "0", "0", "1"],
+        ],
+        "seat-keyed and headed by the username on each seat, kills across and deaths down (#13)",
     );
 
     chief.close();

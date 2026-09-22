@@ -1,11 +1,6 @@
-var RELEASED = { left: false, right: false, up: false };
+import { MAX_CATCH_UP } from "./room_config.js";
 
-// The most ticks a `start` may ask this client to replay. A minute of them costs a few
-// hundred milliseconds; more than that is a host that stopped snapshotting rather than a
-// gap worth closing, and a client that replayed it would land minutes behind the room and
-// consume every frame late (#51). A gap this size is a match not joined, not one joined
-// short: the caller checks `gap()` and stays in the lobby (#40).
-export var MAX_CATCH_UP = 3600;
+var RELEASED = { left: false, right: false, up: false };
 
 // How often a client hashes its own simulation and hands the hash to the relay, which holds
 // the host's and compares (#41). Half a second: the relay keeps eight of the host's, so a
@@ -127,10 +122,10 @@ export function Room(transport, read_input) {
             case "input":
                 // A tick this client could not reach if it replayed for a whole minute, so
                 // it is not a frame. `newest` is what `gap()` reads as the room's position,
-                // `pump` sprints while that gap is positive, and the relay checks only that
-                // `t` is a non-negative integer before fanning a frame out -- so one client
-                // stamping a million fast-forwards every other client through the rest of
-                // the match (#51, #71).
+                // and `pump` sprints while that gap is positive, so one client stamping a
+                // million would fast-forward every other client through the rest of the
+                // match (#51, #71). The relay bounds the same frame since #82; this bound
+                // stays because the loopback transport has no relay in front of it.
                 if ((msg.t | 0) - tick > MAX_CATCH_UP) break;
                 // Measured on arrival rather than on use: this is the only moment the wire
                 // trip and the sender's own lateness are both visible (#70).

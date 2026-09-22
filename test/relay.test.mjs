@@ -5,7 +5,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 
 import { normalise_room_id } from "../src/net/room_id.js";
-import { LEVELS, config_diff, default_config } from "../src/net/room_config.js";
+import { LEVELS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/room_config.js";
 import { start_server } from "../server/index.js";
 import { Room } from "../src/net/room.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
@@ -1264,6 +1264,97 @@ assert.deepEqual(
 );
 delete process.env.RESERVE_MS;
 bystander.socket.close();
+
+// --- message authorisation (#82) -------------------------------------------------------
+//
+// Four message types the relay used to take from any client without asking who sent them.
+// It runs no simulation and cannot tell a legal input from a clever one (#6) -- but it does
+// know which client holds which seat and which client is the host, and that is the whole of
+// what these four needed.
+
+const forged = await two_seats("FRGZX");
+
+// A tick further ahead than any client could catch up to is not a frame. Unchecked it raised
+// the room's clock to itself, and substitution then walked every tick in between -- a scan
+// per seat per tick, a broadcast each -- which is the single process and every room on it.
+forged.guest.socket.send({ type: "input", t: MAX_CATCH_UP + 1, seats: { 1: pressed_key } });
+forged.guest.socket.send({ type: "input", t: 0, seats: { 1: pressed_key } });
+const after_forged = await until_seen(
+    forged.host_saw,
+    (msg) => msg.type === "input" && msg.t === 0,
+    "a frame for tick 0 after the forged one",
+);
+assert.deepEqual(
+    after_forged.seats,
+    { 1: pressed_key },
+    "the room's clock stayed put, so the next real frame is not already past its deadline",
+);
+assert.ok(
+    !forged.host_saw.some((msg) => msg.type === "input" && msg.t > MAX_CATCH_UP),
+    "and the tick a minute past the room's was never fanned out",
+);
+
+// A seat's driver is its holder's to change: a peer that could set one handed another
+// player's bunny to the AI mid-match, and `local` for a seat it did not hold cleared that
+// seat's missing-tick counter -- AI takeover switched off for a holder who really has gone.
+forged.guest.socket.send({ type: "driver", seat: 0, driver: "ai" });
+forged.guest.socket.send({ type: "driver", seat: 1, driver: "pogostick" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    !forged.host_saw.some((msg) => msg.type === "driver"),
+    "neither another client's seat nor a driver the room has never heard of is stamped",
+);
+assert.deepEqual(
+    forged.host.events.filter((msg) => msg.type === "room").pop().labels,
+    ["Steady", "Quiet", null, null],
+    "and the board still says both bunnies are being driven by the clients holding them",
+);
+
+// The host announces the end and the final board rides on it verbatim, so a peer that could
+// send one ended everyone's match and dictated the result (#19, #22).
+forged.guest.socket.send({ type: "match_end", reason: "lobby", matrix: [[9, 9, 9, 9]] });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    !forged.host_saw.some((msg) => msg.type === "match_end"),
+    "a match_end from a client that is not the host ends nothing",
+);
+assert.equal(
+    forged.host.events.filter((msg) => msg.type === "room").pop().started,
+    true,
+    "and the match it tried to end is still running",
+);
+forged.host.socket.close();
+forged.guest.socket.close();
+
+// The delay the whole match is played at is derived from the trips the relay measured and
+// fixed at `begin`, so a pong it could not read used to fix it at `NaN`: no substitution for
+// the match, and a `null` on the wire that leaves every client stamping with no delay.
+const bent = connect({ type: "create", id: "PNGXZ" });
+await lobby(bent);
+await bent.seats(["Bent"]);
+const bent_saw = [];
+bent.socket.receive((msg) => bent_saw.push(msg));
+bent.socket.send({ type: "pong", at: "in a bit" });
+bent.socket.send({ type: "start", seed: 7, settings: {} });
+const bent_start = await awaited(bent_saw, "start");
+assert.ok(
+    Number.isInteger(bent_start.d) && bent_start.d >= 2 && bent_start.d <= 10,
+    "a pong the relay cannot read is ignored, and the delay stays a whole number in its clamp",
+);
+bent.socket.close();
+
+// The password is compared with `!==`, so a room created with one that is not a string was
+// permanently unjoinable -- by the host as much as by anybody, since every client sends the
+// text of an input box and the host's own create sent a number (#8).
+const numeric = connect({ type: "create", id: "PWDXZ", password: 1234 });
+await lobby(numeric);
+const digits = connect({ type: "join", id: "PWDXZ", password: "1234" });
+assert.equal((await lobby(digits)).type, "joined", "a room created with a number is joinable");
+const mistyped = connect({ type: "join", id: "PWDXZ", password: "9999" });
+assert.equal((await lobby(mistyped)).code, "ROOM_UNAVAILABLE", "and by that number only");
+digits.socket.close();
+mistyped.socket.close();
+numeric.socket.close();
 
 // The relay runs no simulation of its own, and the cheapest way to keep it that way is to
 // notice when it starts importing one (#6).

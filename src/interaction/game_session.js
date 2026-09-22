@@ -16,7 +16,8 @@ import {
     unpack_snapshot,
 } from "../game/snapshot.js";
 import { make_rnd } from "../game/rnd.js";
-import { MAX_CATCH_UP, Room } from "../net/room.js";
+import { MAX_CATCH_UP } from "../net/room_config.js";
+import { Room } from "../net/room.js";
 import ko from "knockout";
 
 function noop() {}
