@@ -950,6 +950,32 @@ assert.deepEqual(
     "and the AI steers it on this client too, which is what every other client is doing (#110)",
 );
 
+// Two AI bunnies stacked in one column, each the other's nearest target and out of the
+// other's reach, used to stand there for the rest of the match (#52). Placed by hand: once
+// mid-map, once against the left wall and facing it. Last, because building a Game
+// replaces the `player` array.
+for (const [upper_x, upper_y, lower_x, lower_y, direction] of [
+    [118, 112, 116, 208, 0],
+    [16, 112, 16, 192, 1],
+]) {
+    const stacked = start(1, {}, [], batch_transport(0, [], ["ai", "ai", "off", "off"]));
+    const placed = [
+        [upper_x, upper_y],
+        [lower_x, lower_y],
+    ];
+    placed.forEach(([x, y], i) => {
+        player[i].x.pos = x << 16;
+        player[i].y.pos = y << 16;
+        player[i].x.velocity = player[i].y.velocity = 0;
+        player[i].direction = direction;
+    });
+    for (let tick = 0; tick < 120; tick++) stacked.game.step();
+    assert.ok(
+        placed.some(([x], i) => Math.abs((player[i].x.pos >> 16) - x) >= 16),
+        `a stacked pair at x=${upper_x} breaks its own symmetry inside two seconds (#52)`,
+    );
+}
+
 console.log(
-    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, a snapshot plus the input gap lands in the host's state, and a seat handed to the AI keeps no stale frame",
+    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, a snapshot plus the input gap lands in the host's state, and a seat handed to the AI keeps no stale frame, and a stacked AI pair breaks its own column",
 );
