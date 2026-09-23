@@ -760,23 +760,27 @@ function input_delay(room) {
 // ponytail: a holder toggling its seat once a tick still stamps one change a tick, up to
 // SEATS * (MAX_CATCH_UP + 2d) of them behind a host that stops snapshotting, and every one
 // is still fanned out. upgrade path: a per-client rate limit (#47).
+//
+// Says whether it stamped, so a caller that announces the change announces only a real one.
 function stamp_driver(room, seat, driver) {
-    if (room.drivers[seat] === driver) return;
+    if (room.drivers[seat] === driver) return false;
     const t = room.tick + 2 * room.d;
     // A seat handed to a client starts its gap count again: whatever that seat missed, it
     // missed while somebody else was driving it (#42).
     if (driver === "local") room.missing[seat] = 0;
     broadcast_frame(room, { type: "driver", t, seat, driver });
-    const last = room.stamped.findLast((change) => change.seat === seat);
+    const at = room.stamped.findLastIndex((change) => change.seat === seat);
+    const last = room.stamped[at];
     if (last && last.t === t) {
         last.driver = driver;
-        if (last.was === driver) room.stamped.splice(room.stamped.lastIndexOf(last), 1);
+        if (last.was === driver) room.stamped.splice(at, 1);
     } else room.stamped.push({ t, seat, driver, was: room.drivers[seat] });
     // A client that walks back to the lobby keeps its seats and hands the AI its bunnies,
     // so the seat is held, its holder is connected, and the AI is driving it all the same.
     // The board has to say so, which means the room is described again (#13, #39).
     room.drivers[seat] = driver;
     broadcast_state(room);
+    return true;
 }
 
 // The client holding a seat right now, or nothing when its holder is away: a seat whose
@@ -863,13 +867,15 @@ function substitute(room) {
             if (holder && holder.last_t < 0) continue;
             if (++room.missing[seat] >= AI_AFTER) {
                 room.missing[seat] = 0;
+                // Already the AI's is nothing to announce: a seat the AI took earlier in a
+                // long catch-up run is still missing frames on every tick after (#156 review).
+                if (!stamp_driver(room, seat, "ai")) continue;
                 console.log(
                     "room %s seat %d to the AI after %d missing ticks",
                     room.id,
                     seat,
                     AI_AFTER,
                 );
-                stamp_driver(room, seat, "ai");
                 // The one moment mid-match a free seat becomes grantable, now that a seat
                 // is only grantable while the AI drives it: a `leave` frees seats the room
                 // goes on driving for their holder, so a client that waitlisted against
