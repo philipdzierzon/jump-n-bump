@@ -1352,7 +1352,17 @@ function relay(client, msg) {
             // the room stepped it, so the real one is for a tick that never comes round
             // again. Dropped silently and counted, because a client cannot be told to send
             // it sooner (#42).
-            if (msg.t < room.due) return void room.late++;
+            //
+            // Late is still alive, though: a frame from this match, from a client not queued,
+            // is its holder sending, so its own seats' gap counts from here -- `client.seats`
+            // and not `msg.seats`, so naming a seat it does not hold resets nothing. A client
+            // repaired over a real link lands a round trip behind the room and never catches
+            // up, so every frame it sends is late; that lateness is #142's, and this only
+            // stops it costing the player the seat thirty ticks later (#140).
+            if (msg.t < room.due) {
+                for (const seat of client.seats) room.missing[seat] = 0;
+                return void room.late++;
+            }
             // And the other end of the same clock: a tick further ahead than any client
             // could catch up to is not a frame, it is a number. The line below raises the
             // room's tick to it, and `substitute` then walks every tick in between -- a

@@ -1456,6 +1456,54 @@ assert.ok(
 walk.host.socket.close();
 walk.guest.socket.close();
 
+// A client repaired over a real link lands a round trip behind the room and stays there, so
+// every frame it sends is past its deadline (#142). Dropped, as any late frame is, but it
+// still proves the holder is there: the seat must not go to the AI for it (#140). One that
+// goes quiet altogether still does, thirty ticks on.
+const fix = await two_seats("MENDX");
+fix.guest.socket.send({ type: "input", match: 1, t: 0, seats: { 1: pressed_key } });
+fix.host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "MEND-BODY" });
+await until_seen(fix.host_saw, (msg) => msg.type === "input" && msg.t === 0, "the first frame");
+fix.guest.socket.send({ type: "resync" });
+await until_seen(
+    fix.guest_saw,
+    (msg) => msg.type === "start" && msg.snapshot === "MEND-BODY",
+    "the repair",
+);
+// Sixty ticks, twice AI_AFTER, in runs of ten: the host's frames move the room on, and after
+// each run the repaired client's frame lands five ticks behind the deadline. The pause lets
+// it land before the next run -- two sockets, so nothing else orders them.
+for (let t = 1; t <= 60; t++) {
+    fix.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
+    if (t % 10) continue;
+    fix.guest.socket.send({ type: "input", match: 1, t: t - 5, seats: { 1: pressed_key } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    !fix.host_saw.some((msg) => msg.type === "driver" && msg.seat === 1),
+    "a repaired client whose every frame is late keeps its seat (#140)",
+);
+assert.ok(
+    fix.host_saw.some((msg) => msg.type === "input" && msg.t > 40 && msg.seats["1"]),
+    "the late frames are dropped and the relay covers the seat, as for any late frame",
+);
+for (let t = 61; t <= 110; t++)
+    fix.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
+assert.equal(
+    (
+        await until_seen(
+            fix.host_saw,
+            (msg) => msg.type === "driver" && msg.seat === 1,
+            "the seat gone quiet to go to the AI",
+        )
+    ).driver,
+    "ai",
+    "and one that goes quiet altogether is the AI's thirty ticks later",
+);
+fix.host.socket.close();
+fix.guest.socket.close();
+
 // A client that has sent nothing at all is not one that went away: it is still arriving --
 // fetching the room's level, most likely -- so its seat is covered for and never taken off
 // it. A socket that closed is the other half of that rule, and does lose the seat.
