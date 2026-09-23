@@ -2,7 +2,11 @@ services:
   game:
     build: .
     restart: unless-stopped
-    networks: [jump-n-bump]
+    networks:
+      jump-n-bump:
+      tunnel:
+        aliases:
+          - jump-n-bump
     ports:
       - 8099:8080
 
@@ -11,3 +15,5 @@ services:
 networks:
   jump-n-bump:
     name: jump-n-bump
+  tunnel:
+    external: true

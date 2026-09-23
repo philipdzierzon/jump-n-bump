@@ -1,5 +1,10 @@
 {
   "enabledPlugins": {
+    "mattpocock-skills@claude-plugins-official": true,
     "ponytail@ponytail": true
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "sh ./.claude/statusline-command.sh"
   }
 }
