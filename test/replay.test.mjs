@@ -117,6 +117,26 @@ function start(
     return { game, keyboard, objects, room, rnd };
 }
 
+// What `game_session.js` hands a networked room, by hand: the ring it rewinds to and hashes
+// from (#41, #141). A local room leaves it null and does neither.
+function keep_history(client) {
+    client.room.history = {
+        save: () => ({
+            state: pack_snapshot(client.rnd, client.objects, client.room.now()),
+            ended: client.game.ended(),
+        }),
+        load: (saved) => {
+            unpack_snapshot(saved.state, client.rnd, client.objects);
+            client.game.ended(saved.ended);
+        },
+        hash: (saved) => checksum_snapshot(saved.state),
+        step: () => {
+            client.game.step();
+            return !client.game.ended();
+        },
+    };
+}
+
 // Three seats on the keyboard and a fourth left to the AI, so the replay covers both
 // drivers over 3600 ticks.
 function replay(seed, log, settings = { no_gore: false }) {
@@ -853,8 +873,8 @@ const join_transport = {
 
 const joiner = start(2468, {}, [], join_transport);
 // Hashed by the room every 30 ticks in a networked room, which this transport is standing
-// in for; a local room leaves this null and sends none (#41, #16).
-joiner.room.checksum = (t) => checksum_snapshot(pack_snapshot(joiner.rnd, joiner.objects, t));
+// in for; a local room keeps no history and sends none (#41, #16).
+keep_history(joiner);
 assert.equal(joiner.room.now(), HALF, "a joined match starts on the snapshot's tick, not zero");
 unpack_snapshot(decode_snapshot(body), joiner.rnd, joiner.objects);
 joiner.room.catch_up(joiner.game.step);
@@ -901,16 +921,58 @@ assert.notEqual(
     "and one 150 ticks behind it does not: a mismatch is the desync",
 );
 
-// Every 30 ticks, on the tick itself, and only once the client is playing rather than
-// replaying: the room is at HALF * 2 + 30 after the catch-up above.
+// Every 30 ticks, and only once the client is playing rather than replaying: the room is at
+// HALF * 2 + 30 after the catch-up above. The tick hashed is the one leaving the ring, a
+// second back, which no late frame can change any more (#141).
 join_transport.sent.length = 0;
 joiner.room.catch_up(joiner.game.step);
 joiner.game.step();
 const hashed = () => join_transport.sent.filter((msg) => msg.type === "checksum");
 assert.equal(hashed().length, 1, "a playing client hashes its state on a thirtieth tick");
-assert.equal(hashed()[0].t, HALF * 2 + 30, "stamped with the tick it hashed, not the one after");
+assert.equal(hashed()[0].t, HALF * 2 + 30 - 60, "stamped with the settled tick it hashed");
 for (let tick = 0; tick < 29; tick++) joiner.game.step();
 assert.equal(hashed().length, 1, "and on no tick in between");
+
+// --- rewind (#141) --------------------------------------------------------------------
+//
+// A peer's seat holds right, its frames stall for ten ticks, and the key it changed to
+// inside the stall arrives after this client stepped those ticks on the guess. The relay's
+// frame is the truth for a tick (#42), so the client rewinds and lands where a client that
+// had the frames on time is. Without the ring it stays where the guess put it: the desync.
+const RIGHT = { left: false, right: true, up: false };
+const LEFT = { left: true, right: false, up: false };
+function stalled(history, on_time) {
+    const transport = {
+        receive(fn) {
+            this.deliver = fn;
+        },
+        send(msg) {
+            if (msg.type === "start")
+                this.deliver({
+                    type: "start",
+                    t: 0,
+                    d: 2,
+                    match: 1,
+                    seed: 77,
+                    settings: { no_gore: false },
+                    held: [0],
+                    drivers: ["local", "local", "ai", "ai"],
+                });
+        },
+    };
+    const client = start(77, {}, [0], transport);
+    if (history) keep_history(client);
+    const frame = (t, keys) => transport.deliver({ type: "input", t, seats: { 1: keys } });
+    for (let t = 2; t < 20; t++) frame(t, RIGHT);
+    if (on_time) for (let t = 20; t < 60; t++) frame(t, LEFT);
+    for (let t = 0; t < 30; t++) client.game.step();
+    if (!on_time) for (let t = 20; t < 60; t++) frame(t, LEFT);
+    for (let t = 30; t < 60; t++) client.game.step();
+    return checksum(client.objects.objects);
+}
+const on_time = stalled(true, true);
+assert.equal(stalled(true, false), on_time, "a late frame that differs is rewound to (#141)");
+assert.notEqual(stalled(false, false), on_time, "and without the ring it is the desync");
 
 // A level edited under the same name -- a tile retyped by a deploy, which is the shape the
 // stale cache serves -- is what the hash over the state alone cannot see (#95). SOLID and

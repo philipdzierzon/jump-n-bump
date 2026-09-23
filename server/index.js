@@ -16,7 +16,13 @@ import express from "express";
 import { WebSocketServer } from "ws";
 
 import { generate_room_id, normalise_room_id } from "../src/net/room_id.js";
-import { DRIVERS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/room_config.js";
+import {
+    DRIVERS,
+    MAX_CATCH_UP,
+    config_diff,
+    default_config,
+    predict,
+} from "../src/net/room_config.js";
 
 const PORT = process.env.PORT || 8080;
 const TICK_MS = 1000 / 60;
@@ -42,9 +48,6 @@ const MAX_SNAPSHOT = 64 * 1024;
 // client more than four seconds behind the host is never checked. upgrade path: widen the
 // window if that is ever a client worth checking rather than one already unplayable (#6).
 const CHECKSUM_WINDOW = 8;
-// The frame the relay puts in for a seat whose client did not send one in time, and the
-// only input the relay ever invents (#42). Every other byte of a frame is a client's.
-const RELEASED = { left: false, right: false, up: false };
 // How many ticks of missing frames hand a seat to the AI. Thirty is half a second, biased
 // short deliberately: taking the seat back is one message, and every other client in a
 // lockstep room is stepping those ticks with a bunny nobody is steering (#17, #42).
@@ -214,7 +217,7 @@ function create(client, msg) {
         // The relay's own deadline, and what it has spent on it (#42). `due` is the tick
         // every client's frame for was needed by, and is where substitution has got to;
         // `missing` counts, per seat, how many ticks in a row the relay has had to put a
-        // released frame in for -- thirty of them hands that seat to the AI. `late`,
+        // frame in for -- thirty of them hands that seat to the AI. `late`,
         // `forged` and `stale` are the three ways a frame is dropped silently, counted per
         // room and read from the log line the match ends on. All are incremented where the
         // frame is refused, which is the same rule `desyncs` above keeps: a counter counts
@@ -223,6 +226,12 @@ function create(client, msg) {
         // (#118, #126).
         due: 0,
         missing: new Array(SEATS).fill(0),
+        // What `predict` repeats for a seat, and for how long it has: the seat's last frame
+        // that arrived in time, and the ticks guessed since. Their own counter and not
+        // `missing`, which a late frame clears (#140) -- a client stuck behind the room
+        // would keep its bunny on one old frame forever (#141).
+        last_frame: new Array(SEATS).fill(null),
+        guessed: new Array(SEATS).fill(0),
         substituted: 0,
         late: 0,
         forged: 0,
@@ -724,7 +733,7 @@ function leave(client) {
     // A dropped connection reserves its seats for the token that held them, so a reload
     // reclaims them -- and frees them when the window expires, so a closed tab does not
     // hold a seat for the room's whole life (#17).
-    // Mid-match, the seat goes on being played: the relay puts a released frame in for it
+    // Mid-match, the seat goes on being played: the relay puts a frame in for it
     // every tick until thirty of them hand it to the AI, and the client that dropped it
     // freezes under a Reconnecting overlay and retries until the window runs out (#42).
     // Remembered only while the seats are: the window that reserves them is the window the
@@ -810,7 +819,12 @@ function stamp_driver(room, seat, driver) {
     const t = room.tick + 2 * room.d;
     // A seat handed to a client starts its gap count again: whatever that seat missed, it
     // missed while somebody else was driving it (#42).
-    if (driver === "local") room.missing[seat] = 0;
+    // And has no frame to repeat: every client drops a seat's last one while it is not
+    // driven locally, so a guess from before the change would be the relay's alone (#141).
+    if (driver === "local") {
+        room.missing[seat] = 0;
+        room.last_frame[seat] = null;
+    }
     broadcast_frame(room, { type: "driver", t, seat, driver });
     const at = room.stamped.findLastIndex((change) => change.seat === seat);
     const last = room.stamped[at];
@@ -855,8 +869,8 @@ function drivers_at(room, t) {
 // The relay substitutes, never the client (#42 corrects #6). A client-local substitution
 // manufactures a desync out of a late frame: the client that had not reached the tick used
 // the frame when it finally came, and the one that had put released keys in its place, and
-// the two played different matches from there. One released frame, broadcast to everybody
-// including the seat's own holder, is one input stream.
+// the two played different matches from there. One frame, `predict`'s guess, broadcast to
+// everybody including the seat's own holder, is one input stream.
 //
 // The deadline is the room's own 60 Hz clock and there is no slack margin, because d
 // already is one: a client stamps its frames d ticks ahead of the tick it is on, so
@@ -895,7 +909,7 @@ function substitute(room) {
                 room.missing[seat] = 0;
                 continue;
             }
-            seats[seat] = RELEASED;
+            seats[seat] = predict(room.last_frame[seat], room.guessed[seat]++);
             room.substituted++;
             // A client that is connected and has not sent a frame in this match yet is
             // still arriving, not gone: a gap needs a stream to be a gap in. Its seat is
@@ -1251,6 +1265,8 @@ function begin(room, msg) {
     // one's (#42).
     room.due = 0;
     room.missing = new Array(SEATS).fill(0);
+    room.last_frame = new Array(SEATS).fill(null);
+    room.guessed = new Array(SEATS).fill(0);
     room.substituted = room.late = room.forged = room.stale = 0;
     // A fresh match is a legitimately fresh allowance -- for every token in the room, dropped
     // or not (#41, #93). Cleared before the walk below, or the re-point it does is thrown
@@ -1434,7 +1450,7 @@ function relay(client, msg) {
             // slips through is one that *creates* a room during a relay upgrade. upgrade path:
             // compare the build on the way in for real (#29).
             if (!room.started || msg.match !== room.match) return void room.stale++;
-            // Past its deadline: the relay already put a released frame in for this tick and
+            // Past its deadline: the relay already put a frame in for this tick and
             // the room stepped it, so the real one is for a tick that never comes round
             // again. Dropped silently and counted, because a client cannot be told to send
             // it sooner (#42).
@@ -1448,8 +1464,9 @@ function relay(client, msg) {
             // the player the seat thirty ticks later (#140).
             //
             // ponytail: a client stuck behind the room keeps its seat for the rest of the match
-            // and its bunny plays released keys, where the AI used to move it. upgrade path:
-            // decide whether late still means alive once a stall can be caught up (#136 §1).
+            // and its bunny plays released keys once `predict`'s ten ticks run out, where the
+            // AI used to move it. upgrade path: decide whether late still means alive once a
+            // stall can be caught up (#136 §1).
             if (msg.t < room.due) {
                 for (const seat of client.seats) room.missing[seat] = 0;
                 return void room.late++;
@@ -1482,6 +1499,11 @@ function relay(client, msg) {
                     if (client.seats.includes(+seat)) seats[seat] = msg.seats[seat];
                     else room.forged++;
                 }
+            // On time, so it is what `substitute` repeats if the next one is not (#141).
+            for (const seat in seats) {
+                room.last_frame[seat] = seats[seat];
+                room.guessed[seat] = 0;
+            }
             // Every other client, never the sender: it scheduled its own frame when it
             // sent it, so it never waits on the round trip (#12). Its peers still wait on
             // two trips, sender to relay and relay to them, which is what `d` covers (#142).
