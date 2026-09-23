@@ -78,6 +78,13 @@ const MAX_REPAIRS = 5;
 // upgrade path: cap clients if egress is ever the thing that runs out.
 const max_rooms = () => Number(process.env.MAX_ROOMS || 200);
 const rooms_per_key = () => Number(process.env.ROOMS_PER_KEY || 3);
+// How long a socket may stay open without entering a room (#158). The page opens its socket
+// only to create or join, and sends that on open, so a real client is in a room or refused
+// inside one round trip; a socket still roomless at this point is a bot holding a slot.
+// `client.room` is set once by `admit` and never cleared -- a `leave` vacates seats, then the
+// page closes the socket -- so a queued client, one on the names screen and a spectator are
+// all in a room and exempt. Read per connection, so a test can shorten it.
+const roomless_ms = () => Number(process.env.ROOMLESS_MS || 30000);
 // Requests per limiter key per minute on the HTTP routes the bucket covers (#47).
 const HTTP_PER_MINUTE = 60;
 
@@ -1629,6 +1636,7 @@ export function start_server(port = PORT) {
         const ping = () => send(client, { type: "ping", at: Date.now() });
         const timer = setInterval(ping, PING_MS);
         ping();
+        const reaper = setTimeout(() => client.room || client.close(), roomless_ms()).unref();
         // A frame past `maxPayload` is an `error` on this socket before it is a close, and an
         // `error` nobody listens for takes the whole relay down with it. The close that
         // follows is handled below like any other (#156).
@@ -1670,6 +1678,7 @@ export function start_server(port = PORT) {
 
         client.on("close", () => {
             clearInterval(timer);
+            clearTimeout(reaper);
             leave(client);
         });
     });

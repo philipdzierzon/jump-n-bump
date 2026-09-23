@@ -12,6 +12,10 @@ services:
 
 # Joined by the cloudflared compose project as `external: true`; its Public
 # Hostname points at http://game:8080. No port is published on the host.
+#
+# Cloudflare Bot Fight Mode and Under Attack mode must stay OFF for this
+# hostname: both answer the WebSocket upgrade with an HTML challenge page, and
+# no WAF Skip rule exempts it. With either on, the game cannot connect (#158).
 networks:
   jump-n-bump:
     name: jump-n-bump

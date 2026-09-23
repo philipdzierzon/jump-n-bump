@@ -2561,6 +2561,34 @@ assert.equal((await as("10.9.9.8")).status, 200, "another key has its own sixty"
 assert.equal((await as("10.9.9.9", "/jbcircle.png")).status, 200, "static is exempt");
 assert.equal((await as("10.9.9.9", "/api/rooms")).status, 200, "and so is the room list");
 
+// A socket that never enters a room is closed at ROOMLESS_MS, and one that is in a room is
+// never closed by it, seats or none: a spectator on the names screen and a client waiting in
+// the queue of a full room hold nothing and are both in it (#158).
+process.env.ROOMLESS_MS = "100";
+const roomless = new WebSocket(url);
+const reaped = new Promise((resolve, reject) => {
+    roomless.onclose = resolve;
+    setTimeout(() => reject(new Error("the roomless socket was kept")), 2000);
+});
+await reaped;
+const full_up = connect({ type: "create", id: "RPFUL" });
+await lobby(full_up);
+await full_up.seats(["Ada", "Bax", "Cal", "Dee"]);
+const seatless = connect({ type: "join", id: "RPFUL" });
+await lobby(seatless);
+const in_queue = connect({ type: "join", id: "RPFUL" });
+await lobby(in_queue);
+in_queue.socket.send({ type: "seats", names: ["Eli"] });
+await in_queue.until((msg) => msg.type === "room" && msg.queued);
+await new Promise((resolve) => setTimeout(resolve, 300));
+for (const client of [full_up, seatless, in_queue])
+    assert.ok(
+        !client.events.some((msg) => msg.code === "DISCONNECTED"),
+        "a client in a room is kept, seated, seatless or queued",
+    );
+delete process.env.ROOMLESS_MS;
+for (const client of [full_up, seatless, in_queue]) client.socket.close();
+
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");
 process.exit(0);
