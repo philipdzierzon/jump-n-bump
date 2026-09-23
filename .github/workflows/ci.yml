@@ -41,7 +41,10 @@ jobs:
       # The one browser walk, against the shipping image rather than the working tree:
       # an asset missing from the container fails here. Same command as locally; only
       # the environment differs.
+      # Three minutes when it passes. A run that hangs fails here and uploads its traces,
+      # rather than holding the runner until somebody cancels it.
       - run: npm test
+        timeout-minutes: 15
         env:
           JNB_BASE_URL: http://localhost:8080
       # A two-page timing failure is unreadable from an assertion message alone.

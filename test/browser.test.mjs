@@ -4306,11 +4306,21 @@ try {
             "two pages agree on one room, the mp3s really play, and the page fits a phone",
     );
 } catch (error) {
+    // First, before anything below can hang: in CI a run whose dump stalled was cancelled
+    // twenty minutes on with the one line that mattered never printed.
+    console.error(error);
+    // Every call into a page below is bounded. A page whose main thread is stuck answers
+    // `evaluate` never, and a failing run still has thirty-odd contexts open and tracing.
+    const within = (promise, fallback, ms = 5000) =>
+        Promise.race([
+            promise.catch(() => fallback),
+            new Promise((resolve) => setTimeout(resolve, ms, fallback).unref()),
+        ]);
     // Where the page actually was, which a locator timeout never says: "not visible" reads
     // the same whether the flow went nowhere or went somewhere else entirely.
     const state = (open) =>
-        open
-            .evaluate(() => ({
+        within(
+            open.evaluate(() => ({
                 hash: window.location.hash,
                 showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
                     .filter((el) => el.offsetParent !== null)
@@ -4327,8 +4337,9 @@ try {
                 participants: document.querySelectorAll(
                     "div[data-bind*=\"screen() === 'names'\"] li",
                 ).length,
-            }))
-            .catch(() => null);
+            })),
+            null,
+        );
     // The newest pages still open, which is where the failure is: only three of the
     // nineteen sections close their pages when they pass, so by the end of a run nearly
     // every page ever opened is still there and the failing one is the *last* of them.
@@ -4344,7 +4355,10 @@ try {
             // Printed even when it is null: a page that died is exactly the case where its
             // absence is the thing worth saying.
             console.error(name + " page was at:", JSON.stringify(await state(open)));
-            const routes = await open.evaluate(() => window.__routes || []).catch(() => []);
+            const routes = await within(
+                open.evaluate(() => window.__routes || []),
+                [],
+            );
             for (const route of routes.slice(-20)) console.error("  " + name + ": " + route);
         }
     }
@@ -4353,8 +4367,16 @@ try {
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
     // nothing to read.
     // Every context, not just the one being walked: the failure may be a second page's.
-    for (const [name, made] of contexts)
-        await made.tracing.stop({ path: "trace-" + name + ".zip" }).catch(() => {});
+    // All at once and under one bound: one by one, thirty of them could still take minutes.
+    await within(
+        Promise.all(
+            contexts.map(([name, made]) =>
+                made.tracing.stop({ path: "trace-" + name + ".zip" }).catch(() => {}),
+            ),
+        ),
+        null,
+        60000,
+    );
     if (page_errors.length) console.error("page errors:", page_errors);
     console.error(
         "traces written: " +
@@ -4363,7 +4385,8 @@ try {
     );
     throw error;
 } finally {
-    await browser.close();
+    // Bounded for the same reason, so a failure exits rather than sitting on a stuck page.
+    await Promise.race([browser.close(), new Promise((resolve) => setTimeout(resolve, 10000))]);
     server?.close();
 }
 process.exit(0);
