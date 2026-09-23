@@ -10,9 +10,9 @@
 // The password is not in here. It is write-only, never in a room view and never on a link,
 // so it is the one setting that has no place in an object the relay broadcasts (#8).
 //
-// Two constants that are not settings live here for the same reason: the catch-up ceiling
-// and the list of drivers are values the client and the relay have to agree on, and one
-// definition is what stops them disagreeing (#82).
+// Three things that are not settings live here for the same reason: the catch-up ceiling,
+// the list of drivers and the guess for a missing frame are what the client and the relay
+// have to agree on, and one definition is what stops them disagreeing (#82, #141).
 
 // The levels shipped in `game/levels/`, each one `<name>/<name>.dat` beside the page --
 // except `default`, which is the built-in map and its two <img> tags. A name is resolved
@@ -62,6 +62,21 @@ export var LIMITS = { bump_limit: 99, time_limit: 60 };
 // Both halves of one ceiling: the client drops a frame stamped further ahead than this
 // (#80), and the relay refuses to raise the room's clock to one in the first place (#82).
 export var MAX_CATCH_UP = 3600;
+
+// No keys held: what a seat plays when there is no frame to repeat (#6, #42).
+var RELEASED = { left: false, right: false, up: false };
+// How many ticks in a row a missing frame repeats the seat's last one before it becomes
+// RELEASED again: a sixth of a second covers a stall on the wire (#141), and a seat that
+// is really gone still stops pressing keys, as #6, #17 and #42 want.
+export var PREDICT_TICKS = 10;
+
+// The guess for a seat's missing frame, and the one guess there is: the relay puts it in on
+// its deadline and a client steps it while the relay's frame is still in flight, so the two
+// agree whenever the keys did not change inside the stall (#141). Shared for the reason the
+// config is, since two copies of a guess drift into two guesses.
+export function predict(last, missed) {
+    return last && missed < PREDICT_TICKS ? last : RELEASED;
+}
 
 // Who may be driving a seat: the client holding it, the AI, or nobody at all when the room
 // disabled it (#7, #37). An allowlist like `LEVELS` -- it is what stops a peer writing

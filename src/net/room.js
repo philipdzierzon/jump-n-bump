@@ -1,6 +1,4 @@
-import { MAX_CATCH_UP } from "./room_config.js";
-
-var RELEASED = { left: false, right: false, up: false };
+import { MAX_CATCH_UP, predict } from "./room_config.js";
 
 // How often a client hashes its own simulation and hands the hash to the relay, which holds
 // the host's and compares (#41). Half a second: the relay keeps eight of the host's, so a
@@ -21,6 +19,10 @@ export function Room(transport, read_input) {
     var drivers = [];
     var input_at = {}; // tick -> { seat: frame }
     var drivers_at = {}; // tick -> [ driver message ]
+    // Per seat, the frame this client stepped last and how many ticks in a row it has had to
+    // guess one: `predict`'s two inputs, as the relay keeps its own (#141).
+    var last = [];
+    var missed = [];
     // Replaying the gap between a snapshot and now, rather than playing the match: no
     // frame of this client's own is read, scheduled or sent for a tick that is already
     // history, or it would overwrite the frames the gap is made of (#40).
@@ -103,6 +105,8 @@ export function Room(transport, read_input) {
                 tick = msg.t | 0;
                 input_at = {};
                 drivers_at = {};
+                last = [];
+                missed = [];
                 // With them, because it is per-match state exactly as they are. Two paths
                 // keep a `Room` alive across a `start` -- a client still on the match
                 // screen inside the two-second end-of-match freeze when the host starts the
@@ -349,12 +353,13 @@ export function Room(transport, read_input) {
         // AI -- a missing frame is a missing frame (#6). The first d ticks of every match
         // are exactly this, since the earliest frame anyone stamps is for tick d.
         //
-        // It is a floor and not the substitution: the relay rings a released frame to the
-        // whole room on its own deadline, so every client uses the same input for a tick
-        // whose frame never came, and a client that put its own in would be playing a
-        // different match from that tick on (#42 corrects #6). What is left here is the
-        // ticks before anybody has stamped a frame at all, and a relay frame that has not
-        // landed yet -- which is the same value, so it cannot manufacture a divergence.
+        // It is a floor and not the substitution: the relay rings its own frame to the whole
+        // room on its own deadline, so every client uses the same input for a tick whose
+        // frame never came (#42 corrects #6). What is left here is the ticks before anybody
+        // has stamped a frame at all, and a frame still in flight -- the relay's or the
+        // sender's. Both sides guess with `predict`, so a key held through a stall is the
+        // same guess on both and no divergence (#141). A key that changed inside the stall,
+        // or a guess either side has run out of ticks on, still is one.
         drivers.forEach(function (driver, seat) {
             // The table and the frame set are one answer to one question, reconciled here
             // because this is the only place both are in hand. A frame for a seat the room
@@ -363,9 +368,16 @@ export function Room(transport, read_input) {
             // a non-local seat, so keeping it makes the sender -- and any peer the fan-out
             // reached in time, and a joiner replaying the ring -- the only clients running
             // that bunny on keys (#110, #7).
-            if (driver !== "local") return void delete frames[seat];
-            if (frames[seat]) return;
-            frames[seat] = RELEASED;
+            if (driver !== "local") {
+                last[seat] = null;
+                return void delete frames[seat];
+            }
+            if (frames[seat]) {
+                last[seat] = frames[seat];
+                return void (missed[seat] = 0);
+            }
+            frames[seat] = predict(last[seat], missed[seat] | 0);
+            missed[seat] = (missed[seat] | 0) + 1;
             // Not the first d ticks, where every seat is substituted for by definition, and
             // not a replayed gap, whose holes are the relay's ring rather than this
             // client's lateness (#70).
