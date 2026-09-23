@@ -38,9 +38,10 @@ var RECONNECTING_MS = 5000;
 // `Room.gap()` is its tick against the newest one anybody has stamped a frame for, and it
 // catches the other way a client stops being in step: one whose loop is not running at all.
 // `pump` catches up to the wall clock in a `while` loop, so a client that is merely slow
-// loses drawn frames rather than ticks and its gap stays nothing -- but a backgrounded tab's
-// `setTimeout` is throttled to about once a second, and that one really does fall behind
-// (#51). Half a second, which is well past the tick or two of normal jitter.
+// loses drawn frames rather than ticks and its gap stays nothing -- but a hidden tab gets no
+// animation frames at all, so its loop stops dead, and once it is shown again it is behind the
+// room until the sprint closes the gap (#51). Half a second, which is well past the tick or two
+// of normal jitter.
 var BEHIND_TICKS = 30;
 
 function Enum(obj) {
@@ -592,7 +593,10 @@ export function Game_Session(get_level, config, muted, transport) {
     // every entry to the lobby and again on every reconnect, and `addEventListener` would
     // pile one listener per session onto keyboards that are already gone.
     window.onblur = keyboard.release_all;
-    document.onvisibilitychange = keyboard.release_all;
+    document.onvisibilitychange = function () {
+        keyboard.release_all();
+        if (game) game.drop_backlog();
+    };
 }
 
 // Shared with the flow screens, which have text fields of their own (#35).
