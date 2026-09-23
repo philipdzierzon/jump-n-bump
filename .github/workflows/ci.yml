@@ -32,7 +32,8 @@ jobs:
       # Builds the client and runs it exactly as production does, so one
       # assertion run covers webpack, static serving and the WebSocket.
       - run: docker build -t jnb .
-      - run: docker run -d -p 8080:8080 jnb
+      # The browser walk is one address holding more than three rooms at once (#157).
+      - run: docker run -d -e ROOMS_PER_KEY=1000 -p 8080:8080 jnb
       # Two seconds, and it says whether the container is broken at all before the
       # browser spends longer finding out. It needs no browser, which is also why it
       # can be pointed at a deployed instance.

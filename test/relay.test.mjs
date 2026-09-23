@@ -47,6 +47,9 @@ assert.deepEqual(config_diff(base, { bump_limit: "" }), {}, "and an emptied box 
 assert.deepEqual(config_diff(base, { bump_limit: 0 }), {}, "endless is what it already is");
 assert.deepEqual(config_diff(base, "nonsense"), {}, "and so is a config that is not one");
 
+// Every client here comes from one address, and the suite holds more than three rooms open
+// at a time: the per-key cap is lifted until its own block at the end puts it back (#157).
+process.env.ROOMS_PER_KEY = "1000";
 const server = await start_server(0);
 const url = "ws://localhost:" + server.address().port + "/ws";
 
@@ -2465,6 +2468,82 @@ const refused_big = new Promise((resolve, reject) => {
 oversized.send(JSON.stringify({ type: "snapshot", body: BODY + BODY }));
 assert.equal((await refused_big).code, 1009, "an over-sized message closes the socket");
 for (const client of [flood.host, flood.guest, long_client, uuid_client]) client.socket.close();
+
+// The limits (#157). Every one keys on `CF-Connecting-IP`, which `WebSocket_Transport` cannot
+// set, so these are raw sockets: one entry, and its answer.
+function from(ip, entry, extra = {}) {
+    const headers = ip ? { "CF-Connecting-IP": ip, ...extra } : extra;
+    const socket = new WebSocket(url, { headers });
+    socket.onopen = () => socket.send(JSON.stringify(entry));
+    const answer = new Promise((resolve, reject) => {
+        socket.onmessage = ({ data }) => {
+            const msg = JSON.parse(data);
+            if (msg.type === "joined" || msg.type === "error") resolve(msg);
+        };
+        setTimeout(() => reject(new Error("no answer to " + entry.type)), 2000);
+    });
+    return { socket, answer };
+}
+const gone = async ({ socket }) => {
+    await new Promise((resolve) => ((socket.onclose = resolve), socket.close()));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+};
+
+// Three live rooms per key, and the key is the header rather than anything a client can
+// vary: a different `X-Forwarded-For` on each is still the one key.
+// Opened while the cap is still lifted: it is a key the suite has rooms open on already.
+const bare = from(null, { type: "create" });
+const bare_joined = await bare.answer;
+delete process.env.ROOMS_PER_KEY;
+const mine = [1, 2, 3].map((n) =>
+    from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2." + n }),
+);
+for (const room of mine) assert.equal((await room.answer).type, "joined", "three rooms per key");
+const fourth = from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2.4" });
+assert.equal((await fourth.answer).code, "TOO_MANY_ROOMS", "and not a fourth");
+const neighbour = from("10.0.0.2", { type: "create" });
+assert.equal((await neighbour.answer).type, "joined", "another key is not refused for it");
+// Capped by concurrency rather than rate: a room that ends frees its slot.
+await gone(mine[0]);
+const again = from("10.0.0.1", { type: "create" });
+assert.equal((await again.answer).type, "joined", "a room that ends frees its slot");
+// Without the header the key is the socket's own address, which is where this suite's
+// clients come from.
+process.env.ROOMS_PER_KEY = "1";
+const bare_second = from(null, { type: "create" });
+assert.equal((await bare_second.answer).code, "TOO_MANY_ROOMS", "no header: the socket's key");
+delete process.env.ROOMS_PER_KEY;
+
+// A full server refuses a new room and still lets a client into one that is open.
+process.env.MAX_ROOMS = "1";
+const refused_room = from("10.0.0.3", { type: "create" });
+assert.equal((await refused_room.answer).code, "SERVER_FULL", "no room past MAX_ROOMS");
+const refused_quick = from("10.0.0.3", { type: "quick", names: ["Ivy"] });
+assert.equal(
+    (await refused_quick.answer).code,
+    "SERVER_FULL",
+    "Quick Join included, when there is nothing it can join",
+);
+const joiner = from("10.0.0.3", { type: "join", id: bare_joined.id });
+assert.equal((await joiner.answer).type, "joined", "while a join still works");
+delete process.env.MAX_ROOMS;
+for (const client of [...mine, fourth, neighbour, again, bare, bare_second]) client.socket.close();
+for (const client of [refused_room, refused_quick, joiner]) client.socket.close();
+
+// Sixty HTTP requests a minute per key, on whatever static and the room list do not answer.
+const http = "http://localhost:" + server.address().port;
+const as = (ip, path = "/healthz", extra = {}) =>
+    fetch(http + path, { headers: { "CF-Connecting-IP": ip, ...extra } });
+for (let n = 0; n < 60; n++) assert.equal((await as("10.9.9.9")).status, 200, "sixty go through");
+assert.equal((await as("10.9.9.9")).status, 429, "and the sixty-first does not");
+assert.equal(
+    (await as("10.9.9.9", "/healthz", { "X-Forwarded-For": "192.0.2.9" })).status,
+    429,
+    "whatever it says it was forwarded for",
+);
+assert.equal((await as("10.9.9.8")).status, 200, "another key has its own sixty");
+assert.equal((await as("10.9.9.9", "/jbcircle.png")).status, 200, "static is exempt");
+assert.equal((await as("10.9.9.9", "/api/rooms")).status, 200, "and so is the room list");
 
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");

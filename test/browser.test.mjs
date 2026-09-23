@@ -39,7 +39,10 @@ import { generate_room_id } from "../src/net/room_id.js";
 import { FLOW_TEXT } from "../src/interaction/router.js";
 import { SNAPSHOT_INTS, decode_snapshot, encode_snapshot } from "../src/game/snapshot.js";
 
-// Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does.
+// Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does. Every
+// page and every relay client here is one address, holding more than three rooms at once:
+// the per-key cap is lifted, here and on CI's container alike (#157).
+process.env.ROOMS_PER_KEY = "1000";
 const given = process.env.JNB_BASE_URL;
 const server = given ? null : await start_server(0);
 const origin = given ? given.replace(/\/$/, "") : "http://localhost:" + server.address().port;

@@ -955,6 +955,15 @@ function ViewModel() {
                     // Somebody else sat down first, or its holder is on the way back: a
                     // reservation belongs to one token until it expires (#42).
                     self.error("That seat is not free.");
+                } else if (code === "SERVER_FULL") {
+                    // The two refusals of a new room, Quick Join's as much as Create's, so
+                    // both come before the create branch rather than inside it (#157).
+                    self.error(
+                        "The server is full right now. You can still join a room that is " +
+                            "already open.",
+                    );
+                } else if (code === "TOO_MANY_ROOMS") {
+                    self.error("You already have 3 rooms open. Close one to open another.");
                 } else if (entry.type === "create") {
                     self.error(code === "ID_TAKEN" ? "That code is taken." : CODE_HINT);
                 } else if (self.screen() === "room" || self.screen() === "play") {

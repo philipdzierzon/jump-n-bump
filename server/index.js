@@ -68,6 +68,17 @@ const repair_cooldown_ms = () => Number(process.env.REPAIR_COOLDOWN_MS || 2000);
 // cap on repairs for the whole match if one ever turns up in a log.
 const repair_reset_ms = () => Number(process.env.REPAIR_RESET_MS || 30000);
 const MAX_REPAIRS = 5;
+// How many rooms the relay holds at once, and how many of them one limiter key may have
+// open. Creation is capped by concurrency rather than rate, so a slot frees itself the
+// moment `leave` deletes the room; a join is never refused by either (#47, #157). Both read
+// per create, so a test can move them without a second knob.
+// ponytail: 200 rooms x 208 kbit/s is 50 Mbit/s of a 500 Mbit uplink, but egress scales
+// with clients, not rooms: a full four-seat room plus spectators costs more than 208.
+// upgrade path: cap clients if egress is ever the thing that runs out.
+const max_rooms = () => Number(process.env.MAX_ROOMS || 200);
+const rooms_per_key = () => Number(process.env.ROOMS_PER_KEY || 3);
+// Requests per limiter key per minute on the HTTP routes the bucket covers (#47).
+const HTTP_PER_MINUTE = 60;
 
 const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
@@ -109,7 +120,17 @@ const token_of = (msg) => {
     return token.length > 36 ? "" : token;
 };
 
+// Who a request is, for every limit: the address Cloudflare saw, or the socket's own when
+// there is no tunnel in front (a local run, a test). Trusted only because the tunnel is the
+// only way in; `X-Forwarded-For` is never read, since any client can write one (#47).
+const key_of = (req) => req.headers["cf-connecting-ip"] || req.socket.remoteAddress;
+
 function create(client, msg) {
+    // A room keeps the key that opened it until it ends, host migration or not.
+    const live = Object.values(rooms);
+    if (live.length >= max_rooms()) return send(client, { type: "error", code: "SERVER_FULL" });
+    if (live.filter((room) => room.key === client.key).length >= rooms_per_key())
+        return send(client, { type: "error", code: "TOO_MANY_ROOMS" });
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
     if (!id) return send(client, { type: "error", code: "BAD_ID" });
     // A host-chosen id is answered honestly when it is taken: this is the creator's own
@@ -117,6 +138,7 @@ function create(client, msg) {
     if (rooms[id]) return send(client, { type: "error", code: "ID_TAKEN" });
     rooms[id] = {
         id,
+        key: client.key,
         password: password_of(msg),
         // The build of the client that opened it. Every client in a lockstep room has to be
         // running the same simulation, and the relay cannot tell one build from another by
@@ -1557,11 +1579,26 @@ export function start_server(port = PORT) {
             process.env.CLIENT_DIR || fileURLToPath(new URL("../game", import.meta.url)),
         ),
     );
-    app.get("/healthz", (_req, res) => res.type("text/plain").send("ok"));
     // A snapshot, never a subscription: Browse asks once on entry and the list is never
     // authoritative -- the join attempt is. Ten seconds of cache is what keeps a refresh
-    // button from being a polling loop in disguise (#29, #43).
+    // button from being a polling loop in disguise, and is its only limit (#29, #43, #47).
     app.get("/api/rooms", (_req, res) => res.set("Cache-Control", "max-age=10").json(listings()));
+    // The blanket bucket, on whatever is left: registration order is the whole exemption.
+    // Static answers any file it finds (a cold load is 16-20 requests) and `/api/rooms` is
+    // answered above, so neither reaches it; the WebSocket upgrade is not an Express route.
+    // Per `start_server`, so a test's fresh server has a fresh window (#47, #157).
+    // ponytail: a fixed window cleared for everybody at once, so a burst of 120 can straddle
+    // a reset. upgrade path: a per-key { n, at } if a log ever shows one.
+    const hits = new Map();
+    setInterval(() => hits.clear(), 60000).unref();
+    app.use((req, res, next) => {
+        const key = key_of(req);
+        const n = (hits.get(key) || 0) + 1;
+        hits.set(key, n);
+        if (n > HTTP_PER_MINUTE) res.sendStatus(429);
+        else next();
+    });
+    app.get("/healthz", (_req, res) => res.type("text/plain").send("ok"));
 
     const server = app.listen(port, "0.0.0.0");
     // The largest message a client sends is the host's snapshot, whose body is ASCII base64
@@ -1569,7 +1606,8 @@ export function start_server(port = PORT) {
     // that closes the socket rather than being buffered at ws's 100 MiB default (#156).
     const sockets = new WebSocketServer({ server, path: "/ws", maxPayload: MAX_SNAPSHOT + 4096 });
 
-    sockets.on("connection", (client) => {
+    sockets.on("connection", (client, req) => {
+        client.key = key_of(req);
         client.one_way = 0;
         client.last_t = -1;
         // Measured from the first message rather than the first interval: a room can be
