@@ -1406,7 +1406,8 @@ function relay(client, msg) {
                     else room.forged++;
                 }
             // Every other client, never the sender: it scheduled its own frame when it
-            // sent it, which is what makes the delay one-way (#12).
+            // sent it, so it never waits on the round trip (#12). Its peers still wait on
+            // two trips, sender to relay and relay to them, which is what `d` covers (#142).
             broadcast_frame(room, { type: "input", t: msg.t, seats }, client);
             // Rung as well as fanned out, the sender's own frames included: a joiner needs
             // every seat's input for the gap, not just the ones somebody else sent (#40).
