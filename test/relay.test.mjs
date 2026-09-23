@@ -6,7 +6,13 @@ import fs from "node:fs";
 import { format } from "node:util";
 
 import { normalise_room_id } from "../src/net/room_id.js";
-import { LEVELS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/room_config.js";
+import {
+    LEVELS,
+    MAX_CATCH_UP,
+    PREDICT_TICKS,
+    config_diff,
+    default_config,
+} from "../src/net/room_config.js";
 import { start_server } from "../server/index.js";
 import { Room } from "../src/net/room.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
@@ -1393,7 +1399,22 @@ const covered = await until_seen(
     (msg) => msg.type === "input" && msg.t > 0 && msg.seats["1"],
     "the relay to cover the quiet seat",
 );
-assert.deepEqual(covered.seats, { 1: no_key }, "the relay puts released keys in, and nothing else");
+// A key held through a stall is the seat's last frame repeated, so the sender, which played
+// its real keys, and the relay agree (#141) -- for PREDICT_TICKS, and then a seat that has
+// gone quiet is holding nothing (#6).
+assert.deepEqual(covered.seats, { 1: pressed_key }, "the relay repeats the seat's last frame");
+const covered_at = (t) =>
+    until_seen(
+        gap.host_saw,
+        (msg) => msg.type === "input" && msg.t === t && msg.seats["1"],
+        "the relay to cover tick " + t,
+    );
+assert.deepEqual((await covered_at(PREDICT_TICKS)).seats, { 1: pressed_key }, "for ten ticks");
+assert.deepEqual(
+    (await covered_at(PREDICT_TICKS + 1)).seats,
+    { 1: no_key },
+    "and released keys after them, and nothing else",
+);
 assert.deepEqual(
     await until_seen(
         gap.guest_saw,
@@ -1422,16 +1443,40 @@ assert.ok(
 // A frame that turns up after its tick was covered for is dropped where it lands: the room
 // stepped that tick, and handing it on now is input for a tick that never comes round
 // again. Counted per room, and the match's log line is where that count is read.
-gap.guest.socket.send({ type: "input", match: 1, t: 1, seats: { 1: pressed_key } });
+const jumped = { left: false, right: false, up: true };
+gap.guest.socket.send({ type: "input", match: 1, t: 1, seats: { 1: jumped } });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.ok(
     !gap.host_saw.some(
-        (msg) => msg.type === "input" && msg.t === 1 && msg.seats["1"] && msg.seats["1"].right,
+        (msg) => msg.type === "input" && msg.t === 1 && msg.seats["1"] && msg.seats["1"].up,
     ),
-    "a frame past its deadline is dropped silently, and the released one stands",
+    "a frame past its deadline is dropped silently, and the relay's one stands",
 );
 gap.host.socket.close();
 gap.guest.socket.close();
+
+// The client makes the same guess while the relay's frame is still in flight: a peer's seat
+// with no frame yet repeats the last one this client stepped, then gives up with the relay
+// (#141). A transport that delivers only what the test hands it is the stall.
+let deliver;
+const stalled = new Room({ receive: (fn) => (deliver = fn), send() {} }, () => no_key);
+deliver({
+    type: "start",
+    t: 0,
+    d: 2,
+    match: 1,
+    seed: 1,
+    settings: {},
+    held: [],
+    drivers: ["ai", "local"],
+});
+deliver({ type: "input", t: 2, seats: { 1: pressed_key } });
+const guessed = [];
+for (let t = 0; t <= PREDICT_TICKS + 3; t++) guessed.push(stalled.step()[1]);
+assert.deepEqual(guessed[0], no_key, "nothing to repeat before the seat's first frame");
+assert.deepEqual(guessed[3], pressed_key, "a missing frame repeats the last one stepped");
+assert.deepEqual(guessed[2 + PREDICT_TICKS], pressed_key, "for ten ticks");
+assert.deepEqual(guessed[3 + PREDICT_TICKS], no_key, "and then released, as the relay does");
 
 // The catch-up run seeds its driver table once and walks it forward as it goes (#92), rather
 // than asking a fresh scan every tick: a change that lands mid-run must flip the table on
