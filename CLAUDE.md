@@ -58,6 +58,12 @@ The relay's own half of that -- the released frame it substitutes on its deadlin
 it gives the AI after thirty missing ticks, the frames it drops for being late or forged,
 and a reservation that is exclusive to one token until it expires -- is `relay.test.mjs`'s.
 
+A fifth, added in #141, **stalls the guest's uplink** through `test/lossy_proxy.mjs` while
+the guest changes key, and asserts the two pages' checksums still agree with no repair: the
+relay's frame for a tick the guest already stepped is rewound to from a one-second ring of
+states. The seed is pinned with `clock.setFixedTime`, because a bunny that spawns against a
+wall steps left and right alike.
+
 A local room seeds itself from `Date.now() | 0`, so the sound walk pins the clock and plays a
 known match: whether four bunnies bump each other inside a few seconds is the seed's
 business, and a third of all seeds never do it at all. It then plays a second one with the

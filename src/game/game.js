@@ -119,6 +119,14 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
     // replay or a server sim steps by hand (#5).
     this.step = game_iteration;
 
+    // Whether a limit has ended the match, and a rewind's way to put that back: the end is
+    // part of the state a late frame can change, so a correction before it un-ends the
+    // match and the tick that ends it is found again (#141).
+    this.ended = function (value) {
+        if (value !== undefined) ended = value;
+        return ended;
+    };
+
     // Ticks left of the time limit, or null when there is none. Read by the top bar, which
     // is chrome rather than canvas and costs the wire nothing (#39).
     this.ticks_left = function () {

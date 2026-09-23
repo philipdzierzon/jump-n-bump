@@ -38,6 +38,7 @@ import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { generate_room_id } from "../src/net/room_id.js";
 import { FLOW_TEXT } from "../src/interaction/router.js";
 import { SNAPSHOT_INTS, decode_snapshot, encode_snapshot } from "../src/game/snapshot.js";
+import { lossy_proxy } from "./lossy_proxy.mjs";
 
 // Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does. Every
 // page and every relay client here is one address, holding more than three rooms at once:
@@ -75,6 +76,7 @@ const room_r = new_room_id();
 const room_s = new_room_id();
 const room_t = new_room_id();
 const room_u = new_room_id();
+const room_v = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -1971,11 +1973,20 @@ async function browse() {
     const browse_page = await (await make_context("browse")).newPage();
     const errors = [];
     browse_page.on("pageerror", (error) => errors.push(error.message));
-    // This walk's own room, by its code: an earlier walk's room is still up and still
-    // listed, which is the list working rather than a row to count around.
+    // This walk's own room, by its code, beside a second listed room of its own -- the
+    // earlier walks close theirs now, so the neighbour is made here rather than borrowed.
     const rows = () => screen("browse", browse_page).locator("li").filter({ hasText: room_g });
     const message = () => err_on("browse", browse_page);
 
+    const neighbour_seen = [];
+    const neighbour = relay_client(
+        { type: "create", id: new_room_id(), listed: true },
+        neighbour_seen,
+    );
+    await until("a second listed room", async () =>
+        neighbour_seen.some((msg) => msg.type === "joined"),
+    );
+    neighbour.send({ type: "seats", names: ["Neighbour"] });
     const seen = [];
     const doomed = relay_client({ type: "create", id: room_g, listed: true }, seen);
     await until("a listed room", async () => seen.some((msg) => msg.type === "joined"));
@@ -1990,7 +2001,7 @@ async function browse() {
     await until("the listed room in the list", async () => (await rows().count()) === 1);
     assert.ok(
         (await screen("browse", browse_page).locator("li").count()) > 1,
-        "and it is listed alongside the room the walk before this one left up",
+        "and it is listed alongside the other room up",
     );
 
     // A room dies with its last client, so the row on screen is now a row for a room that
@@ -2443,16 +2454,16 @@ async function rejoin_fails() {
 async function late_resume() {
     const host = await (await make_context("late-host")).newPage();
     const guest_context = await make_context("late-guest");
+    // Lies until the repair is seen rather than once: a client hashes the tick leaving its
+    // one-second ring (#141), and the relay ignores a joiner's hashes up to the tick it was
+    // resumed on, so the first few after the join are nobody's reference (#41).
     await guest_context.addInitScript(() => {
         window.__lie = false;
         const send = WebSocket.prototype.send;
         WebSocket.prototype.send = function (data) {
             if (window.__lie && typeof data === "string" && data.includes('"checksum"')) {
                 const msg = JSON.parse(data);
-                if (msg.type === "checksum") {
-                    window.__lie = false;
-                    data = JSON.stringify({ ...msg, h: (msg.h ^ 1) | 0 });
-                }
+                if (msg.type === "checksum") data = JSON.stringify({ ...msg, h: (msg.h ^ 1) | 0 });
             }
             return send.call(this, data);
         };
@@ -2545,6 +2556,7 @@ async function late_resume() {
     hold = true;
     await guest.evaluate(() => (window.__lie = true));
     await until("the relay's repair, held at the socket", () => held !== null);
+    await guest.evaluate(() => (window.__lie = false));
 
     await click("Back to the lobby", host);
     await on("room", host);
@@ -2608,6 +2620,83 @@ async function late_resume() {
     );
 
     assert.deepEqual(errors, [], "with nothing thrown on either page");
+}
+
+// A key changed inside a stall on the wire (#141). The guest reaches the relay through a
+// lossy proxy whose uplink is held for 400 ms, and the guest lets go of right and presses
+// left as it starts: the relay covers those ticks with its own guess and the guest has
+// already stepped them on its real keys. Before #141 that was a desync and a repair; now the
+// relay's frame reaches the guest a moment later and it rewinds to it. Read off the wire,
+// both pages' hashes and whether any `start` carrying a state came down, so it holds against
+// CI's container as well.
+async function stall_changes_a_key() {
+    const link = await lossy_proxy(Number(new URL(origin).port) || 80, { one_way: 20 });
+    const host = await (await make_context("stall-host")).newPage();
+    const guest = await (await make_context("stall-guest")).newPage();
+    // The host proposes the seed from `Date.now()`, and where the guest's bunny spawns -- in
+    // the open or already against a wall, where left and right do the same -- is the seed's
+    // business. Pinned, with the timers left running.
+    await host.clock.setFixedTime(1790000000000);
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+    const host_hashes = record_checksums(host);
+    const guest_hashes = record_checksums(guest);
+    let repairs = 0;
+    for (const side of [host, guest])
+        side.on("websocket", (ws) =>
+            ws.on("framereceived", ({ payload }) => {
+                const text = String(payload);
+                if (text.startsWith('{"type":"start"') && text.includes('"snapshot"')) repairs++;
+            }),
+        );
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_v);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+
+    await guest.goto("http://127.0.0.1:" + link.port + "/#" + room_v);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    await click("Start the match", host);
+    await click("Ready", guest);
+    await on("play", host);
+    await on("play", guest);
+
+    await guest.keyboard.down("ArrowRight");
+    await guest.waitForTimeout(500);
+    const before = paired(host_hashes, guest_hashes).length;
+    // Under the thirty missing ticks that hand a seat to the AI, and over PREDICT_TICKS, so
+    // the relay's guess runs out inside it as well.
+    link.stall("up", 400);
+    await guest.keyboard.up("ArrowRight");
+    await guest.keyboard.down("ArrowLeft");
+    await guest.waitForTimeout(500);
+    await guest.keyboard.up("ArrowLeft");
+    // Three seconds of hashes past the stall, a second of which is the ring's own lag.
+    await until(
+        "six ticks both pages hashed after the stall",
+        () => paired(host_hashes, guest_hashes).length >= before + 6,
+    );
+    assert.deepEqual(
+        [disagreements(host_hashes, guest_hashes, 1), repairs],
+        [[], 0],
+        "a key changed inside a stall is rewound to on the page that pressed it, not repaired (#141)",
+    );
+    assert.deepEqual(errors, [], "with nothing thrown on either page");
+    await link.close();
 }
 
 // The other route into #124, and the other ordering. Here the `resume` arrives *before* the
@@ -4193,43 +4282,66 @@ async function connecting_keeps_focus() {
 
 // --- run -------------------------------------------------------------------------------
 
+// Each walk's contexts are closed once it passes. Left open, every match an earlier walk
+// started goes on pumping at 60 Hz under a tracer taking screenshots, and on a two-CPU CI
+// runner the pile starved the whole browser by `late_resume`: a click that never landed and
+// pages that answered nothing. Alone, the same walk passes in seconds. A failing walk's
+// contexts are still open for the dump and the traces below.
+const walks = [
+    walk,
+    self_ending_match,
+    new_match_outranks_the_hold,
+    two_pages,
+    reconnect,
+    reconnect_gives_up,
+    history_host_back,
+    history_reload_in_match,
+    history_link_while_seated,
+    reload_into_a_dead_room,
+    reload_into_a_locked_room,
+    sound,
+    sound_outlives_the_room,
+    browse,
+    queueing,
+    waitlisted_seat,
+    double_click_create,
+    superseded_create_closes,
+    rejoin_fails,
+    error_dies_with_its_route,
+    error_dies_with_its_match,
+    late_resume,
+    late_resume_from_the_lobby,
+    stall_changes_a_key,
+    phone,
+    keyboard_only,
+    connecting_keeps_focus,
+];
 try {
-    await walk();
-    await self_ending_match();
-    await new_match_outranks_the_hold();
-    await two_pages();
-    await reconnect();
-    await reconnect_gives_up();
-    await history_host_back();
-    await history_reload_in_match();
-    await history_link_while_seated();
-    await reload_into_a_dead_room();
-    await reload_into_a_locked_room();
-    await sound();
-    await sound_outlives_the_room();
-    await browse();
-    await queueing();
-    await waitlisted_seat();
-    await double_click_create();
-    await superseded_create_closes();
-    await rejoin_fails();
-    await error_dies_with_its_route();
-    await error_dies_with_its_match();
-    await late_resume();
-    await late_resume_from_the_lobby();
-    await phone();
-    await keyboard_only();
-    await connecting_keeps_focus();
+    for (const run of walks) {
+        const opened = contexts.length;
+        await run();
+        for (const [, made] of contexts.splice(opened)) await made.close();
+    }
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
             "two pages agree on one room, the mp3s really play, and the page fits a phone",
     );
 } catch (error) {
+    // First, before anything below can hang: in CI a run whose dump stalled was cancelled
+    // twenty minutes on with the one line that mattered never printed.
+    console.error(error);
+    // Every call into a page below is bounded. A page whose main thread is stuck answers
+    // `evaluate` never, and a failing run still has thirty-odd contexts open and tracing.
+    const within = (promise, fallback, ms = 5000) =>
+        Promise.race([
+            promise.catch(() => fallback),
+            new Promise((resolve) => setTimeout(resolve, ms, fallback).unref()),
+        ]);
     // Where the page actually was, which a locator timeout never says: "not visible" reads
     // the same whether the flow went nowhere or went somewhere else entirely.
     const state = (open) =>
-        open
-            .evaluate(() => ({
+        within(
+            open.evaluate(() => ({
                 hash: window.location.hash,
                 showing: [...document.querySelectorAll('div[data-bind*="screen() ==="]')]
                     .filter((el) => el.offsetParent !== null)
@@ -4246,12 +4358,11 @@ try {
                 participants: document.querySelectorAll(
                     "div[data-bind*=\"screen() === 'names'\"] li",
                 ).length,
-            }))
-            .catch(() => null);
-    // The newest pages still open, which is where the failure is: only three of the
-    // nineteen sections close their pages when they pass, so by the end of a run nearly
-    // every page ever opened is still there and the failing one is the *last* of them.
-    // Three deep, because the widest thing asserted across pages is #113's host-against-
+            })),
+            null,
+        );
+    // The newest pages still open, which is where the failure is: a walk that passes closes
+    // its contexts, so what is left is the flow page and the failing walk's own. Three deep, because the widest thing asserted across pages is #113's host-against-
     // guest comparison and the flow page behind it. The flow page alone used to be the
     // whole dump, so that comparison failing printed a third page's screen and routes
     // (#126).
@@ -4263,7 +4374,10 @@ try {
             // Printed even when it is null: a page that died is exactly the case where its
             // absence is the thing worth saying.
             console.error(name + " page was at:", JSON.stringify(await state(open)));
-            const routes = await open.evaluate(() => window.__routes || []).catch(() => []);
+            const routes = await within(
+                open.evaluate(() => window.__routes || []),
+                [],
+            );
             for (const route of routes.slice(-20)) console.error("  " + name + ": " + route);
         }
     }
@@ -4272,8 +4386,16 @@ try {
     // Only on failure: the trace is for reading a timing bug in CI, and a passing run has
     // nothing to read.
     // Every context, not just the one being walked: the failure may be a second page's.
-    for (const [name, made] of contexts)
-        await made.tracing.stop({ path: "trace-" + name + ".zip" }).catch(() => {});
+    // All at once and under one bound: one by one, thirty of them could still take minutes.
+    await within(
+        Promise.all(
+            contexts.map(([name, made]) =>
+                made.tracing.stop({ path: "trace-" + name + ".zip" }).catch(() => {}),
+            ),
+        ),
+        null,
+        60000,
+    );
     if (page_errors.length) console.error("page errors:", page_errors);
     console.error(
         "traces written: " +
@@ -4282,7 +4404,8 @@ try {
     );
     throw error;
 } finally {
-    await browser.close();
+    // Bounded for the same reason, so a failure exits rather than sitting on a stuck page.
+    await Promise.race([browser.close(), new Promise((resolve) => setTimeout(resolve, 10000))]);
     server?.close();
 }
 process.exit(0);

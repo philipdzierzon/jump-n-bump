@@ -43,6 +43,11 @@ var RECONNECTING_MS = 5000;
 // (#51). Half a second, which is well past the tick or two of normal jitter.
 var BEHIND_TICKS = 30;
 
+// How long a match that reached its limit stays frozen on the tick it ended before the host
+// announces it: the room's one second of rewind, in which a late frame can still undo the
+// killing bump and the match plays on (#141).
+var SETTLE_MS = 1000;
+
 function Enum(obj) {
     return Object.freeze ? Object.freeze(obj) : obj;
 }
@@ -78,14 +83,35 @@ export function Game_Session(get_level, config, muted, transport) {
         // which grows the seats it drives and the schemes bound to them (#42).
         return keyboard.input_frame(config.schemes()[nth]);
     });
-    // The room hashes this client's state every 30 ticks and the relay compares it against
-    // the host's for the same tick; a mismatch is answered with the resync payload the join
-    // path already has (#41). A local room is a room of one and has nothing to disagree
-    // with, so it hashes nothing (#16). The host hashes too -- its own is the reference.
+    // The room keeps a second of this client's states to rewind to when a frame lands late,
+    // and hashes the oldest of them every 30 ticks for the relay to compare against the
+    // host's; a mismatch is answered with the resync payload the join path already has
+    // (#41, #141). A local room is a room of one, with no late frames and nothing to disagree
+    // with, so it keeps none (#16). The host hashes too -- its own is the reference.
     if (!config.local)
-        room.checksum = function (t) {
-            return checksum_snapshot(pack_snapshot(rnd, objects, t), level_hash);
+        room.history = {
+            save: function () {
+                return { state: pack_snapshot(rnd, objects, room.now()), ended: game.ended() };
+            },
+            load: function (saved) {
+                unpack_snapshot(saved.state, rnd, objects);
+                game.ended(saved.ended);
+            },
+            hash: function (saved) {
+                return checksum_snapshot(saved.state, level_hash);
+            },
+            step: function () {
+                game.step();
+                return !game.ended();
+            },
         };
+    // A rewind that undid the tick the match ended on: it plays on (#141).
+    room.on_rewound = function () {
+        if (!limit_timer || game.ended()) return;
+        clearTimeout(limit_timer);
+        limit_timer = null;
+        game.start();
+    };
 
     var game = null;
     var sfx = null;
@@ -119,6 +145,7 @@ export function Game_Session(get_level, config, muted, transport) {
     var start_when_ready = false;
     var board_timer = null;
     var clock_timer = null;
+    var limit_timer = null;
     // Which `start` the pending level load belongs to. The host can start another match
     // while this client is still fetching the last one's level, and the loser of that race
     // must not build a simulation over the winner's.
@@ -239,6 +266,8 @@ export function Game_Session(get_level, config, muted, transport) {
         // the new match's tick. `play` arms it again (#40).
         clearInterval(snapshot_timer);
         snapshot_timer = null;
+        clearTimeout(limit_timer);
+        limit_timer = null;
         var mine = ++starting;
         // The level is the room's, named in the settings the relay handed down, and a
         // `.dat` has to be fetched and decoded before anything can be built on it (#38).
@@ -373,12 +402,18 @@ export function Game_Session(get_level, config, muted, transport) {
         objects = new Objects(rnd);
         var ai = new AI();
         var animation = new Animation(renderer, img, objects, rnd);
-        sfx = new Sfx(sound_player);
+        sfx = new Sfx(sound_player, room.replaying);
         var movement = new Movement(sfx, objects, settings, rnd);
         game = new Game(movement, ai, animation, renderer, objects, room, level, true, rnd);
         game.on_end = function (reason) {
             show_clock();
-            if (self.on_limit) self.on_limit(reason);
+            clearTimeout(limit_timer);
+            limit_timer = null;
+            if (config.local) return void (self.on_limit && self.on_limit(reason));
+            limit_timer = setTimeout(function () {
+                limit_timer = null;
+                if (self.on_limit) self.on_limit(reason);
+            }, SETTLE_MS);
         };
 
         // The host's state, and every input frame the relay rang since it, replace the
@@ -428,10 +463,16 @@ export function Game_Session(get_level, config, muted, transport) {
     // reference state by definition, so this is read live and a migrated host starts
     // sending them the moment it holds the room (#40, #19). A local room has nobody to
     // join it and nothing to resync, so it sends none (#16).
+    //
+    // The oldest state in the ring and not the live one, which may still be rewound: a joiner
+    // seeded from a guess would be the only client in the room playing it (#141).
+    // ponytail: the board beside it is the live one, up to a second newer than the body, and
+    // only read when a host leaves without announcing an end. upgrade path: pack the matrix
+    // out of the saved state if that second ever shows on a board.
     function push_snapshot() {
         if (!game || config.local || !config.host()) return;
-        var t = room.now();
-        room.send_snapshot(t, bump_matrix(), encode_snapshot(pack_snapshot(rnd, objects, t)));
+        var at = room.settled();
+        if (at) room.send_snapshot(at.t, bump_matrix(), encode_snapshot(at.saved.state));
     }
 
     // Asks the relay for the match in progress: the host's snapshot, the frames since it
@@ -524,6 +565,8 @@ export function Game_Session(get_level, config, muted, transport) {
         clock_timer = null;
         clearInterval(snapshot_timer);
         snapshot_timer = null;
+        clearTimeout(limit_timer);
+        limit_timer = null;
         self.clock(null);
         self.ai_seats([]);
         // Counted here, because the lobby reads this board the moment the match is left and
