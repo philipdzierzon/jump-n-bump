@@ -5,6 +5,11 @@ import { MAX_CATCH_UP, predict } from "./room_config.js";
 // client's hash for a tick has four seconds to arrive before the tick it names is aged out.
 var CHECKSUM_TICKS = 30;
 
+// How far back a frame that arrives late can still be taken back in: a second, which is a
+// stall on the wire several times over (#141). Older than this is the checksums' business
+// and a repair's, as it always was (#41).
+var RING = 60;
+
 // The client's half of a room (#33). It owns the tick counter, the input-delay buffer and
 // the driver table, and it never knows whether the transport under it is a WebSocket or
 // the in-tab loopback -- offline play is a room of one, not a second code path (#16).
@@ -23,6 +28,11 @@ export function Room(transport, read_input) {
     // guess one: `predict`'s two inputs, as the relay keeps its own (#141).
     var last = [];
     var missed = [];
+    // The last RING ticks, by `tick % RING`: the state before each one and what the room
+    // stepped it with, so a frame from the relay that differs from the one this client used
+    // puts the state back and steps forward again (#141). `dirty` is the earliest such tick.
+    var ring = [];
+    var dirty = Infinity;
     // Replaying the gap between a snapshot and now, rather than playing the match: no
     // frame of this client's own is read, scheduled or sent for a tick that is already
     // history, or it would overwrite the frames the gap is made of (#40).
@@ -91,10 +101,13 @@ export function Room(transport, read_input) {
     this.resume = null;
     this.on_start = null;
     this.on_match_end = null;
-    // What this client hashes its state to for a given tick, or null in a local room, which
-    // has nobody to disagree with and checksums nothing (#41, #16). Set by the session,
-    // because the state being hashed is the simulation's and this layer sees none of it.
-    this.checksum = null;
+    // The simulation's half of the ring, or null in a local room, which has no late frames
+    // and nobody to disagree with, so it rewinds and checksums nothing (#16, #41, #141). Set
+    // by the session, because the state is the simulation's and this layer sees none of it:
+    // `save()` packs it, `load(saved)` puts one back, `hash(saved)` is what the relay
+    // compares, and `step()` steps a tick and says whether the match is still running.
+    this.history = null;
+    this.on_rewound = null;
 
     transport.receive(function (msg) {
         switch (msg.type) {
@@ -107,6 +120,8 @@ export function Room(transport, read_input) {
                 drivers_at = {};
                 last = [];
                 missed = [];
+                ring = [];
+                dirty = Infinity;
                 // With them, because it is per-match state exactly as they are. Two paths
                 // keep a `Room` alive across a `start` -- a client still on the match
                 // screen inside the two-second end-of-match freeze when the host starts the
@@ -182,12 +197,49 @@ export function Room(transport, read_input) {
                 if (self.on_match_end) self.on_match_end(msg);
                 break;
         }
+        if (dirty < tick && in_match) rewind();
     });
 
+    function entry(t) {
+        var at = ring[t % RING];
+        return at && at.t === t ? at : null;
+    }
+
+    function same(a, b) {
+        return !a.left === !b.left && !a.right === !b.right && !a.up === !b.up;
+    }
+
+    // Back to the earliest tick the relay corrected, and forward again to where this client
+    // was, muted and without reading or sending anything: every frame those ticks need is
+    // already in `input_at`. A match that ends earlier on the way stops there (#141).
+    function rewind() {
+        var at = entry(dirty);
+        var to = tick;
+        dirty = Infinity;
+        tick = at.t;
+        drivers = at.drivers.slice();
+        last = at.last.slice();
+        missed = at.missed.slice();
+        self.history.load(at.saved);
+        catching_up = true;
+        while (tick < to && self.history.step());
+        catching_up = false;
+        if (self.on_rewound) self.on_rewound();
+    }
+
+    // A frame for a tick already stepped is the relay's final word on it (#42): kept, and
+    // rewound to if it differs from what this client used. Not for a seat nobody was driving
+    // locally then, which that tick deleted anyway, and not for a tick past the ring (#141).
     function schedule_input(t, seats) {
         if (t > newest) newest = t;
+        var at = t < tick ? entry(t) : null;
+        if (t < tick && !at) return;
         var frames = (input_at[t] = input_at[t] || {});
-        for (var seat in seats) frames[seat] = seats[seat];
+        for (var seat in seats) {
+            frames[seat] = seats[seat];
+            if (at && seat in at.used && !same(at.used[seat], seats[seat]))
+                dirty = Math.min(dirty, t);
+        }
     }
 
     // A change stamped for a tick this client has already stepped is applied now rather than
@@ -203,10 +255,14 @@ export function Room(transport, read_input) {
     // two clients that passed the tick at different moments disagree for that window.
     // Discarding converges never. upgrade path: the resync payload, which carries the whole
     // table and is what the checksums already summon (#41).
+    //
+    // Inside the ring it is neither: stamped where it belongs and rewound to, like a frame
+    // (#141).
     function stamp_driver(change) {
         var t = change.t | 0;
-        if (t < tick) drivers[change.seat] = change.driver;
-        else (drivers_at[t] = drivers_at[t] || []).push(change);
+        if (t < tick && !entry(t)) return void (drivers[change.seat] = change.driver);
+        (drivers_at[t] = drivers_at[t] || []).push(change);
+        if (t < tick) dirty = Math.min(dirty, t);
     }
 
     this.start = function (config) {
@@ -305,6 +361,7 @@ export function Room(transport, read_input) {
     this.ai_seats = function () {
         var returning = [];
         Object.keys(drivers_at).forEach(function (t) {
+            if (t < tick) return;
             drivers_at[t].forEach(function (change) {
                 if (change.driver === "local") returning.push(change.seat);
             });
@@ -318,10 +375,33 @@ export function Room(transport, read_input) {
     // input frame for every seat it drives, and hand back the frames to simulate now. A
     // seat with no driver at all is one nobody is holding, which is the AI's (#7).
     this.step = function () {
+        // Kept for a second rather than deleted when used: a rewind steps them again (#141).
+        delete input_at[tick - RING];
+        delete drivers_at[tick - RING];
+        var at = null;
+        if (self.history) {
+            // The tick falling out of the ring is the newest one no late frame can change,
+            // so it is the one this client vouches for: its hash for the tick goes to the
+            // relay now, a second late, and never a guess (#41, #141).
+            var settled = entry(tick - RING);
+            if (settled && !catching_up && settled.t % CHECKSUM_TICKS === 0)
+                transport.send({
+                    type: "checksum",
+                    match: self.match,
+                    t: settled.t,
+                    h: self.history.hash(settled.saved),
+                });
+            at = ring[tick % RING] = {
+                t: tick,
+                saved: self.history.save(),
+                drivers: drivers.slice(),
+                last: last.slice(),
+                missed: missed.slice(),
+            };
+        }
         (drivers_at[tick] || []).forEach(function (change) {
             drivers[change.seat] = change.driver;
         });
-        delete drivers_at[tick];
 
         if (!catching_up) {
             var seats = {};
@@ -333,22 +413,10 @@ export function Room(transport, read_input) {
             // client schedules its own (#12, #6, #142).
             schedule_input(tick + self.d, seats);
             transport.send({ type: "input", match: self.match, t: tick + self.d, seats: seats });
-            // On the same tick on every client, and from the same point in it: the state
-            // hashed here is every tick before this one applied and none of this one, which
-            // is a state each client reaches in its own time and all of them agree on. Not
-            // while replaying a gap, for the reason no frame is sent there -- those ticks
-            // are history, and the host hashed them seconds ago (#41).
-            if (self.checksum && tick % CHECKSUM_TICKS === 0)
-                transport.send({
-                    type: "checksum",
-                    match: self.match,
-                    t: tick,
-                    h: self.checksum(tick),
-                });
         }
 
-        var frames = input_at[tick] || {};
-        delete input_at[tick];
+        // A copy: the guesses below are this tick's, and a rewind has to make them again.
+        var frames = Object.assign({}, input_at[tick]);
         // A seat somebody drives but no frame arrived for is all keys released, never the
         // AI -- a missing frame is a missing frame (#6). The first d ticks of every match
         // are exactly this, since the earliest frame anyone stamps is for tick d.
@@ -385,7 +453,20 @@ export function Room(transport, read_input) {
             if (held.indexOf(seat) >= 0) stats.holes++;
             else stats.substituted++;
         });
+        if (at) at.used = frames;
         tick++;
         return frames;
+    };
+
+    // The oldest tick in the ring, which is the newest one settled: what the host packs for
+    // the relay, so a joiner and a repair start from a state no late frame will change
+    // (#40, #141). Null in the first second, or in a local room.
+    this.settled = function () {
+        return entry(tick - RING);
+    };
+
+    // Replaying ticks rather than playing them: a catch-up or a rewind, both muted (#28).
+    this.replaying = function () {
+        return catching_up;
     };
 }

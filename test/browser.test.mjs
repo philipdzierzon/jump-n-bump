@@ -38,6 +38,7 @@ import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { generate_room_id } from "../src/net/room_id.js";
 import { FLOW_TEXT } from "../src/interaction/router.js";
 import { SNAPSHOT_INTS, decode_snapshot, encode_snapshot } from "../src/game/snapshot.js";
+import { lossy_proxy } from "./lossy_proxy.mjs";
 
 // Boots its own server unless CI handed us one, exactly as `server/smoke.mjs` does. Every
 // page and every relay client here is one address, holding more than three rooms at once:
@@ -75,6 +76,7 @@ const room_r = new_room_id();
 const room_s = new_room_id();
 const room_t = new_room_id();
 const room_u = new_room_id();
+const room_v = new_room_id();
 
 // No launch flags: Chromium needs no `--no-sandbox` here, and headless Chrome autoplays
 // without being asked to, so a flag would only move the test further from a real browser.
@@ -2443,16 +2445,16 @@ async function rejoin_fails() {
 async function late_resume() {
     const host = await (await make_context("late-host")).newPage();
     const guest_context = await make_context("late-guest");
+    // Lies until the repair is seen rather than once: a client hashes the tick leaving its
+    // one-second ring (#141), and the relay ignores a joiner's hashes up to the tick it was
+    // resumed on, so the first few after the join are nobody's reference (#41).
     await guest_context.addInitScript(() => {
         window.__lie = false;
         const send = WebSocket.prototype.send;
         WebSocket.prototype.send = function (data) {
             if (window.__lie && typeof data === "string" && data.includes('"checksum"')) {
                 const msg = JSON.parse(data);
-                if (msg.type === "checksum") {
-                    window.__lie = false;
-                    data = JSON.stringify({ ...msg, h: (msg.h ^ 1) | 0 });
-                }
+                if (msg.type === "checksum") data = JSON.stringify({ ...msg, h: (msg.h ^ 1) | 0 });
             }
             return send.call(this, data);
         };
@@ -2545,6 +2547,7 @@ async function late_resume() {
     hold = true;
     await guest.evaluate(() => (window.__lie = true));
     await until("the relay's repair, held at the socket", () => held !== null);
+    await guest.evaluate(() => (window.__lie = false));
 
     await click("Back to the lobby", host);
     await on("room", host);
@@ -2608,6 +2611,83 @@ async function late_resume() {
     );
 
     assert.deepEqual(errors, [], "with nothing thrown on either page");
+}
+
+// A key changed inside a stall on the wire (#141). The guest reaches the relay through a
+// lossy proxy whose uplink is held for 400 ms, and the guest lets go of right and presses
+// left as it starts: the relay covers those ticks with its own guess and the guest has
+// already stepped them on its real keys. Before #141 that was a desync and a repair; now the
+// relay's frame reaches the guest a moment later and it rewinds to it. Read off the wire,
+// both pages' hashes and whether any `start` carrying a state came down, so it holds against
+// CI's container as well.
+async function stall_changes_a_key() {
+    const link = await lossy_proxy(Number(new URL(origin).port) || 80, { one_way: 20 });
+    const host = await (await make_context("stall-host")).newPage();
+    const guest = await (await make_context("stall-guest")).newPage();
+    // The host proposes the seed from `Date.now()`, and where the guest's bunny spawns -- in
+    // the open or already against a wall, where left and right do the same -- is the seed's
+    // business. Pinned, with the timers left running.
+    await host.clock.setFixedTime(1790000000000);
+    const errors = [];
+    host.on("pageerror", (error) => errors.push("host: " + error.message));
+    guest.on("pageerror", (error) => errors.push("guest: " + error.message));
+    const host_hashes = record_checksums(host);
+    const guest_hashes = record_checksums(guest);
+    let repairs = 0;
+    for (const side of [host, guest])
+        side.on("websocket", (ws) =>
+            ws.on("framereceived", ({ payload }) => {
+                const text = String(payload);
+                if (text.startsWith('{"type":"start"') && text.includes('"snapshot"')) repairs++;
+            }),
+        );
+
+    await host.goto(origin + "/");
+    await click("Create a room", host);
+    await on("create", host);
+    await screen("create", host).locator("input.code").fill(room_v);
+    await click("Create", host);
+    await on("names", host);
+    await host.keyboard.press("ArrowUp");
+    await until("the host's participant", async () => (await seats(host).count()) === 1);
+    await click("Take the seats", host);
+    await on("room", host);
+
+    await guest.goto("http://127.0.0.1:" + link.port + "/#" + room_v);
+    await on("names", guest);
+    await guest.keyboard.press("ArrowUp");
+    await until("the guest's participant", async () => (await seats(guest).count()) === 1);
+    await seats(guest).nth(0).locator("input").fill("Zip");
+    await seats(guest).nth(0).locator("input").blur();
+    await click("Take the seats", guest);
+    await on("room", guest);
+    await click("Start the match", host);
+    await click("Ready", guest);
+    await on("play", host);
+    await on("play", guest);
+
+    await guest.keyboard.down("ArrowRight");
+    await guest.waitForTimeout(500);
+    const before = paired(host_hashes, guest_hashes).length;
+    // Under the thirty missing ticks that hand a seat to the AI, and over PREDICT_TICKS, so
+    // the relay's guess runs out inside it as well.
+    link.stall("up", 400);
+    await guest.keyboard.up("ArrowRight");
+    await guest.keyboard.down("ArrowLeft");
+    await guest.waitForTimeout(500);
+    await guest.keyboard.up("ArrowLeft");
+    // Three seconds of hashes past the stall, a second of which is the ring's own lag.
+    await until(
+        "six ticks both pages hashed after the stall",
+        () => paired(host_hashes, guest_hashes).length >= before + 6,
+    );
+    assert.deepEqual(
+        [disagreements(host_hashes, guest_hashes, 1), repairs],
+        [[], 0],
+        "a key changed inside a stall is rewound to on the page that pressed it, not repaired (#141)",
+    );
+    assert.deepEqual(errors, [], "with nothing thrown on either page");
+    await link.close();
 }
 
 // The other route into #124, and the other ordering. Here the `resume` arrives *before* the
@@ -4217,6 +4297,7 @@ try {
     await error_dies_with_its_match();
     await late_resume();
     await late_resume_from_the_lobby();
+    await stall_changes_a_key();
     await phone();
     await keyboard_only();
     await connecting_keeps_focus();
