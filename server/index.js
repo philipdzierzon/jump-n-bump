@@ -1359,6 +1359,10 @@ function relay(client, msg) {
             // repaired over a real link lands a round trip behind the room and never catches
             // up, so every frame it sends is late; that lateness is #142's, and this only
             // stops it costing the player the seat thirty ticks later (#140).
+            //
+            // ponytail: a client stuck behind the room keeps its seat for the rest of the match
+            // and its bunny plays released keys, where the AI used to move it. upgrade path:
+            // #142 puts the client back on time; then decide whether late still means alive.
             if (msg.t < room.due) {
                 for (const seat of client.seats) room.missing[seat] = 0;
                 return void room.late++;
