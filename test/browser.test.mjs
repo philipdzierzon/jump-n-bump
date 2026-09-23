@@ -1973,11 +1973,20 @@ async function browse() {
     const browse_page = await (await make_context("browse")).newPage();
     const errors = [];
     browse_page.on("pageerror", (error) => errors.push(error.message));
-    // This walk's own room, by its code: an earlier walk's room is still up and still
-    // listed, which is the list working rather than a row to count around.
+    // This walk's own room, by its code, beside a second listed room of its own -- the
+    // earlier walks close theirs now, so the neighbour is made here rather than borrowed.
     const rows = () => screen("browse", browse_page).locator("li").filter({ hasText: room_g });
     const message = () => err_on("browse", browse_page);
 
+    const neighbour_seen = [];
+    const neighbour = relay_client(
+        { type: "create", id: new_room_id(), listed: true },
+        neighbour_seen,
+    );
+    await until("a second listed room", async () =>
+        neighbour_seen.some((msg) => msg.type === "joined"),
+    );
+    neighbour.send({ type: "seats", names: ["Neighbour"] });
     const seen = [];
     const doomed = relay_client({ type: "create", id: room_g, listed: true }, seen);
     await until("a listed room", async () => seen.some((msg) => msg.type === "joined"));
@@ -1992,7 +2001,7 @@ async function browse() {
     await until("the listed room in the list", async () => (await rows().count()) === 1);
     assert.ok(
         (await screen("browse", browse_page).locator("li").count()) > 1,
-        "and it is listed alongside the room the walk before this one left up",
+        "and it is listed alongside the other room up",
     );
 
     // A room dies with its last client, so the row on screen is now a row for a room that
@@ -4273,34 +4282,46 @@ async function connecting_keeps_focus() {
 
 // --- run -------------------------------------------------------------------------------
 
+// Each walk's contexts are closed once it passes. Left open, every match an earlier walk
+// started goes on pumping at 60 Hz under a tracer taking screenshots, and on a two-CPU CI
+// runner the pile starved the whole browser by `late_resume`: a click that never landed and
+// pages that answered nothing. Alone, the same walk passes in seconds. A failing walk's
+// contexts are still open for the dump and the traces below.
+const walks = [
+    walk,
+    self_ending_match,
+    new_match_outranks_the_hold,
+    two_pages,
+    reconnect,
+    reconnect_gives_up,
+    history_host_back,
+    history_reload_in_match,
+    history_link_while_seated,
+    reload_into_a_dead_room,
+    reload_into_a_locked_room,
+    sound,
+    sound_outlives_the_room,
+    browse,
+    queueing,
+    waitlisted_seat,
+    double_click_create,
+    superseded_create_closes,
+    rejoin_fails,
+    error_dies_with_its_route,
+    error_dies_with_its_match,
+    late_resume,
+    late_resume_from_the_lobby,
+    stall_changes_a_key,
+    phone,
+    keyboard_only,
+    connecting_keeps_focus,
+];
 try {
-    await walk();
-    await self_ending_match();
-    await new_match_outranks_the_hold();
-    await two_pages();
-    await reconnect();
-    await reconnect_gives_up();
-    await history_host_back();
-    await history_reload_in_match();
-    await history_link_while_seated();
-    await reload_into_a_dead_room();
-    await reload_into_a_locked_room();
-    await sound();
-    await sound_outlives_the_room();
-    await browse();
-    await queueing();
-    await waitlisted_seat();
-    await double_click_create();
-    await superseded_create_closes();
-    await rejoin_fails();
-    await error_dies_with_its_route();
-    await error_dies_with_its_match();
-    await late_resume();
-    await late_resume_from_the_lobby();
-    await stall_changes_a_key();
-    await phone();
-    await keyboard_only();
-    await connecting_keeps_focus();
+    for (const run of walks) {
+        const opened = contexts.length;
+        await run();
+        for (const [, made] of contexts.splice(opened)) await made.close();
+    }
     console.log(
         "OK the kiosk flow renders, the couch fills from the keyboard and the relay seats it; " +
             "two pages agree on one room, the mp3s really play, and the page fits a phone",
@@ -4340,10 +4361,8 @@ try {
             })),
             null,
         );
-    // The newest pages still open, which is where the failure is: only three of the
-    // nineteen sections close their pages when they pass, so by the end of a run nearly
-    // every page ever opened is still there and the failing one is the *last* of them.
-    // Three deep, because the widest thing asserted across pages is #113's host-against-
+    // The newest pages still open, which is where the failure is: a walk that passes closes
+    // its contexts, so what is left is the flow page and the failing walk's own. Three deep, because the widest thing asserted across pages is #113's host-against-
     // guest comparison and the flow page behind it. The flow page alone used to be the
     // whole dump, so that comparison failing printed a third page's screen and routes
     // (#126).
