@@ -676,10 +676,17 @@ assert.ok(snap_start, "the host starts the match it will be the reference state 
 const matrix = new Array(16).fill(0);
 // A frame the snapshot already accounts for, then the snapshot, then two it does not: the
 // ring is the gap between that state and now, so the first one is dropped by the second.
+// The frame at 2 is what puts the room's clock at 3, so a snapshot on tick 3 is not ahead of it.
 snap_host.socket.send({ type: "input", match: 1, t: 1, seats: { 0: pressed } });
+snap_host.socket.send({ type: "input", match: 1, t: 2, seats: {} });
 snap_host.socket.send({ type: "snapshot", match: 1, t: 3, matrix, body: "SNAPSHOT-BODY" });
 snap_host.socket.send({ type: "input", match: 1, t: 5, seats: { 0: pressed } });
 snap_host.socket.send({ type: "input", match: 1, t: 6, seats: { 0: pressed } });
+// A snapshot past the room's own tick is not one the host can have taken: its frames run a
+// delay ahead of its simulation, so the relay's clock is always past the tick it snapshots.
+// Kept, it would be the floor `prune` cuts the ring to, emptying it and pushing every later
+// resume past the catch-up ceiling (#155). One tick past is the boundary; 1e9 is the attack.
+snap_host.socket.send({ type: "snapshot", match: 1, t: 8, matrix, body: "FROM-THE-FUTURE" });
 await new Promise((resolve) => setTimeout(resolve, 100));
 
 const late_joiner = connect({ type: "join", id: "SNAPX" });

@@ -898,6 +898,11 @@ function keep_snapshot(client, msg) {
     // in `input`, with that case's ceiling for a page too old to stamp one.
     if (!client.host || !room.started || msg.match !== room.match) return;
     if (!Number.isInteger(msg.t) || msg.t < 0) return;
+    // Nor one from past the room's clock: the host's frames are stamped a delay (at least
+    // 2) ahead of the tick it is on, so `room.tick` is always past any tick it has reached.
+    // A later one would be `prune`'s floor, emptying the ring and pushing every resume past
+    // the catch-up ceiling for the rest of the match (#155).
+    if (msg.t > room.tick) return;
     if (typeof msg.body !== "string" || !msg.body.length || msg.body.length > MAX_SNAPSHOT) return;
     const matrix = msg.matrix;
     if (!Array.isArray(matrix) || matrix.length !== SEATS * SEATS) return;
