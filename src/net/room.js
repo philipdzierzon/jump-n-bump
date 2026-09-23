@@ -319,7 +319,12 @@ export function Room(transport, read_input) {
             // while replaying a gap, for the reason no frame is sent there -- those ticks
             // are history, and the host hashed them seconds ago (#41).
             if (self.checksum && tick % CHECKSUM_TICKS === 0)
-                transport.send({ type: "checksum", t: tick, h: self.checksum(tick) });
+                transport.send({
+                    type: "checksum",
+                    match: self.match,
+                    t: tick,
+                    h: self.checksum(tick),
+                });
         }
 
         var frames = input_at[tick] || {};

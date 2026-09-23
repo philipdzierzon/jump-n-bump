@@ -783,8 +783,8 @@ assert.equal(
 const said = [];
 const spoke = console.log;
 console.log = (...args) => said.push(format(...args));
-early_host.socket.send({ type: "checksum", t: 30, h: 111 });
-early_guest.socket.send({ type: "checksum", t: 30, h: 222 });
+early_host.socket.send({ type: "checksum", match: 1, t: 30, h: 111 });
+early_guest.socket.send({ type: "checksum", match: 1, t: 30, h: 222 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 console.log = spoke;
 assert.ok(
@@ -922,10 +922,10 @@ assert.ok(
 // without the guard the sixth would end the match instead of the ceiling refusing all six.
 process.env.REPAIR_COOLDOWN_MS = "60";
 process.env.REPAIR_RESET_MS = "10000";
-thr_host.socket.send({ type: "checksum", t: MAX_CATCH_UP + 1, h: 111 });
+thr_host.socket.send({ type: "checksum", match: 1, t: MAX_CATCH_UP + 1, h: 111 });
 for (let round = 0; round < 6; round++) {
     await new Promise((resolve) => setTimeout(resolve, 90));
-    thr_guest.socket.send({ type: "checksum", t: MAX_CATCH_UP + 1, h: 222 });
+    thr_guest.socket.send({ type: "checksum", match: 1, t: MAX_CATCH_UP + 1, h: 222 });
 }
 // The last round needs the same settling time as the five before it: sent, not yet answered.
 await new Promise((resolve) => setTimeout(resolve, 90));
@@ -1003,10 +1003,10 @@ assert.ok(
 // explains a refusal rather than riding along with the other guard.
 process.env.REPAIR_COOLDOWN_MS = "60";
 process.env.REPAIR_RESET_MS = "10000";
-flood_host.socket.send({ type: "checksum", t: 201, h: 111 });
+flood_host.socket.send({ type: "checksum", match: 1, t: 201, h: 111 });
 for (let round = 0; round < 6; round++) {
     await new Promise((resolve) => setTimeout(resolve, 90));
-    flood_guest.socket.send({ type: "checksum", t: 201, h: 222 });
+    flood_guest.socket.send({ type: "checksum", match: 1, t: 201, h: 222 });
 }
 await new Promise((resolve) => setTimeout(resolve, 90));
 assert.ok(
@@ -1035,8 +1035,8 @@ await chk_guest.seats(["Guest"]);
 const chk_saw = [];
 chk_guest.socket.receive((msg) => chk_saw.push(msg));
 
-chk_host.socket.send({ type: "checksum", t: 30, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 30, h: 111 });
+chk_host.socket.send({ type: "checksum", match: 1, t: 30, h: 111 });
+chk_guest.socket.send({ type: "checksum", match: 1, t: 30, h: 111 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
     chk_saw.find((msg) => msg.type === "start"),
@@ -1046,8 +1046,9 @@ assert.equal(
 
 // Eight of the host's are kept, which at one every 30 ticks is four seconds -- long enough
 // for a client's hash for the same tick to arrive either side of it, and no longer.
-for (let t = 180; t <= 180 + 7 * 30; t += 30) chk_host.socket.send({ type: "checksum", t, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 30, h: 999 });
+for (let t = 180; t <= 180 + 7 * 30; t += 30)
+    chk_host.socket.send({ type: "checksum", match: 1, t, h: 111 });
+chk_guest.socket.send({ type: "checksum", match: 1, t: 30, h: 999 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
     chk_saw.find((msg) => msg.type === "start"),
@@ -1070,8 +1071,8 @@ const recovered = () => new Promise((resolve) => setTimeout(resolve, 500));
 // same payload a mid-match joiner gets. The frame is what puts a tick on the room, which is
 // the tick the repair below is measured from.
 chk_host.socket.send({ type: "input", match: 1, t: 500, seats: {} });
-chk_host.socket.send({ type: "checksum", t: 600, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 600, h: 222 });
+chk_host.socket.send({ type: "checksum", match: 1, t: 600, h: 111 });
+chk_guest.socket.send({ type: "checksum", match: 1, t: 600, h: 222 });
 const repaired = await awaited(chk_saw, "start");
 assert.equal(repaired.snapshot, "REFERENCE-BODY", "a mismatch is answered with the host's state");
 assert.equal(repaired.t, 0, "on the tick the host took it, which is the resync path exactly");
@@ -1079,8 +1080,8 @@ assert.equal(repaired.t, 0, "on the tick the host took it, which is the resync p
 // Thirty ticks later and still wrong: the repair has had no fresh snapshot to have worked
 // from, so this is the same unrepaired desync rather than a second one to be spent.
 chk_saw.length = 0;
-chk_host.socket.send({ type: "checksum", t: 610, h: 111 });
-chk_guest.socket.send({ type: "checksum", t: 610, h: 222 });
+chk_host.socket.send({ type: "checksum", match: 1, t: 610, h: 111 });
+chk_guest.socket.send({ type: "checksum", match: 1, t: 610, h: 222 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
     chk_saw.find((msg) => msg.type === "start"),
@@ -1091,8 +1092,8 @@ assert.equal(
 // A hash the client had already sent when the repair was decided on: it belongs to the
 // state being replaced, and counting it would spend a repair on the desync being repaired.
 chk_saw.length = 0;
-chk_guest.socket.send({ type: "checksum", t: 450, h: 222 });
-chk_host.socket.send({ type: "checksum", t: 450, h: 111 });
+chk_guest.socket.send({ type: "checksum", match: 1, t: 450, h: 222 });
+chk_host.socket.send({ type: "checksum", match: 1, t: 450, h: 111 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
     chk_saw.find((msg) => msg.type === "start"),
@@ -1106,11 +1107,11 @@ for (const t of [630, 660, 690]) {
     await cooled();
     chk_saw.length = 0;
     if (t === 660) {
-        chk_guest.socket.send({ type: "checksum", t, h: 222 });
-        chk_host.socket.send({ type: "checksum", t, h: 111 });
+        chk_guest.socket.send({ type: "checksum", match: 1, t, h: 222 });
+        chk_host.socket.send({ type: "checksum", match: 1, t, h: 111 });
     } else {
-        chk_host.socket.send({ type: "checksum", t, h: 111 });
-        chk_guest.socket.send({ type: "checksum", t, h: 222 });
+        chk_host.socket.send({ type: "checksum", match: 1, t, h: 111 });
+        chk_guest.socket.send({ type: "checksum", match: 1, t, h: 222 });
     }
     assert.ok(await awaited(chk_saw, "start"), "repaired again rather than given up on");
 }
@@ -1136,8 +1137,8 @@ chk_back.socket.receive((msg) => back_saw.push(msg));
 // last of the allowance and not a fresh first.
 await cooled();
 back_saw.length = 0;
-chk_host.socket.send({ type: "checksum", t: 720, h: 111 });
-chk_back.socket.send({ type: "checksum", t: 720, h: 222 });
+chk_host.socket.send({ type: "checksum", match: 1, t: 720, h: 111 });
+chk_back.socket.send({ type: "checksum", match: 1, t: 720, h: 222 });
 assert.ok(
     await awaited(back_saw, "start"),
     "repaired again rather than given up on, reload included",
@@ -1151,8 +1152,8 @@ back_saw.length = 0;
 // Drained, so the room update awaited below is the one the drop broadcast and not an older
 // one still in the queue from the seat being taken.
 chk_back.events.length = 0;
-chk_host.socket.send({ type: "checksum", t: 750, h: 111 });
-chk_back.socket.send({ type: "checksum", t: 750, h: 222 });
+chk_host.socket.send({ type: "checksum", match: 1, t: 750, h: 111 });
+chk_back.socket.send({ type: "checksum", match: 1, t: 750, h: 222 });
 const dropped = await awaited(back_saw, "match_end");
 assert.equal(dropped.reason, "desync", "the match ends for that client, and says why");
 assert.equal(
@@ -1174,8 +1175,8 @@ assert.equal(
 back_saw.length = 0;
 chk_back.socket.send({ type: "resync" });
 await cooled();
-chk_host.socket.send({ type: "checksum", t: 780, h: 111 });
-chk_back.socket.send({ type: "checksum", t: 780, h: 222 });
+chk_host.socket.send({ type: "checksum", match: 1, t: 780, h: 111 });
+chk_back.socket.send({ type: "checksum", match: 1, t: 780, h: 222 });
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
     back_saw.find((msg) => msg.type === "start"),
@@ -1222,8 +1223,8 @@ reset_guest.socket.receive((msg) => reset_saw.push(msg));
 for (const t of [30, 60, 90]) {
     await cooled();
     reset_saw.length = 0;
-    reset_host.socket.send({ type: "checksum", t, h: 111 });
-    reset_guest.socket.send({ type: "checksum", t, h: 222 });
+    reset_host.socket.send({ type: "checksum", match: 1, t, h: 111 });
+    reset_guest.socket.send({ type: "checksum", match: 1, t, h: 222 });
     assert.ok(await awaited(reset_saw, "start"), "repaired, three of five");
 }
 
@@ -1235,8 +1236,8 @@ await recovered();
 for (const t of [300, 330, 360, 390, 420]) {
     await cooled();
     reset_saw.length = 0;
-    reset_host.socket.send({ type: "checksum", t, h: 111 });
-    reset_guest.socket.send({ type: "checksum", t, h: 222 });
+    reset_host.socket.send({ type: "checksum", match: 1, t, h: 111 });
+    reset_guest.socket.send({ type: "checksum", match: 1, t, h: 222 });
     assert.ok(await awaited(reset_saw, "start"), "a run after a quiet stretch starts at one");
     assert.equal(
         reset_saw.find((msg) => msg.type === "match_end"),
@@ -1260,8 +1261,8 @@ await early_chk.seats(["Early"]);
 const early_chk_saw = [];
 early_chk.socket.receive((msg) => early_chk_saw.push(msg));
 for (const t of [30, 60, 90, 120]) {
-    early_chk_host.socket.send({ type: "checksum", t, h: 111 });
-    early_chk.socket.send({ type: "checksum", t, h: 222 });
+    early_chk_host.socket.send({ type: "checksum", match: 1, t, h: 111 });
+    early_chk.socket.send({ type: "checksum", match: 1, t, h: 222 });
 }
 await new Promise((resolve) => setTimeout(resolve, 100));
 assert.equal(
@@ -1791,6 +1792,49 @@ assert.deepEqual(
     { t: relit_frame.t, seats: relit_frame.seats },
     { t: 0, seats: { 1: pressed_key } },
     "the room's clock stayed at the new match's tick 0, so a frame for it is not already late",
+);
+// The same hole one message over (#132): `begin` clears `pending` and `checksums` and zeroes
+// `resync_t`, so a match-1 hash landing after it is nothing any of those can tell apart from
+// one of match 2's. Match 2 has no snapshot yet, so every desync below takes the
+// `unrepairable` branch -- a line in the log, and nothing else that could move under the
+// next case.
+// One hash at a time, each given time to land: two sockets have no order between them, and
+// which of a pair arrives first is the whole difference between the cases below.
+const hash_log = async (...sends) => {
+    const said = [];
+    const spoke = console.log;
+    console.log = (...args) => said.push(format(...args));
+    for (const [who, match, t, h] of sends) {
+        relit[who].socket.send({ type: "checksum", match, t, h });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    console.log = spoke;
+    return said.filter((line) => / desync /.test(line));
+};
+assert.deepEqual(
+    await hash_log(["guest", 1, 2700, 222], ["host", 2, 2700, 111]),
+    [],
+    "a client's hash stamped in the match that ended is not held against this match's",
+);
+// The mirror, and both ways round, since a host hash is the reference every client is judged
+// by: one already waiting for it, and one arriving after it.
+assert.deepEqual(
+    await hash_log(["guest", 2, 2730, 222], ["host", 1, 2730, 111]),
+    [],
+    "a host hash stamped in the match that ended does not answer a client's waiting one",
+);
+assert.deepEqual(
+    await hash_log(["host", 1, 2760, 111], ["guest", 2, 2760, 222]),
+    [],
+    "a host hash stamped in the match that ended is not kept as the reference for the next one",
+);
+// And the control that makes the three above mean something: the same two sockets, the same
+// match, the same no-snapshot branch, hashes that disagree -- and the line is there.
+const same_match = await hash_log(["host", 2, 2790, 111], ["guest", 2, 2790, 222]);
+assert.equal(
+    same_match.length,
+    1,
+    "a disagreement within this match is still a desync -- said instead: " + same_match.join(" | "),
 );
 // Counted where it was refused, and said in the line the match it landed in ends on: the
 // stale frame arrives after `begin`, so it is match 2 that saw it (#118, #126).
