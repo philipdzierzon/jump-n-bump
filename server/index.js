@@ -70,8 +70,9 @@ const repair_reset_ms = () => Number(process.env.REPAIR_RESET_MS || 30000);
 const MAX_REPAIRS = 5;
 // How many rooms the relay holds at once, and how many of them one limiter key may have
 // open. Creation is capped by concurrency rather than rate, so a slot frees itself the
-// moment `leave` deletes the room; a join is never refused by either (#47, #157). Both read
-// per create, so a test can move them without a second knob.
+// moment `leave` deletes the room; a join is never refused by either (#47, #157). Both are
+// env knobs, and they exist for the tests: every client in a suite comes from one address,
+// so the suites lift ROOMS_PER_KEY and the relay test lowers MAX_ROOMS. Read per create.
 // ponytail: 200 rooms x 208 kbit/s is 50 Mbit/s of a 500 Mbit uplink, but egress scales
 // with clients, not rooms: a full four-seat room plus spectators costs more than 208.
 // upgrade path: cap clients if egress is ever the thing that runs out.
@@ -123,7 +124,20 @@ const token_of = (msg) => {
 // Who a request is, for every limit: the address Cloudflare saw, or the socket's own when
 // there is no tunnel in front (a local run, a test). Trusted only because the tunnel is the
 // only way in; `X-Forwarded-For` is never read, since any client can write one (#47).
-const key_of = (req) => req.headers["cf-connecting-ip"] || req.socket.remoteAddress;
+// An IPv4-mapped address is its IPv4, and an IPv6 one is its /64: one home line is handed a
+// whole /64, and keying on the full address would let it mint a key per room (#157).
+function key_of(req) {
+    const ip = String(req.headers["cf-connecting-ip"] || req.socket.remoteAddress);
+    const v4 = ip.replace(/^::ffff:(?=[\d.]+$)/i, "");
+    if (!v4.includes(":")) return v4;
+    const [head, tail] = ip.split("::");
+    const left = head ? head.split(":") : [];
+    const right = tail ? tail.split(":") : [];
+    // Clamped, because this is a header: a malformed one must not throw in the handshake.
+    const fill = Array(Math.max(0, 8 - left.length - right.length)).fill("0");
+    const groups = [...left, ...fill, ...right].slice(0, 4);
+    return groups.map((group) => parseInt(group, 16).toString(16)).join(":") + "::/64";
+}
 
 function create(client, msg) {
     // A room keeps the key that opened it until it ends, host migration or not.

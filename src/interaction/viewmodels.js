@@ -963,7 +963,9 @@ function ViewModel() {
                             "already open.",
                     );
                 } else if (code === "TOO_MANY_ROOMS") {
-                    self.error("You already have 3 rooms open. Close one to open another.");
+                    self.error(
+                        "Too many rooms are open from your network. Try again when one ends.",
+                    );
                 } else if (entry.type === "create") {
                     self.error(code === "ID_TAKEN" ? "That code is taken." : CODE_HINT);
                 } else if (self.screen() === "room" || self.screen() === "play") {

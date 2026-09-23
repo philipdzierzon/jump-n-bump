@@ -2507,6 +2507,21 @@ assert.equal((await neighbour.answer).type, "joined", "another key is not refuse
 await gone(mine[0]);
 const again = from("10.0.0.1", { type: "create" });
 assert.equal((await again.answer).type, "joined", "a room that ends frees its slot");
+// An IPv6 key is the /64 a home line is handed, however the address is written, and an
+// IPv4-mapped one is its IPv4: neither mints a fresh key per room.
+const same_line = ["2001:db8:1:2::a", "2001:DB8:1:2:ffff::b", "2001:0db8:0001:0002:1:2:3:4"];
+const line = same_line.map((ip) => from(ip, { type: "create" }));
+for (const room of line) assert.equal((await room.answer).type, "joined", "three from one /64");
+const line_fourth = from("2001:db8:1:2::c", { type: "create" });
+assert.equal(
+    (await line_fourth.answer).code,
+    "TOO_MANY_ROOMS",
+    "and a fourth address in it shares the cap",
+);
+const next_line = from("2001:db8:1:3::a", { type: "create" });
+assert.equal((await next_line.answer).type, "joined", "the next /64 is another key");
+const mapped = from("::ffff:10.0.0.1", { type: "create" });
+assert.equal((await mapped.answer).code, "TOO_MANY_ROOMS", "an IPv4-mapped address is its IPv4");
 // Without the header the key is the socket's own address, which is where this suite's
 // clients come from.
 process.env.ROOMS_PER_KEY = "1";
@@ -2528,6 +2543,7 @@ const joiner = from("10.0.0.3", { type: "join", id: bare_joined.id });
 assert.equal((await joiner.answer).type, "joined", "while a join still works");
 delete process.env.MAX_ROOMS;
 for (const client of [...mine, fourth, neighbour, again, bare, bare_second]) client.socket.close();
+for (const client of [...line, line_fourth, next_line, mapped]) client.socket.close();
 for (const client of [refused_room, refused_quick, joiner]) client.socket.close();
 
 // Sixty HTTP requests a minute per key, on whatever static and the room list do not answer.
