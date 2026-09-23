@@ -85,10 +85,6 @@ GitHub Issues on `philipdzierzon/jump-n-bump`, driven through the `gh` CLI. See 
 
 The five canonical roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
 
-### Domain docs
-
-Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
-
 ### Coding standards
 
 Prefer the laziest solution that works: standard library before custom code, native
