@@ -144,7 +144,9 @@
     <div data-bind="visible: screen() === 'play'" class="canvas-container">
         <canvas id="screen" width="1200" height="768"></canvas>
         <div data-bind="text: connection_text" class="reconnecting" role="status"></div>
-        <button class="sm ai-seat" data-bind="visible: ai_text, text: ai_text, click: rejoin_match"></button>
+        <div class="ai-seat" role="status">
+            <button class="sm" data-bind="visible: ai_text, text: ai_text, click: rejoin_match"></button>
+        </div>
         <div data-bind="visible: board_up" class="overlay kiosk wide">
             <div class="eyebrow">scores</div>
             <!-- ko template: { name: 'board-template', data: scores_viewmodel } --><!-- /ko -->

@@ -235,7 +235,12 @@ function ViewModel() {
         var lost = game.ai_seats().map(function (seat) {
             return self.seat_names()[seat];
         });
-        return lost.length ? "The AI is driving " + lost.join(" and ") + ". Take it back" : "";
+        if (!lost.length) return "";
+        return (
+            "The AI is driving " +
+            lost.join(" and ") +
+            (lost.length > 1 ? ". Take them back" : ". Take it back")
+        );
     });
 
     // Derived from the relay's deadline and this client's clock, never from a count of

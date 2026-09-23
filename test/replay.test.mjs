@@ -545,6 +545,26 @@ assert.deepEqual(
     "and replayed through catch_up, the ring's stale frame is dropped there too (#110)",
 );
 
+// A resume lands with the table as of its snapshot and the `local` that hands the seats back
+// stamped 2d ticks ahead: for those ticks the seat is the AI's in the table, but already on
+// its way back, and a line saying so would flash up after the press that fixed it (review:
+// #76). A seat with nothing pending is still named.
+const returning = new Room(
+    handover_transport({
+        held: [1, 2],
+        drivers: ["local", "ai", "ai", "ai"],
+        changes: [{ t: 2, seat: 1, driver: "local" }],
+        inputs: [],
+    }),
+    no_keys,
+);
+returning.start({ seed: 1, settings: {}, held: [1, 2] });
+assert.deepEqual(returning.ai_seats(), [2], "a seat on its way back is not the AI's to say (#76)");
+returning.step();
+returning.step();
+returning.step();
+assert.deepEqual(returning.ai_seats(), [2], "and once it is back, still only the other (#76)");
+
 // What discriminates "local at the tick it was stamped for" from "local at the tick it is
 // consumed" -- the wrong invariant and the right one -- is a window shorter than d: seat 1
 // goes local -> ai at t=2 and back ai -> local at t=4, so the frame this client scheduled

@@ -2890,7 +2890,20 @@ async function reconnect() {
     // #76: the relay hands a stalled client's seats to the AI and says so only in the
     // driver table. The page stops sending frames, and the host sends one far enough ahead
     // that the relay counts more than thirty missing ticks for both of the page's seats.
-    const ai_seat = dropped.locator(".ai-seat");
+    const ai_seat = dropped.locator(".ai-seat button");
+    // The page's own frames carry its seats only once it drives them again, so one that does
+    // is the page past the tick the resume stamped `local` for; one sample later the line has
+    // had its chance to show. Whether it flashes in the 2d ticks before is `replay.test.mjs`'s
+    // to prove: at d = 2 that window is shorter than the 250 ms sample (review: #76).
+    const driving_again = (from) =>
+        host_saw
+            .slice(from)
+            .some((msg) => msg.type === "input" && "1" in msg.seats && "2" in msg.seats);
+    const seats_back = async (from, what) => {
+        await until(what, () => back_to_local(from) && driving_again(from));
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.equal(await ai_seat.isVisible(), false, what + ": and no line");
+    };
     const newest_t = () =>
         Math.max(...host_saw.filter((msg) => msg.type === "input").map((msg) => msg.t));
     const stall = () => {
@@ -2917,19 +2930,14 @@ async function reconnect() {
     let from = host_saw.length;
     await click("Rejoin the match", dropped);
     await on("play", dropped);
-    // The resume hands both seats back 2d ticks after it lands, so they are the AI's for a
-    // moment: the claim is that once they are the page's own, the line says nothing.
-    await until("the seats back from the AI", () => back_to_local(from));
-    await until("no line once the seats are back", async () => !(await ai_seat.isVisible()));
-    await settle();
-    assert.equal(await ai_seat.isVisible(), false, "AC4: seats all its own say nothing (#76)");
+    await seats_back(from, "AC4: seats all its own say nothing (#76)");
 
     await dropped.evaluate(() => (window.__mute = true));
     const t = stall();
     await until("the page to say the AI has its seats", () => ai_seat.isVisible());
     assert.equal(
         await text(ai_seat),
-        "The AI is driving Dott and Jiffy. Take it back",
+        "The AI is driving Dott and Jiffy. Take them back",
         "AC1, AC2: said on the play screen, naming both seats this client holds (#76)",
     );
 
@@ -2945,8 +2953,7 @@ async function reconnect() {
     await dropped.evaluate(() => (window.__mute = false));
     from = host_saw.length;
     await ai_seat.click();
-    await until("the relay to hand both seats back", () => back_to_local(from));
-    await until("the line to go", async () => !(await ai_seat.isVisible()));
+    await seats_back(from, "AC3: the relay hands both seats back");
     assert.equal(await hash(dropped), "#play", "AC3: one press, never through the lobby (#76)");
 
     // AC5: the line does not outlive the match. It goes on `match_end`, not on leaving the
