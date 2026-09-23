@@ -884,7 +884,10 @@ function prune(room) {
 // that reason, and the body itself is an opaque blob (#12, #13).
 function keep_snapshot(client, msg) {
     const room = client.room;
-    if (!client.host || !room.started) return;
+    // A snapshot of the match that ended would be this match's reference state, served to
+    // every repair and every joiner until the host's next one (#145). Refused like the frame
+    // in `input`, with that case's ceiling for a page too old to stamp one.
+    if (!client.host || !room.started || msg.match !== room.match) return;
     if (!Number.isInteger(msg.t) || msg.t < 0) return;
     if (typeof msg.body !== "string" || !msg.body.length || msg.body.length > MAX_SNAPSHOT) return;
     const matrix = msg.matrix;

@@ -246,7 +246,7 @@ export function Room(transport, read_input) {
     // desynced client could seed the next joiner (#40 amends #19). The tick and the board
     // ride outside the body, which the relay stores without ever decoding.
     this.send_snapshot = function (t, matrix, body) {
-        transport.send({ type: "snapshot", t: t, matrix: matrix, body: body });
+        transport.send({ type: "snapshot", match: self.match, t: t, matrix: matrix, body: body });
     };
 
     // Asks for that payload: what a client sends to join a match in progress. A client

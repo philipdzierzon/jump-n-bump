@@ -1125,6 +1125,7 @@ async function walk() {
     // unpack it, which is why it has to be the right size.
     boss.send({
         type: "snapshot",
+        match: 1,
         t: 0,
         matrix: new Array(16).fill(0),
         body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
@@ -2776,6 +2777,7 @@ async function reconnect() {
     // exactly the disagreement AC4 exists to report (#92).
     host.send({
         type: "snapshot",
+        match: 1,
         t: 5,
         matrix: new Array(16).fill(0),
         body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
@@ -3005,6 +3007,7 @@ async function history_reload_in_match() {
         () =>
             boss.send({
                 type: "snapshot",
+                match: 1,
                 t: 0,
                 matrix: new Array(16).fill(0),
                 body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
