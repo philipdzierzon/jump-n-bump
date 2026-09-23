@@ -685,7 +685,7 @@ snap_host.socket.send({ type: "input", match: 1, t: 6, seats: { 0: pressed } });
 // A snapshot past the room's own tick is not one the host can have taken: its frames run a
 // delay ahead of its simulation, so the relay's clock is always past the tick it snapshots.
 // Kept, it would be the floor `prune` cuts the ring to, emptying it and pushing every later
-// resume past the catch-up ceiling (#155). One tick past is the boundary; 1e9 is the attack.
+// resume past the catch-up ceiling (#155). One tick past is the boundary, and 1e9 takes the same branch.
 snap_host.socket.send({ type: "snapshot", match: 1, t: 8, matrix, body: "FROM-THE-FUTURE" });
 await new Promise((resolve) => setTimeout(resolve, 100));
 

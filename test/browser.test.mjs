@@ -2809,7 +2809,8 @@ async function reconnect() {
     // out of the body itself, so this one is packed at 0 and arrives claiming 5, which is
     // exactly the disagreement AC4 exists to report (#92). The relay drops a snapshot from
     // past its own clock (#155), so this host sends the frame a real one would have sent
-    // before it: that is what moves the clock to 6.
+    // before it: that is what moves the clock to 6. It also starts this host's frame gap, so
+    // its seat goes to the AI thirty ticks later; nothing below reads the drivers.
     host.send({ type: "input", match: 1, t: 5, seats: {} });
     host.send({
         type: "snapshot",
