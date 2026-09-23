@@ -10,6 +10,7 @@ import { LEVELS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/ro
 import { start_server } from "../server/index.js";
 import { Room } from "../src/net/room.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
+import { lossy_proxy } from "./lossy_proxy.mjs";
 
 // Room ids: five characters, uppercase A-Z minus I and O, and the client's casing is not
 // what makes one legal.
@@ -53,14 +54,14 @@ const url = "ws://localhost:" + server.address().port + "/ws";
 // messages -- the handshake, every room update and every refusal -- are collected as they
 // arrive and awaited by shape, because seating is answered by a room update rather than by
 // a reply of its own. One waiter at a time, which is all this test ever has.
-function connect(entry) {
+function connect(entry, to = url) {
     const events = [];
     let wake = null;
     const record = (msg) => {
         events.push(msg);
         if (wake) wake();
     };
-    const socket = new WebSocket_Transport(url, entry, record, (code) =>
+    const socket = new WebSocket_Transport(to, entry, record, (code) =>
         record({ type: "error", code }),
     );
     return {
@@ -676,7 +677,7 @@ const matrix = new Array(16).fill(0);
 // A frame the snapshot already accounts for, then the snapshot, then two it does not: the
 // ring is the gap between that state and now, so the first one is dropped by the second.
 snap_host.socket.send({ type: "input", match: 1, t: 1, seats: { 0: pressed } });
-snap_host.socket.send({ type: "snapshot", t: 3, matrix, body: "SNAPSHOT-BODY" });
+snap_host.socket.send({ type: "snapshot", match: 1, t: 3, matrix, body: "SNAPSHOT-BODY" });
 snap_host.socket.send({ type: "input", match: 1, t: 5, seats: { 0: pressed } });
 snap_host.socket.send({ type: "input", match: 1, t: 6, seats: { 0: pressed } });
 await new Promise((resolve) => setTimeout(resolve, 100));
@@ -690,7 +691,7 @@ late_joiner.socket.receive((msg) => late_saw.push(msg));
 assert.deepEqual((await late_joiner.seats(["Late"])).held, [1], "a seat is free mid-match");
 // A non-host's snapshot is not the room's reference state and is dropped: there is no
 // stagger, and a desynced client must not seed the next joiner (#19).
-late_joiner.socket.send({ type: "snapshot", t: 99, matrix, body: "NOT-THE-HOSTS" });
+late_joiner.socket.send({ type: "snapshot", match: 1, t: 99, matrix, body: "NOT-THE-HOSTS" });
 late_joiner.socket.send({ type: "resync" });
 await new Promise((resolve) => setTimeout(resolve, 100));
 const payload = late_saw.find((msg) => msg.type === "start");
@@ -798,7 +799,13 @@ assert.ok(
 
 const early_matrix = new Array(16).fill(0);
 early_matrix[1] = 2;
-early_host.socket.send({ type: "snapshot", t: 0, matrix: early_matrix, body: "FIRST-BODY" });
+early_host.socket.send({
+    type: "snapshot",
+    match: 1,
+    t: 0,
+    matrix: early_matrix,
+    body: "FIRST-BODY",
+});
 // Answered by the snapshot rather than by a reply to anything, so this waits on the
 // message and gives up rather than hanging a suite that has no test runner under it. A
 // predicate rather than a bare type, because two messages of the same type can ride the
@@ -863,7 +870,7 @@ const thr_guest = connect({ type: "join", id: "THRTL" });
 await lobby(thr_guest);
 const thr_saw = [];
 thr_guest.socket.receive((msg) => thr_saw.push(msg));
-thr_host.socket.send({ type: "snapshot", t: 0, matrix, body: "THROTTLED-BODY" });
+thr_host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "THROTTLED-BODY" });
 // A driver change stamped before the gap, so `served.changes` below has something in it to
 // prune correctly rather than being vacuously empty.
 thr_host.socket.send({ type: "driver", seat: 0, driver: "ai" });
@@ -934,7 +941,13 @@ assert.ok(
     "a desync this far past the snapshot spends no repair -- not served, and not dropped either",
 );
 
-thr_host.socket.send({ type: "snapshot", t: MAX_CATCH_UP + 1, matrix, body: "SECOND-BODY" });
+thr_host.socket.send({
+    type: "snapshot",
+    match: 1,
+    t: MAX_CATCH_UP + 1,
+    matrix,
+    body: "SECOND-BODY",
+});
 // From `before_resync` on, not `find`'s default first match: case 1's own "start" is still
 // sitting in `thr_saw` from the resume it served.
 const late_answer = await awaited_where(
@@ -974,7 +987,7 @@ const flood_guest = connect({ type: "join", id: "FLUDZ" });
 await lobby(flood_guest);
 const flood_saw = [];
 flood_guest.socket.receive((msg) => flood_saw.push(msg));
-flood_host.socket.send({ type: "snapshot", t: 0, matrix, body: "FLOOD-BODY" });
+flood_host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "FLOOD-BODY" });
 for (let t = 1; t <= 200; t++)
     flood_host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed } });
 await awaited_where(flood_saw, (msg) => msg.type === "input" && msg.t === 200, "the 200th frame");
@@ -1027,7 +1040,7 @@ await lobby(chk_host);
 await chk_host.seats(["Chief"]);
 chk_host.socket.send({ type: "start", seed: 5, settings: {}, held: [] });
 await new Promise((resolve) => setTimeout(resolve, 100));
-chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "REFERENCE-BODY" });
+chk_host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "REFERENCE-BODY" });
 
 const chk_guest = connect({ type: "join", id: "CHKSM" });
 const chk_token = await lobby_token(chk_guest);
@@ -1212,7 +1225,7 @@ await lobby(reset_host);
 await reset_host.seats(["Chief"]);
 reset_host.socket.send({ type: "start", seed: 9, settings: {}, held: [] });
 await new Promise((resolve) => setTimeout(resolve, 100));
-reset_host.socket.send({ type: "snapshot", t: 0, matrix, body: "RESET-BODY" });
+reset_host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "RESET-BODY" });
 const reset_guest = connect({ type: "join", id: "RSETX" });
 await lobby(reset_guest);
 await reset_guest.seats(["Hiccup"]);
@@ -1270,7 +1283,7 @@ assert.equal(
     undefined,
     "a desync the relay cannot repair yet does not spend the room's three repairs",
 );
-early_chk_host.socket.send({ type: "snapshot", t: 0, matrix, body: "LATE-BODY" });
+early_chk_host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "LATE-BODY" });
 assert.equal(
     (await awaited(early_chk_saw, "start")).snapshot,
     "LATE-BODY",
@@ -1444,6 +1457,54 @@ assert.ok(
 walk.host.socket.close();
 walk.guest.socket.close();
 
+// A client repaired over a real link lands a round trip behind the room and stays there, so
+// every frame it sends is past its deadline (#142). Dropped, as any late frame is, but it
+// still proves the holder is there: the seat must not go to the AI for it (#140). One that
+// goes quiet altogether still does, thirty ticks on.
+const fix = await two_seats("MENDX");
+fix.guest.socket.send({ type: "input", match: 1, t: 0, seats: { 1: pressed_key } });
+fix.host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "MEND-BODY" });
+await until_seen(fix.host_saw, (msg) => msg.type === "input" && msg.t === 0, "the first frame");
+fix.guest.socket.send({ type: "resync" });
+await until_seen(
+    fix.guest_saw,
+    (msg) => msg.type === "start" && msg.snapshot === "MEND-BODY",
+    "the repair",
+);
+// Sixty ticks, twice AI_AFTER, in runs of ten: the host's frames move the room on, and after
+// each run the repaired client's frame lands five ticks behind the deadline. The pause lets
+// it land before the next run -- two sockets, so nothing else orders them.
+for (let t = 1; t <= 60; t++) {
+    fix.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
+    if (t % 10) continue;
+    fix.guest.socket.send({ type: "input", match: 1, t: t - 5, seats: { 1: pressed_key } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.ok(
+    !fix.host_saw.some((msg) => msg.type === "driver" && msg.seat === 1),
+    "a repaired client whose every frame is late keeps its seat (#140)",
+);
+assert.ok(
+    fix.host_saw.some((msg) => msg.type === "input" && msg.t > 40 && msg.seats["1"]),
+    "the late frames are dropped and the relay covers the seat, as for any late frame",
+);
+for (let t = 61; t <= 110; t++)
+    fix.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
+assert.equal(
+    (
+        await until_seen(
+            fix.host_saw,
+            (msg) => msg.type === "driver" && msg.seat === 1,
+            "the seat gone quiet to go to the AI",
+        )
+    ).driver,
+    "ai",
+    "and one that goes quiet altogether is the AI's thirty ticks later",
+);
+fix.host.socket.close();
+fix.guest.socket.close();
+
 // A client that has sent nothing at all is not one that went away: it is still arriving --
 // fetching the room's level, most likely -- so its seat is covered for and never taken off
 // it. A socket that closed is the other half of that rule, and does lose the seat.
@@ -1522,7 +1583,13 @@ const mid_saw = [];
 mid.socket.receive((msg) => mid_saw.push(msg));
 mid.socket.send({ type: "start", seed: 7, settings: {} });
 await awaited(mid_saw, "start");
-mid.socket.send({ type: "snapshot", t: 0, matrix: new Array(16).fill(0), body: "MID-BODY" });
+mid.socket.send({
+    type: "snapshot",
+    match: 1,
+    t: 0,
+    matrix: new Array(16).fill(0),
+    body: "MID-BODY",
+});
 const newcomer = connect({ type: "join", id: "MDMCH" });
 await lobby(newcomer);
 const newcomer_saw = [];
@@ -1835,6 +1902,26 @@ assert.equal(
     same_match.length,
     1,
     "a disagreement within this match is still a desync -- said instead: " + same_match.join(" | "),
+);
+// And one message further (#145): a match-1 snapshot landing now would be match 2's
+// `room.snapshot`. The control's desync above left the guest waiting, and a kept snapshot
+// answers a waiting client at once, so the stale one would be served right here -- and to
+// the ask after it, which is the one every joiner makes. Only match 2's may answer either.
+const repairs_from = relit.guest_saw.length;
+relit.host.socket.send({ type: "snapshot", match: 1, t: 0, matrix, body: "MATCH-1-BODY" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+relit.guest.socket.send({ type: "resync" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+relit.host.socket.send({ type: "snapshot", match: 2, t: 0, matrix, body: "MATCH-2-BODY" });
+const relit_repair = await until_seen(
+    relit.guest_saw,
+    (msg, i) => i >= repairs_from && msg.type === "start",
+    "the guest's repair",
+);
+assert.equal(
+    relit_repair.snapshot,
+    "MATCH-2-BODY",
+    "a snapshot stamped in the match that ended is not served to a repair or a joiner",
 );
 // Counted where it was refused, and said in the line the match it landed in ends on: the
 // stale frame arrives after `begin`, so it is match 2 that saw it (#118, #126).
@@ -2264,6 +2351,43 @@ parse.guest.socket.receive(() => {});
 
 parse.host.socket.close();
 parse.guest.socket.close();
+
+// A frame makes two one-way trips before anybody else steps it: sender to relay, relay to
+// every other client. The delay has to cover both, or at 50 ms one-way the frame a client
+// stamps as it steps tick 0 reaches its peer after the peer has stepped tick d on released
+// keys, while the sender stepped it on real ones: a desync with nobody late at all, and a
+// repaired client left the same two trips behind the room (#142).
+const TICK_MS = 1000 / 60;
+const links = [];
+for (let i = 0; i < 2; i++) links.push(await lossy_proxy(server.address().port, { one_way: 50 }));
+const far = (i, entry) => connect(entry, "ws://127.0.0.1:" + links[i].port + "/ws");
+const near = far(0, { type: "create", id: "FARXZ" });
+await lobby(near);
+await near.seats(["Near"]);
+const remote = far(1, { type: "join", id: "FARXZ" });
+await lobby(remote);
+await remote.seats(["Away"]);
+const near_saw = [];
+const remote_saw = [];
+near.socket.receive((msg) => near_saw.push(msg));
+remote.socket.receive((msg) => remote_saw.push({ ...msg, at: performance.now() }));
+remote.socket.send({ type: "ready", ready: true });
+near.socket.send({ type: "start", seed: 7, settings: {} });
+const { d } = await until_seen(near_saw, (msg) => msg.type === "start", "the far match");
+const stamped_at = performance.now();
+near.socket.send({ type: "input", match: 1, t: d, seats: { 0: pressed_key } });
+const crossed = await until_seen(
+    remote_saw,
+    (msg) => msg.type === "input" && msg.t === d && msg.seats["0"],
+    "the far frame",
+);
+assert.ok(
+    crossed.at - stamped_at < d * TICK_MS,
+    `a frame stamped d ahead reaches the peer before the peer steps it: ${Math.round(crossed.at - stamped_at)} ms against d = ${d} (#142)`,
+);
+near.socket.close();
+remote.socket.close();
+for (const link of links) await link.close();
 
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");

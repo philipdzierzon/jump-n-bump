@@ -49,6 +49,14 @@ function Sound_Player() {
         self.set_muted(!muted);
     };
 
+    // The track back to the top, for a match that is beginning rather than being repaired:
+    // `play_sound` below leaves a running loop where it is, and this player outlives every
+    // match and room that asks for it, so without this the next match picked the track up
+    // wherever the last one had left it (#146). Paused already -- `on_start` mutes first.
+    this.rewind = function () {
+        for (var name in sounds) sounds[name].currentTime = 0;
+    };
+
     this.play_sound = function (sfx_name, loop) {
         var audio = sounds[sfx_name];
         // The looping track is the session's, not the build's: a repair rebuilds `Sfx` and

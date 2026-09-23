@@ -246,7 +246,7 @@ export function Room(transport, read_input) {
     // desynced client could seed the next joiner (#40 amends #19). The tick and the board
     // ride outside the body, which the relay stores without ever decoding.
     this.send_snapshot = function (t, matrix, body) {
-        transport.send({ type: "snapshot", t: t, matrix: matrix, body: body });
+        transport.send({ type: "snapshot", match: self.match, t: t, matrix: matrix, body: body });
     };
 
     // Asks for that payload: what a client sends to join a match in progress. A client
@@ -308,9 +308,9 @@ export function Room(transport, read_input) {
             held.forEach(function (seat, scheme) {
                 if (drivers[seat] === "local") seats[seat] = read_input(scheme);
             });
-            // Every tick, unconditionally, stamped d ahead so the delay is the one-way
-            // trip; never echoed back to its sender, so this client schedules its own
-            // (#12, #6).
+            // Every tick, unconditionally, stamped d ahead so the delay is the trip through
+            // the relay to every other client; never echoed back to its sender, so this
+            // client schedules its own (#12, #6, #142).
             schedule_input(tick + self.d, seats);
             transport.send({ type: "input", match: self.match, t: tick + self.d, seats: seats });
             // On the same tick on every client, and from the same point in it: the state

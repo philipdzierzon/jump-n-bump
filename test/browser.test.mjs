@@ -1125,6 +1125,7 @@ async function walk() {
     // unpack it, which is why it has to be the right size.
     boss.send({
         type: "snapshot",
+        match: 1,
         t: 0,
         matrix: new Array(16).fill(0),
         body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
@@ -1874,6 +1875,10 @@ async function sound_outlives_the_room() {
     await click("Start the match", hop);
     await on("play", hop);
     await until("the music", async () => await music_playing(hop));
+    // A second and a half into the track before it is muted, so a next match that picked
+    // it up from here rather than from the top is a whole second out -- well clear of the
+    // poll that reads it (#146).
+    await until("the music to get into the track", async () => (await music_t(hop)) > 1.5);
     // Muted here and left muted, on purpose. The player carrying that mute out of this match
     // is the same one the next room's session picks up, so a `set_muted(true)` that nothing
     // spoke for again would leave the page silent for the rest of the tab -- which is the
@@ -1882,6 +1887,7 @@ async function sound_outlives_the_room() {
     // in on the way into a match, which is what takes it back off.
     await hop.keyboard.press("m");
     await until("the music to stop", async () => !(await music_playing(hop)));
+    const left_at = await music_t(hop);
     await click("Back to the lobby", hop);
     await on("room", hop);
     await leave_lobby();
@@ -1894,6 +1900,15 @@ async function sound_outlives_the_room() {
     await on("play", hop);
     await until("the music to come back in a match after a muted one (#123)", async () =>
         (await sounds(hop)).some((name) => name.startsWith("bump.")),
+    );
+    // Read the moment it is asked to play, so the track has had a poll's worth of time to
+    // move and no more: from the top it is under a second in, and picked up where the last
+    // room left it, it is at least `left_at` (#146).
+    const came_in_at = await music_t(hop);
+    assert.ok(
+        came_in_at < left_at,
+        `AC1: a new room's match starts the music from the top, not from where the last ` +
+            `room's match left it: ${left_at} -> ${came_in_at} (#146)`,
     );
 
     assert.equal(
@@ -1913,6 +1928,25 @@ async function sound_outlives_the_room() {
     await until("the music to stop", async () => !(await music_playing(hop)));
     await hop.keyboard.press("m");
     await until("the music to come back", async () => await music_playing(hop));
+
+    // A second match without leaving the room: the walk back to the lobby between them is
+    // a new session but the same room, and Back pauses the track wherever it has got to.
+    await until("the music to get into the track", async () => (await music_t(hop)) > 1.5);
+    await click("Back to the lobby", hop);
+    await on("room", hop);
+    const stopped_at = await music_t(hop);
+    await forget_sounds(hop);
+    await click("Start the match", hop);
+    await on("play", hop);
+    await until("the music in the room's second match", async () =>
+        (await sounds(hop)).some((name) => name.startsWith("bump.")),
+    );
+    const restarted_at = await music_t(hop);
+    assert.ok(
+        restarted_at < stopped_at,
+        `AC2: the room's second match starts the music from the top too: ` +
+            `${stopped_at} -> ${restarted_at} (#146)`,
+    );
 
     assert.deepEqual(errors, [], "with nothing thrown on the way");
     await hop.close();
@@ -2776,6 +2810,7 @@ async function reconnect() {
     // exactly the disagreement AC4 exists to report (#92).
     host.send({
         type: "snapshot",
+        match: 1,
         t: 5,
         matrix: new Array(16).fill(0),
         body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
@@ -3005,6 +3040,7 @@ async function history_reload_in_match() {
         () =>
             boss.send({
                 type: "snapshot",
+                match: 1,
                 t: 0,
                 matrix: new Array(16).fill(0),
                 body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),

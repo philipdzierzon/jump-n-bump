@@ -219,6 +219,9 @@ export function Game_Session(get_level, config, muted, transport) {
         // match here. `play` un-mutes it again, from where the track had got to rather than
         // from the top (#28, #40, #91).
         sound_player.set_muted(true);
+        // A new match starts its music from the top; a repair is the same match, and picks
+        // it up where it was (#91, #146). Every match begins here, a local room's included.
+        if (!repairing) sound_player.rewind();
         // With it goes its snapshot timer: the tick counter belongs to the match that is
         // starting and the simulation still in these variables belongs to the last one, so
         // a snapshot taken between here and `build` would be the old match's state under

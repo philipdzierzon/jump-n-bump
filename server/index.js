@@ -719,7 +719,13 @@ function last_board(room) {
 
 // Derived once, from the worst one-way trip in the room, and fixed for the match: a delay
 // that adapts mid-match is a delay every client disagrees about (#34). Clients stamp ticks
-// ahead of time, so the cost is the one-way trip rather than the round trip.
+// ahead of time, and a frame makes two one-way trips before anybody steps it: sender to
+// relay, relay to every other client. Sized for one, a frame at 50 ms one-way reached its
+// peer a tick after the peer had stepped it on released keys, and the sender on real ones:
+// a desync, a repair of whoever was not the host -- the checksum reference -- and a repaired
+// client that lands the same two trips behind the room, where every frame it sent was late
+// (#142). Both trips, so a peer's frame is in before its tick and a client trailing the
+// room by that much is still on time.
 function input_delay(room) {
     let worst = 0;
     // Not the clients waiting for a seat: a queued client's round trip is nobody's frame
@@ -727,7 +733,10 @@ function input_delay(room) {
     // of somebody who is not playing (#44).
     for (const client of room.clients)
         if (!client.queued.length) worst = Math.max(worst, client.one_way);
-    return Math.min(10, Math.max(2, Math.ceil(worst / TICK_MS) + 1));
+    // ponytail: the cap of 10 now covers 75 ms one-way, where it covered 150 before, so a
+    // room with a player further out than that is late again. upgrade path: rollback, which
+    // takes the round trip out of the delay altogether (#136 §1).
+    return Math.min(10, Math.max(2, Math.ceil((2 * worst) / TICK_MS) + 1));
 }
 
 // The one thing the relay stamps itself, at currentTick + 2d (#12). `tick` is the first
@@ -884,7 +893,10 @@ function prune(room) {
 // that reason, and the body itself is an opaque blob (#12, #13).
 function keep_snapshot(client, msg) {
     const room = client.room;
-    if (!client.host || !room.started) return;
+    // A snapshot of the match that ended would be this match's reference state, served to
+    // every repair and every joiner until the host's next one (#145). Same test as the frame
+    // in `input`, with that case's ceiling for a page too old to stamp one.
+    if (!client.host || !room.started || msg.match !== room.match) return;
     if (!Number.isInteger(msg.t) || msg.t < 0) return;
     if (typeof msg.body !== "string" || !msg.body.length || msg.body.length > MAX_SNAPSHOT) return;
     const matrix = msg.matrix;
@@ -1349,7 +1361,22 @@ function relay(client, msg) {
             // the room stepped it, so the real one is for a tick that never comes round
             // again. Dropped silently and counted, because a client cannot be told to send
             // it sooner (#42).
-            if (msg.t < room.due) return void room.late++;
+            //
+            // Late is still alive, though: a frame from this match, from a client not queued,
+            // is its holder sending, so its own seats' gap counts from here -- `client.seats`
+            // and not `msg.seats`, so naming a seat it does not hold resets nothing. A client
+            // repaired over a real link lands a round trip behind the room and never catches
+            // up, so a frame it sends is late whenever d does not cover that trip -- the
+            // delay does since #142, but a stall can still eat it -- and this stops it costing
+            // the player the seat thirty ticks later (#140).
+            //
+            // ponytail: a client stuck behind the room keeps its seat for the rest of the match
+            // and its bunny plays released keys, where the AI used to move it. upgrade path:
+            // decide whether late still means alive once a stall can be caught up (#136 §1).
+            if (msg.t < room.due) {
+                for (const seat of client.seats) room.missing[seat] = 0;
+                return void room.late++;
+            }
             // And the other end of the same clock: a tick further ahead than any client
             // could catch up to is not a frame, it is a number. The line below raises the
             // room's tick to it, and `substitute` then walks every tick in between -- a
@@ -1379,7 +1406,8 @@ function relay(client, msg) {
                     else room.forged++;
                 }
             // Every other client, never the sender: it scheduled its own frame when it
-            // sent it, which is what makes the delay one-way (#12).
+            // sent it, so it never waits on the round trip (#12). Its peers still wait on
+            // two trips, sender to relay and relay to them, which is what `d` covers (#142).
             broadcast_frame(room, { type: "input", t: msg.t, seats }, client);
             // Rung as well as fanned out, the sender's own frames included: a joiner needs
             // every seat's input for the gap, not just the ones somebody else sent (#40).
