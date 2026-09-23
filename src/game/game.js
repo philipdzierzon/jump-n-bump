@@ -139,23 +139,32 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
     // two ticks -- not latency: the check is after a tick, so a single tick that takes three
     // seconds still blocks for three seconds. No tick is capped and none is skipped (#83).
     //
-    // ponytail: nested `setTimeout(pump, 0)` clamps to 4 ms five deep, so a client catching up
-    // runs at ~80% duty. Upgrade path: `scheduler.yield()` or a `MessageChannel` ping.
+    // ponytail: a batch that overruns a vsync waits for the next frame, so a sprint (a resume
+    // gap) runs at roughly 50-100% duty. Upgrade path: `scheduler.yield()` inside the batch, if
+    // a resume ever keeps the overlay up visibly long.
     var BATCH_MS = 1000 / 60;
 
-    function pump() {
+    // How early a tick may run against the frame that shows it. rAF timestamps sit on the
+    // display's vsync and the budget advances on the same 16.67 ms grid, so with no slack a tick
+    // due "now" flips between this frame and the next on a millisecond of jitter -- 0 then 2
+    // ticks, which is the judder this pacing exists to remove (#51). A quarter frame: under the
+    // half frame a 120 Hz display's in-between frames sit at, so those still wait their turn.
+    var SLACK_MS = 1000 / 240;
+
+    // Decide, then step: rAF wakes once per display frame, 60 or 120 or 144 times a second, so
+    // a loop that stepped first would run the simulation at the display's rate. `frame_time` is
+    // the frame's vsync timestamp, the same timebase as `timeGetTime()`.
+    function pump(frame_time) {
         var batch_started = timeGetTime();
+        var stepped = false;
         while (playing) {
-            game_iteration();
-            var now = timeGetTime();
             // Above the sprint branch on purpose: a peer holding `gap()` positive drives that
             // branch past both the draw and the yield, and it is the entrance that needs the
             // bound most (#83, and `docs/research/desync-under-load.md` §7 -- a client that
-            // has not read its socket cannot know what the room is doing).
-            if (now - batch_started >= BATCH_MS) {
-                next_time = now + 1000 / 60;
-                renderer.draw();
-                setTimeout(pump, 0);
+            // has not read its socket cannot know what the room is doing). Checked on real
+            // elapsed time, never on `frame_time`.
+            if (timeGetTime() - batch_started >= BATCH_MS) {
+                next_time = frame_time + 1000 / 60;
                 break;
             }
             // Behind the room rather than behind its own clock. The ticks between here and
@@ -171,41 +180,50 @@ export function Game(movement, ai, animation, renderer, objects, room, level, is
             // (#40, #70). The budget is re-seeded rather than advanced, because the ticks
             // just stepped are the room's backlog and not this client's own schedule --
             // advancing it would sleep the gap straight back open.
-            if (room.gap() > 0) {
-                next_time = now + 1000 / 60;
-                continue;
-            }
-            var time_diff = next_time - now;
-            next_time += 1000 / 60;
-
-            if (time_diff > 0) {
-                // We have time left, so the backlog is cleared: draw once for the whole
-                // catch-up batch. Catch-up stays uncapped in ticks and no tick is ever
-                // skipped -- what bounds it is `BATCH_MS` of wall clock per batch, so the
-                // loop always reaches this yield or the one above it. That bound is what
-                // makes the old claim true: a slow client loses frames, never simulation
-                // state (#30, #83).
-                renderer.draw();
-                setTimeout(pump, time_diff);
-                break;
-            }
+            if (room.gap() > 0) next_time = frame_time + 1000 / 60;
+            // Not due by this frame: the backlog is cleared. Catch-up stays uncapped in ticks
+            // and no tick is ever skipped -- what bounds it is `BATCH_MS` of wall clock per
+            // batch, so the loop always reaches the yield below. That bound is what makes the
+            // old claim true: a slow client loses frames, never simulation state (#30, #83).
+            else if (next_time - frame_time > SLACK_MS) break;
+            else next_time += 1000 / 60;
+            game_iteration();
+            stepped = true;
         }
+        // A match that reached its limit paused itself inside `game_iteration`, which drew the
+        // tick that ended it (#39).
+        if (!playing) return;
+        // Once per wakeup, and only if a tick ran: a 120 Hz display has a frame with nothing new
+        // in it every other time.
+        if (stepped) renderer.draw();
+        // Not fired while the tab is hidden, which is the freeze: no tick, so no frame goes to
+        // the relay, which is #42's drop signal -- AI at 30 ticks, seats held for the token (#51).
+        requestAnimationFrame(pump);
     }
+
+    // Resuming a hidden tab: the backlog is wall clock nobody played, not ticks owed. A local
+    // room has nobody to be behind; a networked one's position is `room.gap()`'s, which the
+    // sprint closes on its own -- a stale budget there would step past what the room has stamped
+    // and fill the ticks with released keys (#51, #19). `BATCH_MS` alone would cap the lurch at
+    // one frame of CPU in a real browser, but it is still a lurch; this drops it outright.
+    this.drop_backlog = function () {
+        next_time = timeGetTime();
+    };
 
     this.start = function () {
         // Already pumping: a second loop would step the same simulation twice a frame,
         // and every way into the match calls this. A match that reached its limit is over
         // for good -- restarting it would step past the tick the room ended on (#39).
         if (playing || ended) return;
-        // One tick, not one second. A second of nothing before the first tick is the port's
-        // own -- the C original paces on its timer interrupt and has no such pause -- and it
-        // cost every client the same 60 ticks at match start, so it never showed. A client
-        // resumed into a match already running is the one it shows on: it lands on the tick
-        // the room is on and then hands the room a one-second head start, which is 60 ticks
-        // of a delay budget worth two (#40).
-        next_time = timeGetTime() + 1000 / 60;
+        // The first tick at once and the next one frame on, not one second. A second of
+        // nothing before the first tick is the port's own -- the C original paces on its timer
+        // interrupt and has no such pause -- and it cost every client the same 60 ticks at
+        // match start, so it never showed. A client resumed into a match already running is
+        // the one it shows on: it lands on the tick the room is on and then hands the room a
+        // one-second head start, which is 60 ticks of a delay budget worth two (#40).
+        next_time = timeGetTime();
         playing = true;
-        pump();
+        pump(timeGetTime());
     };
 
     this.pause = function () {

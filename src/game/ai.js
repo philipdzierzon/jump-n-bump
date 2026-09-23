@@ -59,6 +59,16 @@ export function AI() {
 
         var rm = should_move_direction(tar_above_nearby, !same_vertical_line, tar_is_right);
         var lm = should_move_direction(tar_above_nearby, !same_vertical_line, !tar_is_right);
+        // Stacked in one column with the target out of reach, neither way is a chase and
+        // the pair stands there for good (#52). Keep walking the way it faces -- `direction`
+        // is in the snapshot, so a resynced client agrees -- and turn at the map edge,
+        // where `should_jump` refuses the wall.
+        // ponytail: breaks the column only; a side-by-side pair pushing in the pool is
+        // another resting state. upgrade path: a stall rule over packed player state.
+        if (!lm && !rm) {
+            lm = current_player.direction == 1 ? cur_posx > 16 : cur_posx + 8 >= 352 - 16;
+            rm = !lm;
+        }
         var jm = should_jump(
             current_player,
             cur_posx,

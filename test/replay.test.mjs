@@ -390,6 +390,7 @@ assert.equal(behind.room.gap(), 38, "the room is 38 ticks past the tick this cli
 // Real `performance.now()` here, and the only real-clock dependency in this file: the 38
 // ticks below must cost less than the 16.67 ms batch bound (#83) or the pump yields first.
 // They cost microseconds -- but if this ever flakes, that bound is why.
+globalThis.requestAnimationFrame = () => 0; // the wakeup is never run: this file steps by hand
 behind.game.start();
 assert.equal(
     behind.room.now(),
@@ -644,11 +645,11 @@ assert.equal(
 // advances its budget by exactly one frame per tick, so before the batch bound a tick that
 // overran it left `next_time - now` monotonically decreasing and the break unreachable -- no
 // draw, no keyboard, no socket read, and in an endless match no exit at all. Both the clock
-// and the yield are globals the pump reads at call time, so a fake clock here needs no seam
+// and the yield (`requestAnimationFrame`) are globals the pump reads at call time, so a fake clock here needs no seam
 // the game does not already have.
 {
     const real_performance = globalThis.performance;
-    const real_setTimeout = globalThis.setTimeout;
+    const real_raf = globalThis.requestAnimationFrame;
     let fake = 0;
     let drawn = 0;
     let stepped = 0;
@@ -669,7 +670,7 @@ assert.equal(
         },
     };
     globalThis.performance = { now: () => fake };
-    globalThis.setTimeout = (fn, ms) => yields.push(ms); // the wakeup is never run
+    globalThis.requestAnimationFrame = (fn) => yields.push(fn); // the wakeup is never run
 
     try {
         const slow = start(9, {}, [0], new Loopback_Transport(), slow_renderer);
@@ -684,7 +685,7 @@ assert.equal(
         assert.equal(drawn, 1, "a bounded batch still draws, so the tab is not frozen either");
         slow.game.pause();
 
-        // The sprint branch `continue`s past both the draw and the yield, and any peer can
+        // The sprint branch keeps looping without reaching the draw or the yield, and any peer can
         // hold it open up to MAX_CATCH_UP every tick, so it needs the same bound -- and it is
         // this sub-case, not the one above, that fails without it: the pump would drain all
         // 38 backlog ticks in one block.
@@ -701,7 +702,7 @@ assert.equal(
         sprinting.game.pause();
     } finally {
         globalThis.performance = real_performance;
-        globalThis.setTimeout = real_setTimeout;
+        globalThis.requestAnimationFrame = real_raf;
     }
 }
 
@@ -1012,6 +1013,32 @@ assert.deepEqual(
     "and the AI steers it on this client too, which is what every other client is doing (#110)",
 );
 
+// Two AI bunnies stacked in one column, each the other's nearest target and out of the
+// other's reach, used to stand there for the rest of the match (#52). Placed by hand: once
+// mid-map, once against the left wall and facing it. Last, because building a Game
+// replaces the `player` array.
+for (const [upper_x, upper_y, lower_x, lower_y, direction] of [
+    [118, 112, 116, 208, 0],
+    [16, 112, 16, 192, 1],
+]) {
+    const stacked = start(1, {}, [], batch_transport(0, [], ["ai", "ai", "off", "off"]));
+    const placed = [
+        [upper_x, upper_y],
+        [lower_x, lower_y],
+    ];
+    placed.forEach(([x, y], i) => {
+        player[i].x.pos = x << 16;
+        player[i].y.pos = y << 16;
+        player[i].x.velocity = player[i].y.velocity = 0;
+        player[i].direction = direction;
+    });
+    for (let tick = 0; tick < 120; tick++) stacked.game.step();
+    assert.ok(
+        placed.some(([x], i) => Math.abs((player[i].x.pos >> 16) - x) >= 16),
+        `a stacked pair at x=${upper_x} breaks its own symmetry inside two seconds (#52)`,
+    );
+}
+
 console.log(
-    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, a snapshot plus the input gap lands in the host's state, and a seat handed to the AI keeps no stale frame",
+    "OK replay is deterministic and headless, schemes bind in join order, the leftovers ring is bounded, a snapshot plus the input gap lands in the host's state, and a seat handed to the AI keeps no stale frame, and a stacked AI pair breaks its own column",
 );

@@ -1282,6 +1282,77 @@ async function self_ending_match() {
     await clock_page.close();
 }
 
+// --- a hidden tab freezes (#51) ----------------------------------------------------------
+// The loop is paced by animation frames, which a hidden tab does not get: no tick runs, so a
+// timed match does not count down behind the player's back, and on the way back the minute
+// nobody played is dropped rather than stepped in one lurch.
+
+async function hidden_tab_freezes() {
+    // Its own context, for `self_ending_match`'s reason: `clock.install` is the context's.
+    const hidden_page = await (await make_context("hidden")).newPage();
+    const errors = [];
+    hidden_page.on("pageerror", (error) => errors.push(error.message));
+    await hidden_page.clock.install();
+    await hidden_page.goto(origin + "/");
+
+    await click("Play offline", hidden_page);
+    await on("names", hidden_page);
+    await hidden_page.keyboard.press("ArrowUp");
+    await until("the participant", async () => (await seats(hidden_page).count()) === 1);
+    await click("Take the seats", hidden_page);
+    await on("room", hidden_page);
+    await open_settings(hidden_page);
+    await config_row("Minutes", "number", hidden_page).fill("1");
+    await click("Apply to the next match", hidden_page);
+    await click("Start the match", hidden_page);
+    await on("play", hidden_page);
+
+    // Headless Chromium has no window manager to hide a tab with (#85), so this does to the
+    // page what hiding it does: animation frames stop, and `visibilitychange` fires.
+    // ponytail: proves the loop is paced by rAF and what the page does on the event, not that
+    // Chrome stops rAF in a hidden tab -- that is the platform's promise. Upgrade path: a second
+    // page and `bringToFront()` if headless visibility ever becomes reliable.
+    await hidden_page.evaluate(() => {
+        const frame = window.requestAnimationFrame;
+        const held = [];
+        window.requestAnimationFrame = (fn) => held.push(fn);
+        window.__show = () => {
+            window.requestAnimationFrame = frame;
+            document.dispatchEvent(new Event("visibilitychange"));
+            held.forEach((fn) => frame(fn));
+        };
+        document.dispatchEvent(new Event("visibilitychange"));
+    });
+    // The frame already queued runs and its successor is held; then one more pass of the
+    // top bar's 250 ms sample, which fires before that frame on the same fast-forward and
+    // would otherwise paint the clock from before its ticks.
+    await hidden_page.clock.fastForward(100);
+    await hidden_page.clock.fastForward(300);
+    const clock_item = async () =>
+        (await chrome(hidden_page)).find((item) => /^\d+:\d\d$/.test(item));
+    const before = await clock_item();
+
+    await hidden_page.clock.fastForward("01:00");
+    assert.ok(
+        await screen("play", hidden_page).isVisible(),
+        "a hidden tab's match is still on a minute later",
+    );
+    assert.equal(await clock_item(), before, "because its clock is frozen, not counting down");
+
+    await hidden_page.evaluate(() => window.__show());
+    await hidden_page.clock.fastForward(1000);
+    await hidden_page.clock.fastForward(300);
+    assert.ok(await screen("play", hidden_page).isVisible(), "shown again, the match goes on");
+    assert.match(
+        await clock_item(),
+        /^0:5\d$/,
+        "from where it froze: the minute it was hidden for is dropped, not stepped at once",
+    );
+
+    assert.deepEqual(errors, [], "with nothing thrown on the way");
+    await hidden_page.close();
+}
+
 // A match that begins inside the last one's two-second hold (#39, #124). The hold is a
 // `go("room")` on a timer and `on_match_start` cancels it, which is the case that cancel was
 // written for: without it the client is walked out of the match it has just been handed, two
@@ -4291,6 +4362,7 @@ const walks = [
     walk,
     self_ending_match,
     new_match_outranks_the_hold,
+    hidden_tab_freezes,
     two_pages,
     reconnect,
     reconnect_gives_up,
