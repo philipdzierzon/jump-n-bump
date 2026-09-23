@@ -161,7 +161,15 @@ export function Game_Session(get_level, config, muted, transport) {
     // is not cleared by `match_end` -- it outlives the match it names, which is the whole
     // reason it can be read here at all -- so a `start` arriving with this number, or with
     // one below it, is for a match this client has already seen out (#124).
-    var ended_match = 0;
+    //
+    // Kept on the transport rather than in this session, because it has to outlive the
+    // session: `viewmodels.js` builds a fresh one for the lobby when the end-of-match hold
+    // walks this client back, and a repair `start` still in flight from the match that just
+    // ended can land on that one. A session counting from zero built it and put the client
+    // back on the match screen of a match nobody else was in (#150). The transport is the
+    // room's connection and lives exactly as long as the relay's count of that room's
+    // matches does -- a loopback counts its own -- so a new room starts from zero with it.
+    if (!transport.ended_match) transport.ended_match = 0;
 
     // The relay cannot read the simulation, so the host announces the end and the final
     // board travels with it (#22, #19). It comes back to the announcer too, which is what
@@ -174,7 +182,7 @@ export function Game_Session(get_level, config, muted, transport) {
         // Read at the end and not at the next `start`, because a `start` is where the
         // number is overwritten: by the time `build` runs, `room.match` is already the
         // arriving payload's (#124).
-        ended_match = room.match;
+        transport.ended_match = room.match;
         if (self.on_match_end) self.on_match_end(msg);
     };
     // A client that stops simulating hands its seats over rather than leaving them frozen.
@@ -316,12 +324,13 @@ export function Game_Session(get_level, config, muted, transport) {
         // one to a single client when it gives up repairing it (`desync` in
         // `server/index.js`), while everybody else plays on. Refusing that client a resume
         // for this match is right anyway -- it is the one the relay has stopped repairing,
-        // and `resume()` returns early for it from then on -- and the lobby it walks back to
-        // builds it a session of its own, counting from zero again (#41).
+        // and `resume()` returns early for it from then on -- so the number outliving the
+        // session it walks back to the lobby with refuses nothing the relay would send (#41,
+        // #150).
         var t0 = performance.now();
         var resumed = room.resume ? decode_snapshot(room.resume) : null;
         var gap = room.gap();
-        if (room.resume && (!resumed || gap > MAX_CATCH_UP || room.match <= ended_match))
+        if (room.resume && (!resumed || gap > MAX_CATCH_UP || room.match <= transport.ended_match))
             return start_failed();
         // A key tapped in the lobby has no tick to be read on yet -- it would otherwise sit
         // latched and land on this match's first tick, a spurious jump/step nobody pressed
