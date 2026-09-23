@@ -2765,6 +2765,13 @@ async function reconnect() {
         window.WebSocket = function (...args) {
             const socket = new Native(...args);
             window.__sockets.push(socket);
+            // A page that stops sending frames, with its socket open: what a stalled tab
+            // looks like to the relay, and what it hands the seat to the AI for (#76).
+            const send = socket.send.bind(socket);
+            socket.send = (data) => {
+                if (window.__mute && JSON.parse(data).type === "input") return;
+                send(data);
+            };
             return socket;
         };
         window.WebSocket.prototype = Native.prototype;
@@ -2879,6 +2886,83 @@ async function reconnect() {
         ],
         "one client, two seats, named after the first two bunnies nobody in the room was",
     );
+
+    // #76: the relay hands a stalled client's seats to the AI and says so only in the
+    // driver table. The page stops sending frames, and the host sends one far enough ahead
+    // that the relay counts more than thirty missing ticks for both of the page's seats.
+    const ai_seat = dropped.locator(".ai-seat");
+    const newest_t = () =>
+        Math.max(...host_saw.filter((msg) => msg.type === "input").map((msg) => msg.t));
+    const stall = () => {
+        const t = newest_t() + 120;
+        host.send({
+            type: "input",
+            match: 1,
+            t,
+            seats: { 0: { left: false, right: false, up: false } },
+        });
+        return t;
+    };
+    const back_to_local = (from) =>
+        [1, 2].every((seat) =>
+            host_saw
+                .slice(from)
+                .some(
+                    (msg) => msg.type === "driver" && msg.seat === seat && msg.driver === "local",
+                ),
+        );
+    // The room's own traffic from here on, and not only its `room` messages: the frames the
+    // page sends, and the driver changes the relay stamps.
+    host.receive((msg) => host_saw.push(msg));
+    let from = host_saw.length;
+    await click("Rejoin the match", dropped);
+    await on("play", dropped);
+    // The resume hands both seats back 2d ticks after it lands, so they are the AI's for a
+    // moment: the claim is that once they are the page's own, the line says nothing.
+    await until("the seats back from the AI", () => back_to_local(from));
+    await until("no line once the seats are back", async () => !(await ai_seat.isVisible()));
+    await settle();
+    assert.equal(await ai_seat.isVisible(), false, "AC4: seats all its own say nothing (#76)");
+
+    await dropped.evaluate(() => (window.__mute = true));
+    const t = stall();
+    await until("the page to say the AI has its seats", () => ai_seat.isVisible());
+    assert.equal(
+        await text(ai_seat),
+        "The AI is driving Dott and Jiffy. Take it back",
+        "AC1, AC2: said on the play screen, naming both seats this client holds (#76)",
+    );
+
+    // A snapshot near the room's clock, so the resume the button asks for is inside the
+    // catch-up ceiling; the same empty body as above.
+    host.send({
+        type: "snapshot",
+        match: 1,
+        t,
+        matrix: new Array(16).fill(0),
+        body: encode_snapshot(new Int32Array(SNAPSHOT_INTS)),
+    });
+    await dropped.evaluate(() => (window.__mute = false));
+    from = host_saw.length;
+    await ai_seat.click();
+    await until("the relay to hand both seats back", () => back_to_local(from));
+    await until("the line to go", async () => !(await ai_seat.isVisible()));
+    assert.equal(await hash(dropped), "#play", "AC3: one press, never through the lobby (#76)");
+
+    // AC5: the line does not outlive the match. It goes on `match_end`, not on leaving the
+    // screen two seconds later.
+    await dropped.evaluate(() => (window.__mute = true));
+    stall();
+    await until("the line again", () => ai_seat.isVisible());
+    host.send({
+        type: "match_end",
+        t: newest_t(),
+        reason: "lobby",
+        matrix: new Array(4).fill(new Array(4).fill(0)),
+    });
+    await until("the line to go with the match", async () => !(await ai_seat.isVisible()));
+    assert.equal(await hash(dropped), "#play", "AC5: gone inside the hold, not after it (#76)");
+
     assert.deepEqual(errors, [], "and the page threw nothing while it was away");
     host.close();
 }

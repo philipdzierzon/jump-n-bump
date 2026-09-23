@@ -294,6 +294,14 @@ export function Room(transport, read_input) {
         return drivers[seat] !== "off";
     };
 
+    // Seats this client holds that the room has handed to the AI: the relay does it after
+    // thirty ticks with no frames from it, and tells nobody but the driver table (#42, #76).
+    this.ai_seats = function () {
+        return held.filter(function (seat) {
+            return drivers[seat] === "ai";
+        });
+    };
+
     // One tick of the room: apply the driver changes stamped for it, send this client's
     // input frame for every seat it drives, and hand back the frames to simulate now. A
     // seat with no driver at all is one nobody is holding, which is the AI's (#7).

@@ -225,6 +225,18 @@ function ViewModel() {
         if (self.disconnected()) return "Connection lost. Reconnecting\u2026";
         return self.reconnecting() ? "Reconnecting\u2026" : "";
     });
+    // Over the match, like the line above: the relay gave this client's bunny to the AI, and
+    // from the inside that reads as a dead keyboard (#76). The line is the way back. Hidden
+    // while the socket is down, because the reconnect already asks for the seat back.
+    this.ai_text = ko.computed(function () {
+        var game = self.current_game();
+        if (!game || self.disconnected()) return "";
+        // The participant's own name: the room's label would add "(AI)", which is the news.
+        var lost = game.ai_seats().map(function (seat) {
+            return self.seat_names()[seat];
+        });
+        return lost.length ? "The AI is driving " + lost.join(" and ") + ". Take it back" : "";
+    });
 
     // Derived from the relay's deadline and this client's clock, never from a count of
     // frames: a hidden tab stops its game loop but not its clock (#51). The ticker runs

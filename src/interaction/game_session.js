@@ -144,6 +144,9 @@ export function Game_Session(get_level, config, muted, transport) {
     // true between repairs and before the first one, and it is what the player is looking at
     // when the bunnies jump (#41).
     this.reconnecting = ko.observable(false);
+    // Seats this client holds that the AI is driving, as the simulation last applied them
+    // (#76). Sampled with the line above.
+    this.ai_seats = ko.observable([]);
     this.on_match_start = null;
     // A `start` that never became a match: the level would not load, or the state it
     // carried could not be replayed. Both were silent, and a client that had asked to be
@@ -447,6 +450,9 @@ export function Game_Session(get_level, config, muted, transport) {
     function sample_chrome() {
         show_clock();
         self.reconnecting(Date.now() - repaired_at < RECONNECTING_MS || room.gap() > BEHIND_TICKS);
+        // Written only on a change: a fresh array is a change to Knockout every time.
+        var lost = self.in_match ? room.ai_seats() : [];
+        if (lost.join() !== self.ai_seats().join()) self.ai_seats(lost);
     }
 
     // Sampled on a wall clock like the board's refresh is, because nothing in the loop
@@ -510,6 +516,7 @@ export function Game_Session(get_level, config, muted, transport) {
         clearInterval(snapshot_timer);
         snapshot_timer = null;
         self.clock(null);
+        self.ai_seats([]);
         // Counted here, because the lobby reads this board the moment the match is left and
         // the overlay's own refresh is the only other thing that ever fills it: leaving a
         // match nobody pressed P on handed the lobby the empty matrix this starts life as,
