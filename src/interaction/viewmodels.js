@@ -225,6 +225,23 @@ function ViewModel() {
         if (self.disconnected()) return "Connection lost. Reconnecting\u2026";
         return self.reconnecting() ? "Reconnecting\u2026" : "";
     });
+    // Over the match, like the line above: the relay gave this client's bunny to the AI, and
+    // from the inside that reads as a dead keyboard (#76). The line is the way back. Hidden
+    // while the socket is down, because the reconnect already asks for the seat back.
+    this.ai_text = ko.computed(function () {
+        var game = self.current_game();
+        if (!game || self.disconnected()) return "";
+        // The participant's own name: the room's label would add "(AI)", which is the news.
+        var lost = game.ai_seats().map(function (seat) {
+            return self.seat_names()[seat];
+        });
+        if (!lost.length) return "";
+        return (
+            "The AI is driving " +
+            lost.join(" and ") +
+            (lost.length > 1 ? ". Take them back" : ". Take it back")
+        );
+    });
 
     // Derived from the relay's deadline and this client's clock, never from a count of
     // frames: a hidden tab stops its game loop but not its clock (#51). The ticker runs
@@ -938,6 +955,17 @@ function ViewModel() {
                     // Somebody else sat down first, or its holder is on the way back: a
                     // reservation belongs to one token until it expires (#42).
                     self.error("That seat is not free.");
+                } else if (code === "SERVER_FULL") {
+                    // The two refusals of a new room, Quick Join's as much as Create's, so
+                    // both come before the create branch rather than inside it (#157).
+                    self.error(
+                        "The server is full right now. You can still join a room that is " +
+                            "already open.",
+                    );
+                } else if (code === "TOO_MANY_ROOMS") {
+                    self.error(
+                        "Too many rooms are open from your network. Try again when one ends.",
+                    );
                 } else if (entry.type === "create") {
                     self.error(code === "ID_TAKEN" ? "That code is taken." : CODE_HINT);
                 } else if (self.screen() === "room" || self.screen() === "play") {

@@ -47,6 +47,9 @@ assert.deepEqual(config_diff(base, { bump_limit: "" }), {}, "and an emptied box 
 assert.deepEqual(config_diff(base, { bump_limit: 0 }), {}, "endless is what it already is");
 assert.deepEqual(config_diff(base, "nonsense"), {}, "and so is a config that is not one");
 
+// Every client here comes from one address, and the suite holds more than three rooms open
+// at a time: the per-key cap is lifted until its own block at the end puts it back (#157).
+process.env.ROOMS_PER_KEY = "1000";
 const server = await start_server(0);
 const url = "ws://localhost:" + server.address().port + "/ws";
 
@@ -676,10 +679,17 @@ assert.ok(snap_start, "the host starts the match it will be the reference state 
 const matrix = new Array(16).fill(0);
 // A frame the snapshot already accounts for, then the snapshot, then two it does not: the
 // ring is the gap between that state and now, so the first one is dropped by the second.
+// The frame at 2 is what puts the room's clock at 3, so a snapshot on tick 3 is not ahead of it.
 snap_host.socket.send({ type: "input", match: 1, t: 1, seats: { 0: pressed } });
+snap_host.socket.send({ type: "input", match: 1, t: 2, seats: {} });
 snap_host.socket.send({ type: "snapshot", match: 1, t: 3, matrix, body: "SNAPSHOT-BODY" });
 snap_host.socket.send({ type: "input", match: 1, t: 5, seats: { 0: pressed } });
 snap_host.socket.send({ type: "input", match: 1, t: 6, seats: { 0: pressed } });
+// A snapshot past the room's own tick is not one the host can have taken: its frames run a
+// delay ahead of its simulation, so the relay's clock is always past the tick it snapshots.
+// Kept, it would be the floor `prune` cuts the ring to, emptying it and pushing every later
+// resume past the catch-up ceiling (#155). One tick past is the boundary, and 1e9 takes the same branch.
+snap_host.socket.send({ type: "snapshot", match: 1, t: 8, matrix, body: "FROM-THE-FUTURE" });
 await new Promise((resolve) => setTimeout(resolve, 100));
 
 const late_joiner = connect({ type: "join", id: "SNAPX" });
@@ -2388,6 +2398,196 @@ assert.ok(
 near.socket.close();
 remote.socket.close();
 for (const link of links) await link.close();
+
+// Three bounds on what a seat holder can make the relay keep and send (#156). The largest
+// message a client sends is the host's snapshot, and the relay's MAX_SNAPSHOT is 64 KiB of
+// body: one that size still gets through, so the payload cap has room for its envelope.
+const BODY = "x".repeat(64 * 1024);
+const flood = await two_seats("FLDXZ");
+flood.host.socket.send({ type: "input", match: 1, t: 1, seats: { 0: pressed_key } });
+flood.host.socket.send({ type: "snapshot", match: 1, t: 1, matrix, body: BODY });
+await new Promise((resolve) => setTimeout(resolve, 100));
+// A `driver` flood on the guest's own seat. Nobody sends a frame meanwhile, so the relay's
+// clock stands still and every change is stamped for one tick: every client applies all of
+// them, in order, and the ring the next resume ships keeps only the one they end on.
+for (let i = 0; i <= 2000; i++)
+    flood.guest.socket.send({ type: "driver", seat: 1, driver: i % 2 ? "local" : "ai" });
+const driver_frames = () => flood.host_saw.filter((msg) => msg.type === "driver");
+for (const since = Date.now(); driver_frames().length < 2001 && Date.now() - since < 2000;)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(driver_frames().length, 2001, "each toggle changes the seat, so each is fanned out");
+flood.host.socket.send({ type: "resync" });
+const flooded = await awaited_where(flood.host_saw, (msg) => msg.snapshot, "resume");
+assert.equal(flooded.snapshot.length, BODY.length, "a snapshot MAX_SNAPSHOT long gets through");
+assert.deepEqual(
+    flooded.changes,
+    [{ t: driver_frames()[0].t, seat: 1, driver: "ai" }],
+    "and a driver flood leaves one change in the ring, not two thousand and one",
+);
+// A change that changes nothing is not one: no frame and no room update for anybody. The
+// `local` after it is the marker that the relay has read both. Room updates are lobby
+// messages, so they land in `events` rather than with the frames.
+const mark = flood.host_saw.length;
+const room_mark = flood.host.events.length;
+flood.guest.socket.send({ type: "driver", seat: 1, driver: "ai" });
+flood.guest.socket.send({ type: "driver", seat: 1, driver: "local" });
+await awaited_where(flood.host_saw, (msg, i) => i >= mark && msg.type === "driver", "marker");
+await new Promise((resolve) => setTimeout(resolve, 100));
+const since_mark = flood.host_saw.slice(mark);
+assert.deepEqual(
+    since_mark.filter((msg) => msg.type === "driver").map((msg) => msg.driver),
+    ["local"],
+    "a driver the seat already has is not fanned out",
+);
+assert.equal(
+    flood.host.events.slice(room_mark).filter((msg) => msg.type === "room").length,
+    1,
+    "and does not describe the room again: only the change after it does",
+);
+
+// A token is the relay's own UUID handed back. One longer than that is no claim at all, and
+// the client is minted a fresh one -- which it keeps, as it keeps any token it is handed.
+const long_token = "x".repeat(37);
+const long_client = connect({ type: "join", id: "FLDXZ", token: long_token });
+const long_joined = await lobby(long_client);
+assert.notEqual(long_joined.token, long_token, "an over-long token is not stored");
+assert.equal(long_joined.token.length, 36, "the client is handed a UUID instead");
+const uuid_long = "y".repeat(36);
+const uuid_client = connect({ type: "join", id: "FLDXZ", token: uuid_long });
+assert.equal((await lobby(uuid_client)).token, uuid_long, "a UUID's length is still a token");
+
+// And a message past the largest one a client sends closes its socket rather than being
+// buffered whole: ws's own default is 100 MiB.
+const oversized = new WebSocket(url);
+await new Promise((resolve) => (oversized.onopen = resolve));
+// Raced, like every other wait here: a relay that buffers the message keeps the socket open.
+const refused_big = new Promise((resolve, reject) => {
+    oversized.onclose = resolve;
+    setTimeout(() => reject(new Error("the over-sized message was buffered")), 2000);
+});
+oversized.send(JSON.stringify({ type: "snapshot", body: BODY + BODY }));
+assert.equal((await refused_big).code, 1009, "an over-sized message closes the socket");
+for (const client of [flood.host, flood.guest, long_client, uuid_client]) client.socket.close();
+
+// The limits (#157). Every one keys on `CF-Connecting-IP`, which `WebSocket_Transport` cannot
+// set, so these are raw sockets: one entry, and its answer.
+function from(ip, entry, extra = {}) {
+    const headers = ip ? { "CF-Connecting-IP": ip, ...extra } : extra;
+    const socket = new WebSocket(url, { headers });
+    socket.onopen = () => socket.send(JSON.stringify(entry));
+    const answer = new Promise((resolve, reject) => {
+        socket.onmessage = ({ data }) => {
+            const msg = JSON.parse(data);
+            if (msg.type === "joined" || msg.type === "error") resolve(msg);
+        };
+        setTimeout(() => reject(new Error("no answer to " + entry.type)), 2000);
+    });
+    return { socket, answer };
+}
+const gone = async ({ socket }) => {
+    await new Promise((resolve) => ((socket.onclose = resolve), socket.close()));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+};
+
+// Three live rooms per key, and the key is the header rather than anything a client can
+// vary: a different `X-Forwarded-For` on each is still the one key.
+// Opened while the cap is still lifted: it is a key the suite has rooms open on already.
+const bare = from(null, { type: "create" });
+const bare_joined = await bare.answer;
+delete process.env.ROOMS_PER_KEY;
+const mine = [1, 2, 3].map((n) =>
+    from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2." + n }),
+);
+for (const room of mine) assert.equal((await room.answer).type, "joined", "three rooms per key");
+const fourth = from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2.4" });
+assert.equal((await fourth.answer).code, "TOO_MANY_ROOMS", "and not a fourth");
+const neighbour = from("10.0.0.2", { type: "create" });
+assert.equal((await neighbour.answer).type, "joined", "another key is not refused for it");
+// Capped by concurrency rather than rate: a room that ends frees its slot.
+await gone(mine[0]);
+const again = from("10.0.0.1", { type: "create" });
+assert.equal((await again.answer).type, "joined", "a room that ends frees its slot");
+// An IPv6 key is the /64 a home line is handed, however the address is written, and an
+// IPv4-mapped one is its IPv4: neither mints a fresh key per room.
+const same_line = ["2001:db8:1:2::a", "2001:DB8:1:2:ffff::b", "2001:0db8:0001:0002:1:2:3:4"];
+const line = same_line.map((ip) => from(ip, { type: "create" }));
+for (const room of line) assert.equal((await room.answer).type, "joined", "three from one /64");
+const line_fourth = from("2001:db8:1:2::c", { type: "create" });
+assert.equal(
+    (await line_fourth.answer).code,
+    "TOO_MANY_ROOMS",
+    "and a fourth address in it shares the cap",
+);
+const next_line = from("2001:db8:1:3::a", { type: "create" });
+assert.equal((await next_line.answer).type, "joined", "the next /64 is another key");
+const mapped = from("::ffff:10.0.0.1", { type: "create" });
+assert.equal((await mapped.answer).code, "TOO_MANY_ROOMS", "an IPv4-mapped address is its IPv4");
+// Without the header the key is the socket's own address, which is where this suite's
+// clients come from.
+process.env.ROOMS_PER_KEY = "1";
+const bare_second = from(null, { type: "create" });
+assert.equal((await bare_second.answer).code, "TOO_MANY_ROOMS", "no header: the socket's key");
+delete process.env.ROOMS_PER_KEY;
+
+// A full server refuses a new room and still lets a client into one that is open.
+process.env.MAX_ROOMS = "1";
+const refused_room = from("10.0.0.3", { type: "create" });
+assert.equal((await refused_room.answer).code, "SERVER_FULL", "no room past MAX_ROOMS");
+const refused_quick = from("10.0.0.3", { type: "quick", names: ["Ivy"] });
+assert.equal(
+    (await refused_quick.answer).code,
+    "SERVER_FULL",
+    "Quick Join included, when there is nothing it can join",
+);
+const joiner = from("10.0.0.3", { type: "join", id: bare_joined.id });
+assert.equal((await joiner.answer).type, "joined", "while a join still works");
+delete process.env.MAX_ROOMS;
+for (const client of [...mine, fourth, neighbour, again, bare, bare_second]) client.socket.close();
+for (const client of [...line, line_fourth, next_line, mapped]) client.socket.close();
+for (const client of [refused_room, refused_quick, joiner]) client.socket.close();
+
+// Sixty HTTP requests a minute per key, on whatever static and the room list do not answer.
+const http = "http://localhost:" + server.address().port;
+const as = (ip, path = "/healthz", extra = {}) =>
+    fetch(http + path, { headers: { "CF-Connecting-IP": ip, ...extra } });
+for (let n = 0; n < 60; n++) assert.equal((await as("10.9.9.9")).status, 200, "sixty go through");
+assert.equal((await as("10.9.9.9")).status, 429, "and the sixty-first does not");
+assert.equal(
+    (await as("10.9.9.9", "/healthz", { "X-Forwarded-For": "192.0.2.9" })).status,
+    429,
+    "whatever it says it was forwarded for",
+);
+assert.equal((await as("10.9.9.8")).status, 200, "another key has its own sixty");
+assert.equal((await as("10.9.9.9", "/jbcircle.png")).status, 200, "static is exempt");
+assert.equal((await as("10.9.9.9", "/api/rooms")).status, 200, "and so is the room list");
+
+// A socket that never enters a room is closed at ROOMLESS_MS, and one that is in a room is
+// never closed by it, seats or none: a spectator on the names screen and a client waiting in
+// the queue of a full room hold nothing and are both in it (#158).
+process.env.ROOMLESS_MS = "100";
+const roomless = new WebSocket(url);
+const reaped = new Promise((resolve, reject) => {
+    roomless.onclose = resolve;
+    setTimeout(() => reject(new Error("the roomless socket was kept")), 2000);
+});
+await reaped;
+const full_up = connect({ type: "create", id: "RPFUL" });
+await lobby(full_up);
+await full_up.seats(["Ada", "Bax", "Cal", "Dee"]);
+const seatless = connect({ type: "join", id: "RPFUL" });
+await lobby(seatless);
+const in_queue = connect({ type: "join", id: "RPFUL" });
+await lobby(in_queue);
+in_queue.socket.send({ type: "seats", names: ["Eli"] });
+await in_queue.until((msg) => msg.type === "room" && msg.queued);
+await new Promise((resolve) => setTimeout(resolve, 300));
+for (const client of [full_up, seatless, in_queue])
+    assert.ok(
+        !client.events.some((msg) => msg.code === "DISCONNECTED"),
+        "a client in a room is kept, seated, seatless or queued",
+    );
+delete process.env.ROOMLESS_MS;
+for (const client of [full_up, seatless, in_queue]) client.socket.close();
 
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");

@@ -294,6 +294,22 @@ export function Room(transport, read_input) {
         return drivers[seat] !== "off";
     };
 
+    // Seats this client holds that the room has handed to the AI: the relay does it after
+    // thirty ticks with no frames from it, and tells nobody but the driver table (#42, #76).
+    // Not one already on its way back: a resume stamps `local` 2d ticks past the relay's
+    // clock, and until that tick the seat is the AI's in the table but not the news.
+    this.ai_seats = function () {
+        var returning = [];
+        Object.keys(drivers_at).forEach(function (t) {
+            drivers_at[t].forEach(function (change) {
+                if (change.driver === "local") returning.push(change.seat);
+            });
+        });
+        return held.filter(function (seat) {
+            return drivers[seat] === "ai" && returning.indexOf(seat) < 0;
+        });
+    };
+
     // One tick of the room: apply the driver changes stamped for it, send this client's
     // input frame for every seat it drives, and hand back the frames to simulate now. A
     // seat with no driver at all is one nobody is holding, which is the AI's (#7).
