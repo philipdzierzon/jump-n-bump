@@ -885,7 +885,7 @@ function prune(room) {
 function keep_snapshot(client, msg) {
     const room = client.room;
     // A snapshot of the match that ended would be this match's reference state, served to
-    // every repair and every joiner until the host's next one (#145). Refused like the frame
+    // every repair and every joiner until the host's next one (#145). Same test as the frame
     // in `input`, with that case's ceiling for a page too old to stamp one.
     if (!client.host || !room.started || msg.match !== room.match) return;
     if (!Number.isInteger(msg.t) || msg.t < 0) return;
