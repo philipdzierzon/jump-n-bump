@@ -665,7 +665,7 @@ assert.equal(
         assert.equal(drawn, 1, "a bounded batch still draws, so the tab is not frozen either");
         slow.game.pause();
 
-        // The sprint branch `continue`s past both the draw and the yield, and any peer can
+        // The sprint branch keeps looping without reaching the draw or the yield, and any peer can
         // hold it open up to MAX_CATCH_UP every tick, so it needs the same bound -- and it is
         // this sub-case, not the one above, that fails without it: the pump would drain all
         // 38 backlog ticks in one block.
