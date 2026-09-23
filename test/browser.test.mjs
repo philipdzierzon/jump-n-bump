@@ -2482,7 +2482,10 @@ async function late_resume() {
     // past the two-second hold would have walked the client to the lobby by itself, and
     // every other assertion here would pass with the bug still in place.
     let at_release = null;
+    // The page's end of the socket, kept to hand it the same repair a second time below.
+    let to_guest = null;
     await guest.routeWebSocket(/\/ws/, (ws) => {
+        to_guest = ws;
         const relay = ws.connectToServer();
         ws.onMessage((frame) => relay.send(frame));
         relay.onMessage((frame) => {
@@ -2578,6 +2581,30 @@ async function late_resume() {
         [5, 0, 1, "Total deaths"],
         "and it ends up looking at the board of the match it played, not at a match screen " +
             "nobody else is in (#124, #13)",
+    );
+
+    // The other side of the hold (#150): the same repair, landing only once the walk is over.
+    // `#room` is where the lobby builds its session, and that one never saw the match end --
+    // counting from zero, it built the dead match and walked straight back to `#play`, which
+    // is what a slow CI runner did with the release above. The host's staged change is
+    // relayed over the same socket after the repair, so the banner's text arriving is the page
+    // having handled the repair first. Its text rather than its being shown: Knockout fills
+    // it in on whichever screen the page is on, so a page that did walk back to `#play` fails
+    // the claim below rather than this wait.
+    const hashes_before = (await hashes(guest)).length;
+    to_guest.send(held);
+    await open_settings(host);
+    await tick("No gore", true, host);
+    await click("Apply to the next match", host);
+    await until(
+        "the host's staged change on the guest",
+        async () => (await text(banner(guest).locator("b"))) !== "",
+    );
+    assert.deepEqual(
+        [built.length, (await hashes(guest)).slice(hashes_before)],
+        [1, []],
+        "a repair for the match that is over, landing on the lobby's session, builds nothing " +
+            "and walks nowhere (#150)",
     );
 
     assert.deepEqual(errors, [], "with nothing thrown on either page");
