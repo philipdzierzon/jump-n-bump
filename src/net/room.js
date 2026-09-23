@@ -308,9 +308,9 @@ export function Room(transport, read_input) {
             held.forEach(function (seat, scheme) {
                 if (drivers[seat] === "local") seats[seat] = read_input(scheme);
             });
-            // Every tick, unconditionally, stamped d ahead so the delay is the one-way
-            // trip; never echoed back to its sender, so this client schedules its own
-            // (#12, #6).
+            // Every tick, unconditionally, stamped d ahead so the delay is the trip through
+            // the relay to every other client; never echoed back to its sender, so this
+            // client schedules its own (#12, #6, #142).
             schedule_input(tick + self.d, seats);
             transport.send({ type: "input", match: self.match, t: tick + self.d, seats: seats });
             // On the same tick on every client, and from the same point in it: the state

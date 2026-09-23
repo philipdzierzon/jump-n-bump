@@ -10,6 +10,7 @@ import { LEVELS, MAX_CATCH_UP, config_diff, default_config } from "../src/net/ro
 import { start_server } from "../server/index.js";
 import { Room } from "../src/net/room.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
+import { lossy_proxy } from "./lossy_proxy.mjs";
 
 // Room ids: five characters, uppercase A-Z minus I and O, and the client's casing is not
 // what makes one legal.
@@ -53,14 +54,14 @@ const url = "ws://localhost:" + server.address().port + "/ws";
 // messages -- the handshake, every room update and every refusal -- are collected as they
 // arrive and awaited by shape, because seating is answered by a room update rather than by
 // a reply of its own. One waiter at a time, which is all this test ever has.
-function connect(entry) {
+function connect(entry, to = url) {
     const events = [];
     let wake = null;
     const record = (msg) => {
         events.push(msg);
         if (wake) wake();
     };
-    const socket = new WebSocket_Transport(url, entry, record, (code) =>
+    const socket = new WebSocket_Transport(to, entry, record, (code) =>
         record({ type: "error", code }),
     );
     return {
@@ -2350,6 +2351,43 @@ parse.guest.socket.receive(() => {});
 
 parse.host.socket.close();
 parse.guest.socket.close();
+
+// A frame makes two one-way trips before anybody else steps it: sender to relay, relay to
+// every other client. The delay has to cover both, or at 50 ms one-way the frame a client
+// stamps as it steps tick 0 reaches its peer after the peer has stepped tick d on released
+// keys, while the sender stepped it on real ones: a desync with nobody late at all, and a
+// repaired client left the same two trips behind the room (#142).
+const TICK_MS = 1000 / 60;
+const links = [];
+for (let i = 0; i < 2; i++) links.push(await lossy_proxy(server.address().port, { one_way: 50 }));
+const far = (i, entry) => connect(entry, "ws://127.0.0.1:" + links[i].port + "/ws");
+const near = far(0, { type: "create", id: "FARXZ" });
+await lobby(near);
+await near.seats(["Near"]);
+const remote = far(1, { type: "join", id: "FARXZ" });
+await lobby(remote);
+await remote.seats(["Away"]);
+const near_saw = [];
+const remote_saw = [];
+near.socket.receive((msg) => near_saw.push(msg));
+remote.socket.receive((msg) => remote_saw.push({ ...msg, at: performance.now() }));
+remote.socket.send({ type: "ready", ready: true });
+near.socket.send({ type: "start", seed: 7, settings: {} });
+const { d } = await until_seen(near_saw, (msg) => msg.type === "start", "the far match");
+const stamped_at = performance.now();
+near.socket.send({ type: "input", match: 1, t: d, seats: { 0: pressed_key } });
+const crossed = await until_seen(
+    remote_saw,
+    (msg) => msg.type === "input" && msg.t === d && msg.seats["0"],
+    "the far frame",
+);
+assert.ok(
+    crossed.at - stamped_at < d * TICK_MS,
+    `a frame stamped d ahead reaches the peer before the peer steps it: ${Math.round(crossed.at - stamped_at)} ms against d = ${d} (#142)`,
+);
+near.socket.close();
+remote.socket.close();
+for (const link of links) await link.close();
 
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");

@@ -719,7 +719,13 @@ function last_board(room) {
 
 // Derived once, from the worst one-way trip in the room, and fixed for the match: a delay
 // that adapts mid-match is a delay every client disagrees about (#34). Clients stamp ticks
-// ahead of time, so the cost is the one-way trip rather than the round trip.
+// ahead of time, and a frame makes two one-way trips before anybody steps it: sender to
+// relay, relay to every other client. Sized for one, a frame at 50 ms one-way reached its
+// peer a tick after the peer had stepped it on released keys, and the sender on real ones:
+// a desync, a repair of whoever was not the host -- the checksum reference -- and a repaired
+// client that lands the same two trips behind the room, where every frame it sent was late
+// (#142). Both trips, so a peer's frame is in before its tick and a client trailing the
+// room by that much is still on time.
 function input_delay(room) {
     let worst = 0;
     // Not the clients waiting for a seat: a queued client's round trip is nobody's frame
@@ -727,7 +733,10 @@ function input_delay(room) {
     // of somebody who is not playing (#44).
     for (const client of room.clients)
         if (!client.queued.length) worst = Math.max(worst, client.one_way);
-    return Math.min(10, Math.max(2, Math.ceil(worst / TICK_MS) + 1));
+    // ponytail: the cap of 10 now covers 75 ms one-way, where it covered 150 before, so a
+    // room with a player further out than that is late again. upgrade path: rollback, which
+    // takes the round trip out of the delay altogether (#136 §1).
+    return Math.min(10, Math.max(2, Math.ceil((2 * worst) / TICK_MS) + 1));
 }
 
 // The one thing the relay stamps itself, at currentTick + 2d (#12). `tick` is the first
@@ -1357,12 +1366,13 @@ function relay(client, msg) {
             // is its holder sending, so its own seats' gap counts from here -- `client.seats`
             // and not `msg.seats`, so naming a seat it does not hold resets nothing. A client
             // repaired over a real link lands a round trip behind the room and never catches
-            // up, so every frame it sends is late; that lateness is #142's, and this only
-            // stops it costing the player the seat thirty ticks later (#140).
+            // up, so a frame it sends is late whenever d does not cover that trip -- the
+            // delay does since #142, but a stall can still eat it -- and this stops it costing
+            // the player the seat thirty ticks later (#140).
             //
             // ponytail: a client stuck behind the room keeps its seat for the rest of the match
             // and its bunny plays released keys, where the AI used to move it. upgrade path:
-            // #142 puts the client back on time; then decide whether late still means alive.
+            // decide whether late still means alive once a stall can be caught up (#136 §1).
             if (msg.t < room.due) {
                 for (const seat of client.seats) room.missing[seat] = 0;
                 return void room.late++;
