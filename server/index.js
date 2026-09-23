@@ -101,8 +101,13 @@ const password_of = (msg) => (msg.password == null ? null : String(msg.password)
 
 // The client's claimed identity, coerced once: the door and `admit` have to agree on what
 // the token is, or a token could open a door it then reclaims nothing through (#7, #117).
-// Empty is no claim at all, and `admit` mints one instead.
-const token_of = (msg) => String(msg.token || "");
+// Empty is no claim at all, and `admit` mints one instead. So is one longer than the UUID
+// the relay mints: it is a key in `room.allowances` and a reservation, and a real client only
+// ever sends back the one it was handed on `joined` (#156).
+const token_of = (msg) => {
+    const token = String(msg.token || "");
+    return token.length > 36 ? "" : token;
+};
 
 function create(client, msg) {
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
@@ -187,9 +192,11 @@ function create(client, msg) {
         // socket is what a reload replaces, so a counter on it counts reloads, not repairs.
         // Emptied at `begin`, which is the fresh start a new match is. Not a growth bound: a
         // room that never starts one, or an endless match, accumulates one entry per token
-        // admitted. Bounded with the rest of abuse (#47).
+        // admitted -- each key no longer than a UUID (#156), their count bounded with the rest
+        // of abuse (#47).
         //
-        // ponytail: the token is accepted from the client verbatim (`admit`), so a client that
+        // ponytail: the token is accepted from the client verbatim up to a UUID's length
+        // (`token_of`), so a client that
         // wants a fresh allowance sends a fresh one. The seat no longer comes back with it:
         // both doors into one refuse a seat the AI is not driving mid-match, so a `leave`
         // costs the thirty missing ticks it takes the room to hand that bunny over rather
@@ -742,13 +749,29 @@ function input_delay(room) {
 // The one thing the relay stamps itself, at currentTick + 2d (#12). `tick` is the first
 // tick no client has reported stepping past: stamping one already stepped past would lose
 // the change, since that tick never comes round again.
+//
+// A change that changes nothing is nothing: no stamp, no frame and no room update, so a
+// holder repeating itself costs the room nothing (#156). A second change for a seat on the
+// tick its last one is still pending for replaces that one in the ring rather than joining
+// it -- every client applies both, in order, so the ring only needs the one it ends on, and
+// a pair that cancels out leaves nothing. So a flood holds the ring to a seat per stamped
+// tick, the same window `prune` already floors `room.inputs` to.
+//
+// ponytail: a holder toggling its seat once a tick still stamps one change a tick, up to
+// SEATS * (MAX_CATCH_UP + 2d) of them behind a host that stops snapshotting, and every one
+// is still fanned out. upgrade path: a per-client rate limit (#47).
 function stamp_driver(room, seat, driver) {
+    if (room.drivers[seat] === driver) return;
     const t = room.tick + 2 * room.d;
     // A seat handed to a client starts its gap count again: whatever that seat missed, it
     // missed while somebody else was driving it (#42).
     if (driver === "local") room.missing[seat] = 0;
     broadcast_frame(room, { type: "driver", t, seat, driver });
-    room.stamped.push({ t, seat, driver, was: room.drivers[seat] });
+    const last = room.stamped.findLast((change) => change.seat === seat);
+    if (last && last.t === t) {
+        last.driver = driver;
+        if (last.was === driver) room.stamped.splice(room.stamped.lastIndexOf(last), 1);
+    } else room.stamped.push({ t, seat, driver, was: room.drivers[seat] });
     // A client that walks back to the lobby keeps its seats and hands the AI its bunnies,
     // so the seat is held, its holder is connected, and the AI is driving it all the same.
     // The board has to say so, which means the room is described again (#13, #39).
@@ -1535,7 +1558,10 @@ export function start_server(port = PORT) {
     app.get("/api/rooms", (_req, res) => res.set("Cache-Control", "max-age=10").json(listings()));
 
     const server = app.listen(port, "0.0.0.0");
-    const sockets = new WebSocketServer({ server, path: "/ws" });
+    // The largest message a client sends is the host's snapshot, whose body is ASCII base64
+    // capped at MAX_SNAPSHOT; the rest of its envelope is a few hundred bytes. Anything past
+    // that closes the socket rather than being buffered at ws's 100 MiB default (#156).
+    const sockets = new WebSocketServer({ server, path: "/ws", maxPayload: MAX_SNAPSHOT + 4096 });
 
     sockets.on("connection", (client) => {
         client.one_way = 0;
@@ -1545,11 +1571,16 @@ export function start_server(port = PORT) {
         const ping = () => send(client, { type: "ping", at: Date.now() });
         const timer = setInterval(ping, PING_MS);
         ping();
+        // A frame past `maxPayload` is an `error` on this socket before it is a close, and an
+        // `error` nobody listens for takes the whole relay down with it. The close that
+        // follows is handled below like any other (#156).
+        client.on("error", () => {});
 
         client.on("message", (data) => {
             let msg;
             // ponytail: a malformed frame is dropped and the connection kept. upgrade
-            // path: rate limits and payload caps live with the rest of abuse (#47).
+            // path: rate limits live with the rest of abuse (#47); the payload cap is
+            // `maxPayload` above (#156).
             try {
                 msg = JSON.parse(data.toString());
             } catch {

@@ -2396,6 +2396,76 @@ near.socket.close();
 remote.socket.close();
 for (const link of links) await link.close();
 
+// Three bounds on what a seat holder can make the relay keep and send (#156). The largest
+// message a client sends is the host's snapshot, and the relay's MAX_SNAPSHOT is 64 KiB of
+// body: one that size still gets through, so the payload cap has room for its envelope.
+const BODY = "x".repeat(64 * 1024);
+const flood = await two_seats("FLDXZ");
+flood.host.socket.send({ type: "input", match: 1, t: 1, seats: { 0: pressed_key } });
+flood.host.socket.send({ type: "snapshot", match: 1, t: 1, matrix, body: BODY });
+await new Promise((resolve) => setTimeout(resolve, 100));
+// A `driver` flood on the guest's own seat. Nobody sends a frame meanwhile, so the relay's
+// clock stands still and every change is stamped for one tick: every client applies all of
+// them, in order, and the ring the next resume ships keeps only the one they end on.
+for (let i = 0; i <= 2000; i++)
+    flood.guest.socket.send({ type: "driver", seat: 1, driver: i % 2 ? "local" : "ai" });
+const driver_frames = () => flood.host_saw.filter((msg) => msg.type === "driver");
+for (const since = Date.now(); driver_frames().length < 2001 && Date.now() - since < 2000;)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(driver_frames().length, 2001, "each toggle changes the seat, so each is fanned out");
+flood.host.socket.send({ type: "resync" });
+const flooded = await awaited_where(flood.host_saw, (msg) => msg.snapshot, "resume");
+assert.equal(flooded.snapshot.length, BODY.length, "a snapshot MAX_SNAPSHOT long gets through");
+assert.deepEqual(
+    flooded.changes,
+    [{ t: driver_frames()[0].t, seat: 1, driver: "ai" }],
+    "and a driver flood leaves one change in the ring, not two thousand and one",
+);
+// A change that changes nothing is not one: no frame and no room update for anybody. The
+// `local` after it is the marker that the relay has read both. Room updates are lobby
+// messages, so they land in `events` rather than with the frames.
+const mark = flood.host_saw.length;
+const room_mark = flood.host.events.length;
+flood.guest.socket.send({ type: "driver", seat: 1, driver: "ai" });
+flood.guest.socket.send({ type: "driver", seat: 1, driver: "local" });
+await awaited_where(flood.host_saw, (msg, i) => i >= mark && msg.type === "driver", "marker");
+await new Promise((resolve) => setTimeout(resolve, 100));
+const since_mark = flood.host_saw.slice(mark);
+assert.deepEqual(
+    since_mark.filter((msg) => msg.type === "driver").map((msg) => msg.driver),
+    ["local"],
+    "a driver the seat already has is not fanned out",
+);
+assert.equal(
+    flood.host.events.slice(room_mark).filter((msg) => msg.type === "room").length,
+    1,
+    "and does not describe the room again: only the change after it does",
+);
+
+// A token is the relay's own UUID handed back. One longer than that is no claim at all, and
+// the client is minted a fresh one -- which it keeps, as it keeps any token it is handed.
+const long_token = "x".repeat(37);
+const long_client = connect({ type: "join", id: "FLDXZ", token: long_token });
+const long_joined = await lobby(long_client);
+assert.notEqual(long_joined.token, long_token, "an over-long token is not stored");
+assert.equal(long_joined.token.length, 36, "the client is handed a UUID instead");
+const uuid_long = "y".repeat(36);
+const uuid_client = connect({ type: "join", id: "FLDXZ", token: uuid_long });
+assert.equal((await lobby(uuid_client)).token, uuid_long, "a UUID's length is still a token");
+
+// And a message past the largest one a client sends closes its socket rather than being
+// buffered whole: ws's own default is 100 MiB.
+const oversized = new WebSocket(url);
+await new Promise((resolve) => (oversized.onopen = resolve));
+// Raced, like every other wait here: a relay that buffers the message keeps the socket open.
+const refused_big = new Promise((resolve, reject) => {
+    oversized.onclose = resolve;
+    setTimeout(() => reject(new Error("the over-sized message was buffered")), 2000);
+});
+oversized.send(JSON.stringify({ type: "snapshot", body: BODY + BODY }));
+assert.equal((await refused_big).code, 1009, "an over-sized message closes the socket");
+for (const client of [flood.host, flood.guest, long_client, uuid_client]) client.socket.close();
+
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");
 process.exit(0);
