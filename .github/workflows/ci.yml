@@ -33,11 +33,16 @@ jobs:
       # assertion run covers webpack, static serving and the WebSocket.
       - run: docker build -t jnb .
       # The browser walk is one address holding more than three rooms at once (#157).
-      - run: docker run -d -e ROOMS_PER_KEY=1000 -p 8080:8080 jnb
+      - run: docker run -d --name jnb -e ROOMS_PER_KEY=1000 -p 8080:8080 jnb
       # Two seconds, and it says whether the container is broken at all before the
       # browser spends longer finding out. It needs no browser, which is also why it
       # can be pointed at a deployed instance.
       - run: node server/smoke.mjs http://localhost:8080
+      # Operator metrics (#48) are never published, so they are read from inside the
+      # container: the 9090 default, prom-client in the image's production install and the
+      # default metrics, in one line. The tests all bind port 0 and can prove none of it.
+      # 127.0.0.1, not localhost: the image resolves localhost to ::1, and the relay binds IPv4.
+      - run: docker exec jnb wget -qO- 127.0.0.1:9090/metrics | grep -q '^jnb_nodejs_eventloop_lag_seconds '
       # The one browser walk, against the shipping image rather than the working tree:
       # an asset missing from the container fails here. Same command as locally; only
       # the environment differs.

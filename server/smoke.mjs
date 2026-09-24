@@ -10,7 +10,7 @@ const child = given
     ? null
     : spawn("node", ["index.js"], {
           cwd: import.meta.dirname,
-          env: { ...process.env, PORT: 8099 },
+          env: { ...process.env, PORT: 8099, METRICS_PORT: 0 },
           stdio: "inherit",
       });
 

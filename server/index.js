@@ -10,9 +10,12 @@
 // Rooms live in this process's memory. Ceiling: one process, and a restart drops every
 // room -- the same blast radius a reconnect has to handle anyway (#42).
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
+import { Counter, Gauge, collectDefaultMetrics, register } from "prom-client";
 import { WebSocketServer } from "ws";
 
 import { generate_room_id, normalise_room_id } from "../src/net/room_id.js";
@@ -25,6 +28,10 @@ import {
 } from "../src/net/room_config.js";
 
 const PORT = process.env.PORT || 8080;
+// Operator metrics (#48): a second listener the tunnel never routes -- it points at
+// game:8080 and nothing else. Never published on the host; #49's Prometheus reaches it
+// across the compose network. CI checks the default inside the image.
+const METRICS_PORT = process.env.METRICS_PORT || 9090;
 const TICK_MS = 1000 / 60;
 const PING_MS = 1000;
 const SEATS = 4;
@@ -90,11 +97,147 @@ const rooms_per_key = () => Number(process.env.ROOMS_PER_KEY || 3);
 const roomless_ms = () => Number(process.env.ROOMLESS_MS || 30000);
 // Requests per limiter key per minute on the HTTP routes the bucket covers (#47).
 const HTTP_PER_MINUTE = 60;
+// `jnb_ratelimit_trips_total` (#47): every refusal by a per-key budget -- the HTTP bucket and
+// the rooms-per-key cap, not `SERVER_FULL`, which is capacity rather than abuse. Unlabelled,
+// per #48's cardinality policy.
+// Exposed by #48's Counter below, which reads it at scrape time.
+export let ratelimit_trips = 0;
 
 const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
 // inherits the host when one leaves (#14).
 let arrivals = 0;
+
+// Operator metrics (#48), scraped live and never stored: not the statistics below, which
+// are public, cumulative and bump-gated (#20, #46). Read out of memory at scrape time and
+// never out of SQLite. No label ever names a room, a seat or a level -- room ids are minted
+// and destroyed continuously, so a room label is an unbounded series. Which room: the log.
+// Everything is `jnb_*`, the default process metrics included, so no name can be mistaken
+// for a statistic. Event-loop lag is the one that says a 60 Hz relay is dying.
+collectDefaultMetrics({ prefix: "jnb_" });
+const desyncs_total = new Counter({
+    name: "jnb_desyncs_total",
+    help: "Checksum mismatches seen, every room together (#19). Which room: the relay log.",
+});
+// #47's integer, read at scrape time, so the two refusal sites stay one `++` each.
+new Counter({
+    name: "jnb_ratelimit_trips_total",
+    help: "Refusals by a per-key budget: HTTP 429 and TOO_MANY_ROOMS (#47).",
+    collect() {
+        this.reset();
+        this.inc(ratelimit_trips);
+    },
+});
+new Gauge({
+    name: "jnb_rooms",
+    help: "Rooms open now.",
+    collect() {
+        this.set(Object.keys(rooms).length);
+    },
+});
+new Gauge({
+    name: "jnb_clients",
+    help: "Sockets in a room now, spectators and the queue included.",
+    collect() {
+        let n = 0;
+        for (const room of Object.values(rooms)) n += room.clients.size;
+        this.set(n);
+    },
+});
+
+// Site-wide statistics (#46): six integers in one row, and nothing per match or per room.
+// `stats` is what `/api/stats` serves, so a request never reads SQLite; `unflushed` is what
+// the next flush adds (the four sums) or raises to (the two maxima), so every write is
+// monotonic and a crash loses at most one interval's tail, never a counter (#20).
+const zeroed = {
+    rooms_ever: 0,
+    matches_ever: 0,
+    minutes_played_total: 0,
+    minutes_played_max_room: 0,
+    bumps_total: 0,
+    bumps_max_match: 0,
+};
+const stats = { ...zeroed };
+let unflushed = { ...zeroed };
+// In-game milliseconds not yet flushed as whole minutes.
+let played_ms = 0;
+let db = null;
+const count = (key, n) => {
+    stats[key] += n;
+    unflushed[key] += n;
+};
+const top = (key, n) => {
+    stats[key] = Math.max(stats[key], n);
+    unflushed[key] = Math.max(unflushed[key], n);
+};
+// Minutes stop accruing this long after the last input bit a room saw (#46).
+// ponytail: idle only stops minutes accruing, the room is not closed, and a room waking from
+// idle is credited the time since its last flush (at most one interval). upgrade path: a
+// reaper, if abandoned rooms ever show up in memory.
+const IDLE_MS = 5 * 60000;
+// Read once, at `start_server`: it exists for the tests, which cannot wait 30 s.
+const stats_flush_ms = () => Number(process.env.STATS_FLUSH_MS || 30000);
+// The host's board, flat. Bounded per cell and not merely safe: 1e308 would make
+// `bumps_total` Infinity, and sixteen MAX_SAFE_INTEGER cells sum past 2^53, which SQLite
+// stores as int64 and the next boot cannot read back as a number -- a restart loop.
+// ponytail: a match adds at most 16 * 0xffff, so `bumps_total` passes 2^53 only after ~8e9
+// matches. upgrade path: `setReadBigInts` and a clamp on load, if that ever looks near.
+const bumps_board = (flat) =>
+    flat.length === SEATS * SEATS &&
+    flat.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff);
+
+// Bumps come from the host's board and nowhere else (#19). A match counts on its first bump,
+// in the same call as the bump, so both land in one flush -- and with no minimum duration.
+function credit_bumps(room, flat) {
+    const sum = flat.reduce((a, b) => a + b, 0);
+    if (sum <= room.credited) return;
+    if (!room.credited) count("matches_ever", 1);
+    count("bumps_total", sum - room.credited);
+    room.credited = sum;
+    top("bumps_max_match", sum);
+}
+
+// In-game time since the last bank, capped at IDLE_MS past the last input bit. `played` is
+// the room's whole lifetime, never reset at `begin`, so the maximum is per room.
+function bank(room) {
+    if (!room.started) return;
+    const now = Date.now();
+    const end = Math.min(now, room.last_bit + IDLE_MS);
+    const ms = Math.max(0, end - room.since);
+    room.since = now;
+    room.played += ms;
+    played_ms += ms;
+    top("minutes_played_max_room", Math.floor(room.played / 60000));
+}
+
+export function flush_stats() {
+    for (const room of Object.values(rooms)) bank(room);
+    const whole = Math.floor(played_ms / 60000);
+    const u = unflushed;
+    // Caught, and nothing zeroed: a throw in the interval would take every live room down
+    // with it, and what was not written is retried on the next flush.
+    try {
+        db.prepare(
+            "UPDATE stats SET rooms_ever = rooms_ever + ?, matches_ever = matches_ever + ?, " +
+                "minutes_played_total = minutes_played_total + ?, " +
+                "minutes_played_max_room = MAX(minutes_played_max_room, ?), " +
+                "bumps_total = bumps_total + ?, bumps_max_match = MAX(bumps_max_match, ?)",
+        ).run(
+            u.rooms_ever,
+            u.matches_ever,
+            whole,
+            u.minutes_played_max_room,
+            u.bumps_total,
+            u.bumps_max_match,
+        );
+    } catch (error) {
+        console.log("stats flush failed: %s", error.message);
+        return;
+    }
+    played_ms -= whole * 60000;
+    stats.minutes_played_total += whole;
+    unflushed = { ...zeroed };
+}
 
 function send(client, msg) {
     if (client.readyState === client.OPEN) client.send(JSON.stringify(msg));
@@ -153,8 +296,10 @@ function create(client, msg) {
     // A room keeps the key that opened it until it ends, host migration or not.
     const live = Object.values(rooms);
     if (live.length >= max_rooms()) return send(client, { type: "error", code: "SERVER_FULL" });
-    if (live.filter((room) => room.key === client.key).length >= rooms_per_key())
+    if (live.filter((room) => room.key === client.key).length >= rooms_per_key()) {
+        ratelimit_trips++;
         return send(client, { type: "error", code: "TOO_MANY_ROOMS" });
+    }
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
     if (!id) return send(client, { type: "error", code: "BAD_ID" });
     // A host-chosen id is answered honestly when it is taken: this is the creator's own
@@ -274,7 +419,14 @@ function create(client, msg) {
         deadline: null,
         timer: null,
         pending: null,
+        // Statistics (#46): the board sum already credited this match, the room's in-game
+        // lifetime in ms, when that was last banked, and the last input bit it saw.
+        credited: 0,
+        played: 0,
+        since: 0,
+        last_bit: 0,
     };
+    count("rooms_ever", 1);
     console.log("room %s created", id);
     admit(client, rooms[id], msg);
 }
@@ -485,6 +637,8 @@ function reset_ready(room) {
 // it -- one that reaches the lobby and one whose room died with its last client.
 function report_match(room) {
     if (!room.started) return;
+    // Every room-level trigger ends here: match end, lobby, host left, last client gone.
+    bank(room);
     console.log(
         "room %s match over: %d frames substituted, %d late, %d forged, %d stale",
         room.id,
@@ -995,9 +1149,9 @@ function keep_snapshot(client, msg) {
     if (msg.t > room.tick) return;
     if (typeof msg.body !== "string" || !msg.body.length || msg.body.length > MAX_SNAPSHOT) return;
     const matrix = msg.matrix;
-    if (!Array.isArray(matrix) || matrix.length !== SEATS * SEATS) return;
-    if (!matrix.every((bumps) => Number.isInteger(bumps) && bumps >= 0)) return;
+    if (!Array.isArray(matrix) || !bumps_board(matrix)) return;
     room.snapshot = { t: msg.t, matrix, body: msg.body };
+    credit_bumps(room, matrix);
     // The frames and the driver changes that state already accounts for are the ones
     // nobody will ever ask for again: what both lists are for is the gap between it and
     // now, and the snapshot's tick is where that gap starts.
@@ -1164,8 +1318,10 @@ function desync(client, t) {
     // disagreement any more, and must not spend a repair.
     if (!room.clients.has(client) || spent.dropped) return;
     // Counted at detection rather than beside the repair: the counter says what the relay
-    // saw, the log line beneath it says what the relay did about it (#118).
+    // saw, the log line beneath it says what the relay did about it (#118), and
+    // `jnb_desyncs_total` is the same count for every room at once (#48).
     room.desyncs++;
+    desyncs_total.inc();
     // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
     // and the first hashes are half a second in, so the whole allowance would be spent
     // before a single repair could be sent. Marked instead, and answered by that first
@@ -1272,6 +1428,8 @@ function begin(room, msg) {
     room.last_frame = new Array(SEATS).fill(null);
     room.guessed = new Array(SEATS).fill(0);
     room.substituted = room.late = room.forged = room.stale = 0;
+    room.credited = 0;
+    room.since = room.last_bit = Date.now();
     // A fresh match is a legitimately fresh allowance -- for every token in the room, dropped
     // or not (#41, #93). Cleared before the walk below, or the re-point it does is thrown
     // away again.
@@ -1503,6 +1661,10 @@ function relay(client, msg) {
                     if (client.seats.includes(+seat)) seats[seat] = msg.seats[seat];
                     else room.forged++;
                 }
+            // A key held on a seat the sender really holds is what keeps minutes accruing
+            // (#46). Frames the relay substitutes never come through here.
+            if (Object.values(seats).some((k) => k && (k.left || k.right || k.up)))
+                room.last_bit = Date.now();
             // On time, so it is what `substitute` repeats if the next one is not (#141).
             for (const seat in seats) {
                 room.last_frame[seat] = seats[seat];
@@ -1568,6 +1730,12 @@ function relay(client, msg) {
             // client that still believes it is host through a migration is dropped here in
             // silence, which is the relay's flag being the one that counts (#82).
             if (!client.host) return;
+            // The final board, credited before the room leaves the match: snapshots come
+            // every two seconds, so the bump that ends a bump-limit match is only here (#46).
+            {
+                const flat = Array.isArray(msg.matrix) ? msg.matrix.flat() : [];
+                if (room.started && bumps_board(flat)) credit_bumps(room, flat);
+            }
             // The announcement is over with it, so an arrival is told about a room and not
             // about a match nobody is running.
             to_lobby(room, msg);
@@ -1616,7 +1784,7 @@ function listings() {
         .sort((a, b) => b.seats - a.seats);
 }
 
-export function start_server(port = PORT) {
+export function start_server(port = PORT, metrics_port = METRICS_PORT) {
     const app = express();
     // Resolved from this file rather than from the working directory: the image runs it
     // from /app and a developer runs it from the repo root, and neither should have to
@@ -1630,6 +1798,13 @@ export function start_server(port = PORT) {
     // authoritative -- the join attempt is. Ten seconds of cache is what keeps a refresh
     // button from being a polling loop in disguise, and is its only limit (#29, #43, #47).
     app.get("/api/rooms", (_req, res) => res.set("Cache-Control", "max-age=10").json(listings()));
+    // Out of memory, never SQLite, beside the room list and before the limiter for the same
+    // reason (#46, #47). `rooms_now` is every room, seated or not, and is never stored.
+    app.get("/api/stats", (_req, res) =>
+        res
+            .set("Cache-Control", "max-age=10")
+            .json({ ...stats, rooms_now: Object.keys(rooms).length }),
+    );
     // The blanket bucket, on whatever is left: registration order is the whole exemption.
     // Static answers any file it finds (a cold load is 16-20 requests) and `/api/rooms` is
     // answered above, so neither reaches it; the WebSocket upgrade is not an Express route.
@@ -1642,12 +1817,44 @@ export function start_server(port = PORT) {
         const key = key_of(req);
         const n = (hits.get(key) || 0) + 1;
         hits.set(key, n);
-        if (n > HTTP_PER_MINUTE) res.sendStatus(429);
-        else next();
+        if (n > HTTP_PER_MINUTE) {
+            ratelimit_trips++;
+            res.sendStatus(429);
+        } else next();
     });
     app.get("/healthz", (_req, res) => res.type("text/plain").send("ok"));
 
+    // One row, created once and never reset; `:memory:` unless the deployment names a file.
+    db = new DatabaseSync(process.env.STATS_DB || ":memory:");
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS stats (" +
+            Object.keys(zeroed)
+                .map((key) => key + " INTEGER NOT NULL")
+                .join(", ") +
+            ")",
+    );
+    db.exec("INSERT INTO stats SELECT 0, 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM stats)");
+    Object.assign(stats, db.prepare("SELECT * FROM stats").get());
+    setInterval(flush_stats, stats_flush_ms()).unref();
+    // Synchronous, so it runs inside `exit`: teardown is an early flush.
+    process.on("exit", flush_stats);
+
     const server = app.listen(port, "0.0.0.0");
+    // Its own app, so nothing registered on the public one -- static, the limiter, the API --
+    // is reachable here, and `/metrics` is reachable nowhere else (#27, #48). Not rate-limited:
+    // one scraper, and nobody off the compose network can reach it.
+    // ponytail: the tunnel network can reach game:9090 too; only the tunnel's Public Hostname
+    // config keeps it off the internet. upgrade path: bind to the jump-n-bump network's address
+    // if the tunnel ever routes by wildcard.
+    const metrics_app = express();
+    metrics_app.get("/metrics", (_req, res, next) =>
+        register
+            .metrics()
+            .then((body) => res.set("Content-Type", register.contentType).send(body), next),
+    );
+    const metrics = metrics_app.listen(metrics_port, "0.0.0.0");
+    server.metrics = metrics;
+    server.on("close", () => metrics.close());
     // The largest message a client sends is the host's snapshot, whose body is ASCII base64
     // capped at MAX_SNAPSHOT; the rest of its envelope is a few hundred bytes. Anything past
     // that closes the socket rather than being buffered at ws's 100 MiB default (#156).
@@ -1709,9 +1916,19 @@ export function start_server(port = PORT) {
         });
     });
 
-    return new Promise((resolve) => server.on("listening", () => resolve(server)));
+    return Promise.all([once(server, "listening"), once(metrics, "listening")]).then(() => server);
 }
 
 // Run directly rather than imported by a test.
-if (process.argv[1] === import.meta.filename)
-    start_server().then((server) => console.log("listening on :%d", server.address().port));
+if (process.argv[1] === import.meta.filename) {
+    // Node as PID 1 ignores SIGTERM, so `docker stop` would SIGKILL after ten seconds and the
+    // exit flush above would never run.
+    for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => process.exit(0));
+    start_server().then((server) =>
+        console.log(
+            "listening on :%d, metrics on :%d",
+            server.address().port,
+            server.metrics.address().port,
+        ),
+    );
+}

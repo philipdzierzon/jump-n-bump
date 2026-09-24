@@ -7,7 +7,16 @@ so rendering and sound are verified manually: build, open, play.
 Online play needs the relay in `server/`, which has dependencies of its own: `npm ci` in
 `server/` once, then `node server/index.js` from anywhere serves the built client and the
 WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
-`Dockerfile` is how it actually ships.
+`Dockerfile` is how it actually ships. The site statistics (#46) are one SQLite row at
+`STATS_DB` -- `:memory:` when unset, `/app/data/stats.db` in the image, which compose
+bind-mounts from `./data/relay`, so backup is `tar` on `data/`. Operator metrics (#48) are
+`/metrics` on a second listener at `:9090` (`METRICS_PORT`), never published and never routed
+by the tunnel; they are live `jnb_*` gauges and counters out of memory, never SQLite, and no
+label names a room. `compose.yaml` also runs Prometheus (`127.0.0.1:9090`, data in
+`./data/prometheus`) and Grafana (`127.0.0.1:3000`, default admin/admin, one dashboard
+provisioned from `monitoring/`), reached with `ssh -L 3000:127.0.0.1:3000`; while they run, a
+relay started on the host needs `METRICS_PORT=0` (#49). An idle room (five minutes
+without a key held) stops accruing minutes but is not closed.
 
 `npm test` runs four files, and builds the client first because one of them opens a browser.
 `test/replay.test.mjs` replays the simulation twice from one seed and one input log, with no

@@ -2,8 +2,13 @@
 // It runs against a real server on a real socket, because the protocol is the thing under
 // test and a fake of it would be the thing under test instead. Run with `npm test`.
 import assert from "node:assert";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import { format } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { normalise_room_id } from "../src/net/room_id.js";
 import {
@@ -13,7 +18,7 @@ import {
     config_diff,
     default_config,
 } from "../src/net/room_config.js";
-import { start_server } from "../server/index.js";
+import { flush_stats, ratelimit_trips, start_server } from "../server/index.js";
 import { Room } from "../src/net/room.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { lossy_proxy } from "./lossy_proxy.mjs";
@@ -56,7 +61,13 @@ assert.deepEqual(config_diff(base, "nonsense"), {}, "and so is a config that is 
 // Every client here comes from one address, and the suite holds more than three rooms open
 // at a time: the per-key cap is lifted until its own block at the end puts it back (#157).
 process.env.ROOMS_PER_KEY = "1000";
-const server = await start_server(0);
+// Statistics go to a file of the suite's own, and the 30 s interval is pushed out of the way:
+// the block below flushes by hand, on a clock of its own (#46). Read once, at boot.
+const stats_db = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jnb-")), "stats.db");
+process.env.STATS_DB = stats_db;
+process.env.STATS_FLUSH_MS = "3600000";
+const server = await start_server(0, 0);
+delete process.env.STATS_FLUSH_MS;
 const url = "ws://localhost:" + server.address().port + "/ws";
 
 // The transport is the client's, so the test drives the same one the browser does. Lobby
@@ -113,6 +124,188 @@ function connect(entry, to = url) {
 const lobby_token = async (client) => (await client.until((msg) => msg.type === "joined")).token;
 
 const lobby = (client) => client.until((msg) => msg.type === "joined" || msg.type === "error");
+
+// --- site-wide statistics (#46) ---------------------------------------------------------
+// First, while no other room exists. What is stored is read from the file, and what is
+// served from the route, so "served from memory" and "flushed monotonically" are two answers.
+const row = (file = stats_db) => {
+    const db = new DatabaseSync(file);
+    try {
+        return db.prepare("SELECT * FROM stats").get();
+    } finally {
+        db.close();
+    }
+};
+const api = async (base = "http://localhost:" + server.address().port) => {
+    const res = await fetch(base + "/api/stats");
+    return { body: await res.json(), headers: res.headers };
+};
+const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+// Operator metrics (#48): their own listener, and one sample read by exact name.
+const metrics_http = "http://localhost:" + server.metrics.address().port;
+const scrape = async () => (await fetch(metrics_http + "/metrics")).text();
+const sample = (text, name) => Number(text.match(new RegExp("^" + name + " (\\S+)$", "m"))?.[1]);
+const board = (...head) => [...head, ...new Array(16 - head.length).fill(0)];
+const real_now = Date.now;
+const T = real_now();
+const MIN = 60000;
+let fake = T;
+// Every clock the triggers read is inside a socket handler, so the clock itself is faked.
+Date.now = () => fake;
+try {
+    {
+        const db = new DatabaseSync(stats_db);
+        assert.deepEqual(
+            db
+                .prepare("PRAGMA table_info(stats)")
+                .all()
+                .map((column) => column.name),
+            [
+                "rooms_ever",
+                "matches_ever",
+                "minutes_played_total",
+                "minutes_played_max_room",
+                "bumps_total",
+                "bumps_max_match",
+            ],
+            "exactly six stored integers",
+        );
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM stats").get().n, 1, "in one row");
+        assert.equal(
+            db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n,
+            1,
+            "and no table per match or per room",
+        );
+        db.close();
+    }
+
+    const a = connect({ type: "create", id: "WQXAA" });
+    await lobby(a);
+    const first = await api();
+    assert.equal(first.body.rooms_ever, 1, "a room counts the moment it exists");
+    assert.equal(first.body.rooms_now, 1, "the gauge takes no filter: this room has no seats");
+    assert.equal(row().rooms_ever, 0, "and is served from memory before any flush");
+    assert.equal(first.headers.get("cache-control"), "max-age=10", "with ten seconds of cache");
+
+    await a.seats(["Ann"]);
+    a.events.length = 0;
+    a.socket.send({ type: "start", seed: 1, settings: {} });
+    await a.until((msg) => msg.type === "room" && msg.started);
+    let t = 0;
+    const key = (match, down) =>
+        a.socket.send({
+            type: "input",
+            match,
+            t: ++t,
+            seats: { 0: { left: false, right: down, up: false } },
+        });
+    const snap = (from, match, matrix) =>
+        from.socket.send({ type: "snapshot", match, t: 0, body: "x", matrix });
+    key(1, true);
+    key(1, false);
+    snap(a, 1, board());
+    await settle();
+    assert.equal((await api()).body.matches_ever, 0, "a match with no bump is not a match yet");
+
+    const j = connect({ type: "join", id: "WQXAA" });
+    await lobby(j);
+    snap(j, 1, board(50, 50));
+    await settle();
+    assert.equal((await api()).body.bumps_total, 0, "bumps come from the host's header only");
+    snap(a, 1, new Array(16).fill(1e308));
+    await settle();
+    assert.equal((await api()).body.bumps_total, 0, "and only as safe integers");
+    snap(a, 1, board(0x10000));
+    await settle();
+    assert.equal((await api()).body.bumps_total, 0, "bounded per cell, so a sum stays loadable");
+
+    snap(a, 1, board(0, 1, 2));
+    await settle();
+    flush_stats();
+    assert.equal(row().matches_ever, 1, "the first bump counts the match");
+    assert.equal(row().bumps_total, 3, "in the same flush as the bumps");
+
+    {
+        const db = new DatabaseSync(stats_db);
+        db.exec(
+            "UPDATE stats SET rooms_ever = rooms_ever + 100, matches_ever = matches_ever + 100, " +
+                "minutes_played_max_room = 5, bumps_max_match = 999",
+        );
+        db.close();
+    }
+    const b = connect({ type: "create", id: "WQXBB" });
+    await lobby(b);
+    flush_stats();
+    assert.equal(row().rooms_ever, 102, "a flush adds to what is stored, never replaces it");
+    assert.equal(row().bumps_max_match, 999, "and a maximum only ever rises");
+    assert.equal(row().matches_ever, 101, "every sum");
+    assert.equal(row().minutes_played_max_room, 5, "and every maximum");
+
+    key(1, true);
+    await settle();
+    fake = T + 2 * MIN;
+    flush_stats();
+    assert.equal(row().minutes_played_total, 2, "a flush banks every room in a match");
+
+    key(1, true);
+    await settle();
+    fake = T + 4 * MIN;
+    a.events.length = 0;
+    a.socket.send({
+        type: "match_end",
+        reason: "bump_limit",
+        matrix: [
+            [0, 1, 2, 0],
+            [3, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ],
+    });
+    await a.until((msg) => msg.type === "room" && !msg.started);
+    flush_stats();
+    assert.equal(row().minutes_played_total, 4, "the match end banks the room's minutes");
+    assert.equal(row().bumps_total, 6, "and credits the bumps its last snapshot missed");
+    assert.equal(row().bumps_max_match, 999);
+
+    fake = T + 14 * MIN;
+    flush_stats();
+    assert.equal(row().minutes_played_total, 4, "a lobby accrues no minutes");
+
+    a.events.length = 0;
+    a.socket.send({ type: "start", seed: 2, settings: {} });
+    await a.until((msg) => msg.type === "room" && msg.started);
+    t = 0;
+    snap(a, 2, board(1));
+    await settle();
+    assert.equal((await api()).body.matches_ever, 2, "a second match counts on its own bump");
+    assert.equal((await api()).body.bumps_max_match, 6, "the most in one match, from memory");
+
+    key(2, true);
+    await settle();
+    fake = T + 17 * MIN;
+    flush_stats();
+    assert.equal(row().minutes_played_total, 7);
+    assert.equal(row().minutes_played_max_room, 7, "minutes are the room's, across matches");
+
+    fake = T + 27 * MIN;
+    flush_stats();
+    assert.equal(row().minutes_played_total, 9, "five idle minutes after the last key, no more");
+    assert.equal(row().minutes_played_max_room, 9);
+
+    key(2, true);
+    await settle();
+    fake = T + 28 * MIN;
+    for (const client of [a, j, b]) client.socket.close();
+    for (let n = 0; (await api()).body.rooms_now; n++) {
+        assert.ok(n < 20, "the rooms closed");
+        await settle();
+    }
+    flush_stats();
+    assert.equal(row().minutes_played_total, 10, "the last client leaving banks the room");
+    assert.equal(row().minutes_played_max_room, 10);
+} finally {
+    Date.now = real_now;
+}
 
 const created = connect({ type: "create", id: "qmftx" });
 const created_joined = await lobby(created);
@@ -807,6 +1000,7 @@ assert.equal(
 // for months, logged nowhere and counted nowhere (#118). The line is the whole fix, so the
 // line is what is asserted: the relay runs in this process, so its own `console.log` is
 // readable from here.
+const scraped_before = await scrape();
 const said = [];
 const spoke = console.log;
 console.log = (...args) => said.push(format(...args));
@@ -822,6 +1016,47 @@ assert.ok(
         "place in the room's count (#118) -- said instead: " +
         said.join(" | "),
 );
+// Operator metrics (#48): the same desync, counted once for the whole relay, while the
+// line above keeps which room it was.
+const scraped = await scrape();
+assert.equal(
+    sample(scraped, "jnb_desyncs_total"),
+    sample(scraped_before, "jnb_desyncs_total") + 1,
+    "one desync, counted globally",
+);
+assert.ok(!scraped.includes("SNPZX"), "no metric names a room, and this one is live");
+assert.ok(!/[{,](room|room_id|id|seat|level)="/.test(scraped), "no room, seat or level label");
+for (const line of scraped.split("\n").filter((l) => l && !l.startsWith("#")))
+    assert.match(line, /^jnb_/, "every operator metric is jnb_*: " + line);
+assert.ok(sample(scraped, "jnb_nodejs_eventloop_lag_seconds") >= 0, "default metrics are on");
+assert.equal(sample(scraped, "jnb_rooms"), (await api()).body.rooms_now, "rooms open now");
+const public_http = "http://localhost:" + server.address().port;
+assert.equal((await fetch(public_http + "/metrics")).status, 404, "not on the public origin");
+assert.equal((await fetch(metrics_http + "/")).status, 404, "and nothing but /metrics here");
+// A scrape reads memory only: every way into SQLite is spied on, a statement prepared at
+// boot and read now included (#27).
+const spied = [
+    [DatabaseSync.prototype, ["prepare", "exec"]],
+    [StatementSync.prototype, ["get", "all", "iterate", "run"]],
+];
+const saved = spied.flatMap(([proto, names]) => names.map((n) => [proto, n, proto[n]]));
+let touched = 0;
+for (const [proto, n, fn] of saved)
+    proto[n] = function (...a) {
+        touched++;
+        return fn.apply(this, a);
+    };
+try {
+    await scrape();
+} finally {
+    for (const [proto, n, fn] of saved) proto[n] = fn;
+}
+assert.equal(touched, 0, "a scrape never reads SQLite (#27)");
+const clients_before = sample(await scrape(), "jnb_clients");
+const early_watcher = connect({ type: "join", id: "SNPZX" });
+await lobby(early_watcher);
+assert.equal(sample(await scrape(), "jnb_clients"), clients_before + 1, "sockets in a room now");
+early_watcher.socket.close();
 
 const early_matrix = new Array(16).fill(0);
 early_matrix[1] = 2;
@@ -2550,6 +2785,8 @@ const gone = async ({ socket }) => {
 const bare = from(null, { type: "create" });
 const bare_joined = await bare.answer;
 delete process.env.ROOMS_PER_KEY;
+// `jnb_ratelimit_trips_total` counts each per-key refusal once, whatever address wrote it.
+const trips_before = ratelimit_trips;
 const mine = [1, 2, 3].map((n) =>
     from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2." + n }),
 );
@@ -2577,11 +2814,13 @@ const next_line = from("2001:db8:1:3::a", { type: "create" });
 assert.equal((await next_line.answer).type, "joined", "the next /64 is another key");
 const mapped = from("::ffff:10.0.0.1", { type: "create" });
 assert.equal((await mapped.answer).code, "TOO_MANY_ROOMS", "an IPv4-mapped address is its IPv4");
+assert.equal(ratelimit_trips, trips_before + 3, "each refused room is one rate-limit trip");
 // Without the header the key is the socket's own address, which is where this suite's
 // clients come from.
 process.env.ROOMS_PER_KEY = "1";
 const bare_second = from(null, { type: "create" });
 assert.equal((await bare_second.answer).code, "TOO_MANY_ROOMS", "no header: the socket's key");
+assert.equal(ratelimit_trips, trips_before + 4, "and so is one refused on the socket's key");
 delete process.env.ROOMS_PER_KEY;
 
 // A full server refuses a new room and still lets a client into one that is open.
@@ -2597,6 +2836,7 @@ assert.equal(
 const joiner = from("10.0.0.3", { type: "join", id: bare_joined.id });
 assert.equal((await joiner.answer).type, "joined", "while a join still works");
 delete process.env.MAX_ROOMS;
+assert.equal(ratelimit_trips, trips_before + 4, "a full server is not a rate-limit trip");
 for (const client of [...mine, fourth, neighbour, again, bare, bare_second]) client.socket.close();
 for (const client of [...line, line_fourth, next_line, mapped]) client.socket.close();
 for (const client of [refused_room, refused_quick, joiner]) client.socket.close();
@@ -2605,6 +2845,7 @@ for (const client of [refused_room, refused_quick, joiner]) client.socket.close(
 const http = "http://localhost:" + server.address().port;
 const as = (ip, path = "/healthz", extra = {}) =>
     fetch(http + path, { headers: { "CF-Connecting-IP": ip, ...extra } });
+const http_trips_before = ratelimit_trips;
 for (let n = 0; n < 60; n++) assert.equal((await as("10.9.9.9")).status, 200, "sixty go through");
 assert.equal((await as("10.9.9.9")).status, 429, "and the sixty-first does not");
 assert.equal(
@@ -2612,20 +2853,34 @@ assert.equal(
     429,
     "whatever it says it was forwarded for",
 );
+assert.equal(ratelimit_trips, http_trips_before + 2, "each 429 is one rate-limit trip");
 assert.equal((await as("10.9.9.8")).status, 200, "another key has its own sixty");
 assert.equal((await as("10.9.9.9", "/jbcircle.png")).status, 200, "static is exempt");
 assert.equal((await as("10.9.9.9", "/api/rooms")).status, 200, "and so is the room list");
+assert.equal((await as("10.9.9.9", "/api/stats")).status, 200, "and so are the statistics");
+assert.equal(ratelimit_trips, http_trips_before + 2, "an exempt route never trips");
+assert.ok(ratelimit_trips > 0, "the limit block tripped");
+assert.equal(
+    sample(await scrape(), "jnb_ratelimit_trips_total"),
+    ratelimit_trips,
+    "#47's counter is exposed",
+);
 
 // A socket that never enters a room is closed at ROOMLESS_MS, and one that is in a room is
 // never closed by it, seats or none: a spectator on the names screen and a client waiting in
 // the queue of a full room hold nothing and are both in it (#158).
 process.env.ROOMLESS_MS = "100";
 const roomless = new WebSocket(url);
+// Pinged before it is in any room, and immediately: ROOMLESS_MS is shorter than PING_MS, so
+// only the ping sent on connection can arrive before the reaper.
+let first;
+roomless.onmessage = ({ data }) => (first ??= JSON.parse(data).type);
 const reaped = new Promise((resolve, reject) => {
     roomless.onclose = resolve;
     setTimeout(() => reject(new Error("the roomless socket was kept")), 2000);
 });
 await reaped;
+assert.equal(first, "ping", "a socket in no room is pinged");
 const full_up = connect({ type: "create", id: "RPFUL" });
 await lobby(full_up);
 await full_up.seats(["Ada", "Bax", "Cal", "Dee"]);
@@ -2643,6 +2898,63 @@ for (const client of [full_up, seatless, in_queue])
     );
 delete process.env.ROOMLESS_MS;
 for (const client of [full_up, seatless, in_queue]) client.socket.close();
+
+// The statistics outlive the process (#46): loaded, never reset, flushed on the interval, and
+// flushed on the way down -- `docker stop` is a SIGTERM.
+{
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jnb-")), "stats.db");
+    const db = new DatabaseSync(file);
+    db.exec(
+        "CREATE TABLE stats (rooms_ever INTEGER NOT NULL, matches_ever INTEGER NOT NULL, " +
+            "minutes_played_total INTEGER NOT NULL, minutes_played_max_room INTEGER NOT NULL, " +
+            "bumps_total INTEGER NOT NULL, bumps_max_match INTEGER NOT NULL)",
+    );
+    db.exec("INSERT INTO stats VALUES (41, 0, 0, 0, 0, 0)");
+    db.close();
+    const boot = async (extra) => {
+        const env = { ...process.env, PORT: "0", METRICS_PORT: "0", STATS_DB: file, ...extra };
+        const child = spawn("node", ["--no-warnings", "server/index.js"], {
+            cwd: fileURLToPath(new URL("..", import.meta.url)),
+            env,
+        });
+        const port = await new Promise((resolve, reject) => {
+            let out = "";
+            child.stdout.on("data", (data) => {
+                const found = (out += data).match(/listening on :(\d+)/);
+                if (found) resolve(found[1]);
+            });
+            child.on("exit", () => reject(new Error("the relay exited on boot")));
+        });
+        const exited = new Promise((resolve) => child.on("exit", resolve));
+        return {
+            child,
+            exited,
+            http: "http://localhost:" + port,
+            ws: "ws://localhost:" + port + "/ws",
+        };
+    };
+
+    const one = await boot({ STATS_FLUSH_MS: "200" });
+    assert.equal((await api(one.http)).body.rooms_ever, 41, "a boot loads the row");
+    const first = connect({ type: "create" }, one.ws);
+    await lobby(first);
+    for (let n = 0; row(file).rooms_ever !== 42; n++) {
+        assert.ok(n < 20, "the interval flushes on its own");
+        await settle();
+    }
+    first.socket.close();
+    one.child.kill("SIGTERM");
+    await one.exited;
+
+    const two = await boot({});
+    assert.equal((await api(two.http)).body.rooms_ever, 42, "and never resets it");
+    const second = connect({ type: "create" }, two.ws);
+    await lobby(second);
+    two.child.kill("SIGTERM");
+    await two.exited;
+    second.socket.close();
+    assert.equal(row(file).rooms_ever, 43, "SIGTERM flushes before the interval would");
+}
 
 server.close();
 console.log("OK the relay routes rooms, hides its failures, fans out input and derives one delay");

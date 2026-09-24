@@ -1,0 +1,8 @@
+# The relay's operator metrics (#48): never published, reached by service name on the
+# jump-n-bump network, unauthenticated in-network (#49).
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: relay
+    static_configs:
+      - targets: ["game:9090"]
