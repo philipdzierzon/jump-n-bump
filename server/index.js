@@ -129,10 +129,14 @@ const top = (key, n) => {
 const IDLE_MS = 5 * 60000;
 // Read once, at `start_server`: it exists for the tests, which cannot wait 30 s.
 const stats_flush_ms = () => Number(process.env.STATS_FLUSH_MS || 30000);
-// The host's board, flat. Safe integers and not merely integers: a host sending 1e308 would
-// make `bumps_total` Infinity, which SQLite keeps and a monotonic flush can never heal.
+// The host's board, flat. Bounded per cell and not merely safe: 1e308 would make
+// `bumps_total` Infinity, and sixteen MAX_SAFE_INTEGER cells sum past 2^53, which SQLite
+// stores as int64 and the next boot cannot read back as a number -- a restart loop.
+// ponytail: a match adds at most 16 * 0xffff, so `bumps_total` passes 2^53 only after ~8e9
+// matches. upgrade path: `setReadBigInts` and a clamp on load, if that ever looks near.
 const bumps_board = (flat) =>
-    flat.length === SEATS * SEATS && flat.every((n) => Number.isSafeInteger(n) && n >= 0);
+    flat.length === SEATS * SEATS &&
+    flat.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff);
 
 // Bumps come from the host's board and nowhere else (#19). A match counts on its first bump,
 // in the same call as the bump, so both land in one flush -- and with no minimum duration.
@@ -173,7 +177,7 @@ export function flush_stats() {
         ).run(
             u.rooms_ever,
             u.matches_ever,
-            u.minutes_played_total + whole,
+            whole,
             u.minutes_played_max_room,
             u.bumps_total,
             u.bumps_max_match,

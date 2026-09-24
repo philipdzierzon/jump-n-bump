@@ -211,6 +211,9 @@ try {
     snap(a, 1, new Array(16).fill(1e308));
     await settle();
     assert.equal((await api()).body.bumps_total, 0, "and only as safe integers");
+    snap(a, 1, board(0x10000));
+    await settle();
+    assert.equal((await api()).body.bumps_total, 0, "bounded per cell, so a sum stays loadable");
 
     snap(a, 1, board(0, 1, 2));
     await settle();
@@ -220,7 +223,10 @@ try {
 
     {
         const db = new DatabaseSync(stats_db);
-        db.exec("UPDATE stats SET rooms_ever = rooms_ever + 100, bumps_max_match = 999");
+        db.exec(
+            "UPDATE stats SET rooms_ever = rooms_ever + 100, matches_ever = matches_ever + 100, " +
+                "minutes_played_max_room = 5, bumps_max_match = 999",
+        );
         db.close();
     }
     const b = connect({ type: "create", id: "WQXBB" });
@@ -228,6 +234,8 @@ try {
     flush_stats();
     assert.equal(row().rooms_ever, 102, "a flush adds to what is stored, never replaces it");
     assert.equal(row().bumps_max_match, 999, "and a maximum only ever rises");
+    assert.equal(row().matches_ever, 101, "every sum");
+    assert.equal(row().minutes_played_max_room, 5, "and every maximum");
 
     key(1, true);
     await settle();
