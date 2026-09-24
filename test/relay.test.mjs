@@ -309,8 +309,96 @@ try {
     Date.now = real_now;
 }
 
+// --- operator metrics, the ones that need a quiet relay (#182) ---------------------------
+// Here, and only here, no room and no socket is open: from QMFTX below on, a started room
+// stays open to the end of the file. Bytes first, so no other socket's ping or fan-out can
+// land inside its window.
+{
+    // One raw socket, not the transport, which answers every ping with a pong the test did
+    // not send. Scraped before it opens, so the connect-time ping is inside the window.
+    const bytes_before = await scrape();
+    const wire = new WebSocket(url);
+    let got = 0;
+    const wire_saw = [];
+    wire.onmessage = ({ data }) => {
+        got += Buffer.byteLength(data);
+        wire_saw.push(JSON.parse(data));
+    };
+    await new Promise((resolve) => (wire.onopen = resolve));
+    // A frame that is not JSON, and a name that is more bytes than characters.
+    const sent = [
+        "not json",
+        JSON.stringify({ type: "create" }),
+        JSON.stringify({ type: "seats", names: ["Zoë"] }),
+    ];
+    for (const text of sent) wire.send(text);
+    for (let n = 0; !wire_saw.some((msg) => msg.type === "room" && msg.held.length); n++) {
+        assert.ok(n < 20, "the seat was granted");
+        await settle();
+    }
+    await settle();
+    const bytes_after = await scrape();
+    const out = 'jnb_ws_bytes_total{dir="out"}';
+    const inb = 'jnb_ws_bytes_total{dir="in"}';
+    assert.equal(
+        sample(bytes_after, inb) - sample(bytes_before, inb),
+        sent.reduce((n, text) => n + Buffer.byteLength(text), 0),
+        "every byte received, the frame that is not JSON and the multi-byte name included",
+    );
+    assert.equal(
+        sample(bytes_after, out) - sample(bytes_before, out),
+        got,
+        "every byte sent, and it is the only socket open",
+    );
+    wire.close();
+
+    // Seats count only in a running match: a lobby room keeps its last match's drivers.
+    const seats_of = (text) => [
+        sample(text, 'jnb_seats_occupied{driver="human"}'),
+        sample(text, 'jnb_seats_occupied{driver="ai"}'),
+    ];
+    const quiet = await scrape();
+    assert.deepEqual(seats_of(quiet), [0, 0], "no running match, no seats");
+    assert.deepEqual(
+        quiet
+            .split("\n")
+            .filter((line) => line.startsWith("jnb_seats_occupied{"))
+            .map((line) => line.split(" ")[0])
+            .sort(),
+        ['jnb_seats_occupied{driver="ai"}', 'jnb_seats_occupied{driver="human"}'],
+        "two series, human and ai, and nothing else",
+    );
+    const solo = connect({ type: "create", id: "SEATX" });
+    await lobby(solo);
+    await solo.seats(["Solo"]);
+    assert.deepEqual(seats_of(await scrape()), [0, 0], "a lobby room is not a match");
+    solo.events.length = 0;
+    solo.socket.send({ type: "start", seed: 1, settings: {} });
+    await solo.until((msg) => msg.type === "room" && msg.started);
+    assert.deepEqual(
+        seats_of(await scrape()),
+        [1, 3],
+        "one holder, and AI fill (on by default) takes the rest",
+    );
+    solo.events.length = 0;
+    solo.socket.send({ type: "match_end", reason: "lobby", matrix: null });
+    await solo.until((msg) => msg.type === "room" && !msg.started);
+    assert.deepEqual(
+        seats_of(await scrape()),
+        [0, 0],
+        "back in the lobby, the last match's drivers are not seats",
+    );
+    solo.socket.close();
+}
+
+const created_before = sample(await scrape(), "jnb_rooms_created_total");
 const created = connect({ type: "create", id: "qmftx" });
 const created_joined = await lobby(created);
+assert.equal(
+    sample(await scrape(), "jnb_rooms_created_total"),
+    created_before + 1,
+    "a room created is counted",
+);
 assert.equal(created_joined.id, "QMFTX", "a host-chosen id is accepted when free, uppercased");
 assert.equal(created_joined.host, false, "and hosts nothing until it holds a seat (#7)");
 assert.deepEqual(created_joined.seats, [null, null, null, null], "an empty room has four seats");
@@ -320,6 +408,11 @@ assert.equal(
     (await lobby(taken)).code,
     "ID_TAKEN",
     "a taken id is answered honestly: it is the host's own",
+);
+assert.equal(
+    sample(await scrape(), "jnb_rooms_created_total"),
+    created_before + 1,
+    "an ID_TAKEN refusal is not a room",
 );
 taken.socket.close();
 
@@ -2093,6 +2186,43 @@ assert.equal(
 forged.host.socket.close();
 forged.guest.socket.close();
 
+// `jnb_frames_dropped_total` (#182): one count per frame each of those `late`, `forged` and
+// `stale` bumps refuse, every room together.
+{
+    const drop = await two_seats("DRPZX");
+    const dropped_now = async () => sample(await scrape(), "jnb_frames_dropped_total");
+    let drops = await dropped_now();
+    drop.guest.socket.send({ type: "input", match: 99, t: 0, seats: { 1: pressed_key } });
+    await settle();
+    assert.equal(await dropped_now(), ++drops, "a stale frame, for a match the room is not on");
+    drop.guest.socket.send({
+        type: "input",
+        match: 1,
+        t: MAX_CATCH_UP + 1,
+        seats: { 1: pressed_key },
+    });
+    await settle();
+    assert.equal(await dropped_now(), ++drops, "a forged frame, too far ahead");
+    // Before the host's run below, so `room.due` is still 0 and the frame is not late too.
+    drop.guest.socket.send({ type: "input", match: 1, t: 0, seats: { 0: pressed_key } });
+    await settle();
+    assert.equal(await dropped_now(), ++drops, "a forged frame, for somebody else's seat");
+    // The host's frames move the deadline on, as in GAPXZ, and the guest's tick 0 is behind it.
+    for (let t = 0; t <= 34; t++)
+        drop.host.socket.send({ type: "input", match: 1, t, seats: { 0: pressed_key } });
+    await until_seen(
+        drop.host_saw,
+        (msg) => msg.type === "input" && msg.t > 0 && msg.seats["1"],
+        "the deadline to pass tick 0",
+    );
+    const before_late = await dropped_now();
+    drop.guest.socket.send({ type: "input", match: 1, t: 0, seats: { 1: pressed_key } });
+    await settle();
+    assert.equal(await dropped_now(), before_late + 1, "a late frame");
+    drop.host.socket.close();
+    drop.guest.socket.close();
+}
+
 // --- match identity on the wire (#122) -------------------------------------------------
 //
 // A frame stamped in one match and still in flight when the next one begins. `begin` zeroes
@@ -2805,8 +2935,14 @@ const mine = [1, 2, 3].map((n) =>
     from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2." + n }),
 );
 for (const room of mine) assert.equal((await room.answer).type, "joined", "three rooms per key");
+const created_capped = sample(await scrape(), "jnb_rooms_created_total");
 const fourth = from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2.4" });
 assert.equal((await fourth.answer).code, "TOO_MANY_ROOMS", "and not a fourth");
+assert.equal(
+    sample(await scrape(), "jnb_rooms_created_total"),
+    created_capped,
+    "and a TOO_MANY_ROOMS refusal is not a room",
+);
 const neighbour = from("10.0.0.2", { type: "create" });
 assert.equal((await neighbour.answer).type, "joined", "another key is not refused for it");
 // Capped by concurrency rather than rate: a room that ends frees its slot.
