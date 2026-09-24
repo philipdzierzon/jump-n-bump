@@ -138,6 +138,20 @@ function ViewModel() {
     // deliberately keeps a refused join's message across a refresh (#43), and a refresh
     // that works has to clear this one without clearing that one.
     this.rooms_error = ko.observable("");
+    // Site-wide statistics for the Landing block, asked once on load and cached for the
+    // relay's ten seconds (#46). Offline over `file://` the fetch fails and the block stays
+    // hidden, which is also what a relay without the route gets.
+    this.stats = ko.observable(null);
+    fetch("api/stats")
+        .then(function (res) {
+            return res.json();
+        })
+        .then(self.stats)
+        .catch(function () {});
+    this.bumps_per_match = ko.pureComputed(function () {
+        var s = self.stats();
+        return s && s.matches_ever ? Math.round(s.bumps_total / s.matches_ever) : null;
+    });
     this.queued = ko.observable(false);
     this.password = ko.observable("");
     this.error = ko.observable("");

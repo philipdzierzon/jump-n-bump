@@ -37,7 +37,7 @@ const log = [];
 const print = console.log;
 console.log = (...args) => log.push(format(...args));
 
-const server = await start_server(0);
+const server = await start_server(0, 0);
 const browser = await chromium.launch(
     process.env.CHROMIUM ? { executablePath: process.env.CHROMIUM } : {},
 );

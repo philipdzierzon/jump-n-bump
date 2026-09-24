@@ -24,6 +24,8 @@
         .eyebrow { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
         .muted { color: var(--muted); font-size: 13px; }
         .err { color: #e4572e; font-size: 13px; }
+        .stats { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin: 0; text-align: left; }
+        .stats dd { margin: 0; text-align: right; }
         /* Laid out empty, every one of them: a live region is announced on a change while it
            is in the page, never on being revealed with the message already inside it (#88,
            #90, #120, #128). Zero-height is the same silence -- the box has to be laid out,
@@ -163,6 +165,20 @@
             <button class="sm grow" data-bind="click: go_browse">Browse rooms</button>
             <button class="sm grow" data-bind="click: play_offline">Play offline</button>
         </div>
+        <!-- ko if: stats() && stats().rooms_ever > 0 -->
+        <dl class="stats muted">
+            <dt>Rooms open now</dt><dd data-bind="text: stats().rooms_now"></dd>
+            <dt>Rooms ever</dt><dd data-bind="text: stats().rooms_ever"></dd>
+            <dt>Matches</dt><dd data-bind="text: stats().matches_ever"></dd>
+            <dt>Minutes played</dt><dd data-bind="text: stats().minutes_played_total"></dd>
+            <dt>Longest room (min)</dt><dd data-bind="text: stats().minutes_played_max_room"></dd>
+            <dt>Bumps</dt><dd data-bind="text: stats().bumps_total"></dd>
+            <dt>Most bumps in one match</dt><dd data-bind="text: stats().bumps_max_match"></dd>
+            <!-- ko if: bumps_per_match() !== null -->
+            <dt>Bumps per match</dt><dd data-bind="text: bumps_per_match"></dd>
+            <!-- /ko -->
+        </dl>
+        <!-- /ko -->
         <p class="err" role="alert" data-bind="text: error"></p>
     </div>
 
