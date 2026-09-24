@@ -11,7 +11,7 @@ services:
     # reaches the host could send their own CF-Connecting-IP and mint a fresh limiter key per
     # request (#47); a published port also bypasses the host firewall's INPUT rules.
     ports:
-      - 127.0.0.1:8099:8080
+      - 127.0.0.1:12080:8080
     # :9090 is /metrics (#48). Never published: #49's Prometheus scrapes game:9090 across
     # the compose network.
     # The site statistics (#46). A directory, not the file: SQLite writes a journal beside
@@ -20,7 +20,7 @@ services:
     volumes:
       - ./data/relay:/app/data
   # Operator view (#49): one dashboard behind an SSH forward, e.g.
-  # `ssh -L 3000:127.0.0.1:3000 box`, then http://localhost:3000 (admin/admin, the
+  # `ssh -L 12030:127.0.0.1:12030 box`, then http://localhost:12030 (admin/admin, the
   # default -- no secret arrives with this). LAN-only later is dropping `127.0.0.1:`,
   # and then the default login has to go. Neither joins `tunnel`: cloudflared has no
   # route to them.
@@ -34,7 +34,7 @@ services:
     networks:
       - jump-n-bump
     ports:
-      - 127.0.0.1:9090:9090
+      - 127.0.0.1:12090:9090
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./data/prometheus:/prometheus
@@ -46,14 +46,14 @@ services:
     networks:
       - jump-n-bump
     ports:
-      - 127.0.0.1:3000:3000
+      - 127.0.0.1:12030:3000
     volumes:
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
 
 # Joined by the cloudflared compose project as `external: true`; its Public
 # Hostname points at http://game:8080. Every published port is loopback-only: the
-# relay's 8099 and #49's Prometheus and Grafana.
+# relay's 12080 and #49's Prometheus and Grafana.
 #
 # Cloudflare Bot Fight Mode and Under Attack mode must stay OFF for this
 # hostname: both answer the WebSocket upgrade with an HTML challenge page, and

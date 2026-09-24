@@ -12,9 +12,9 @@ WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, a
 bind-mounts from `./data/relay`, so backup is `tar` on `data/`. Operator metrics (#48) are
 `/metrics` on a second listener at `:9090` (`METRICS_PORT`), never published and never routed
 by the tunnel; they are live `jnb_*` gauges and counters out of memory, never SQLite, and no
-label names a room. `compose.yaml` also runs Prometheus (`127.0.0.1:9090`, data in
-`./data/prometheus`) and Grafana (`127.0.0.1:3000`, default admin/admin, one dashboard
-provisioned from `monitoring/`), reached with `ssh -L 3000:127.0.0.1:3000`; while they run, a
+label names a room. `compose.yaml` also runs Prometheus (`127.0.0.1:12090`, data in
+`./data/prometheus`) and Grafana (`127.0.0.1:12030`, default admin/admin, one dashboard
+provisioned from `monitoring/`), reached with `ssh -L 12030:127.0.0.1:12030`; while they run, a
 relay started on the host needs `METRICS_PORT=0` (#49). An idle room (five minutes
 without a key held) stops accruing minutes but is not closed.
 

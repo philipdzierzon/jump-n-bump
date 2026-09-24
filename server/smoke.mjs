@@ -5,12 +5,12 @@ import assert from "node:assert";
 import { spawn } from "node:child_process";
 
 const given = process.argv[2];
-const base = given || "http://127.0.0.1:8099";
+const base = given || "http://127.0.0.1:12080";
 const child = given
     ? null
     : spawn("node", ["index.js"], {
           cwd: import.meta.dirname,
-          env: { ...process.env, PORT: 8099, METRICS_PORT: 0 },
+          env: { ...process.env, PORT: 12080, METRICS_PORT: 0 },
           stdio: "inherit",
       });
 
