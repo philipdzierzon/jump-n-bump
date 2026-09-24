@@ -128,8 +128,10 @@ const lobby = (client) => client.until((msg) => msg.type === "joined" || msg.typ
 // --- site-wide statistics (#46) ---------------------------------------------------------
 // First, while no other room exists. What is stored is read from the file, and what is
 // served from the route, so "served from memory" and "flushed monotonically" are two answers.
+// A busy timeout, because a relay child flushes the same file every 200 ms, and a read that
+// lands inside a write is otherwise "database is locked" at once rather than a short wait.
 const row = (file = stats_db) => {
-    const db = new DatabaseSync(file);
+    const db = new DatabaseSync(file, { timeout: 1000 });
     try {
         return db.prepare("SELECT * FROM stats").get();
     } finally {
