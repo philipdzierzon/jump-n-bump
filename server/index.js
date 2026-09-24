@@ -585,6 +585,10 @@ function all_ready(room) {
 // says why, a seat whose holder is not connected is played by the AI, and a seat nobody
 // holds any more keeps the name of whoever last did. A seat nobody ever took has no name
 // here at all, and the client falls back to the bunny's (#13, #39, #41).
+//
+// The driver table is the match's: every client that played hands its seats to the AI on
+// the way out, which lands after the end, so a lobby that read it called every player on
+// the final board the AI (#180).
 function seat_labels(room) {
     const online = online_seats(room);
     const dropped = new Set();
@@ -597,7 +601,7 @@ function seat_labels(room) {
               ? name + " (left)"
               : dropped.has(seat)
                 ? name + " (out of sync)"
-                : online.has(seat) && room.drivers[seat] !== "ai"
+                : online.has(seat) && !(room.started && room.drivers[seat] === "ai")
                   ? name
                   : name + " (AI)",
     );
