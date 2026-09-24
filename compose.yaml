@@ -15,12 +15,45 @@ services:
     # :9090 is /metrics (#48). Never published: #49's Prometheus scrapes game:9090 across
     # the compose network.
     # The site statistics (#46). A directory, not the file: SQLite writes a journal beside
-    # it. Backup is `tar czf jnb-data.tgz data/`, which is every bind mount the box has.
+    # it. Backup is `tar czf jnb-data.tgz data/`, which holds every bind mount the box has:
+    # this one and Prometheus's (#49).
     volumes:
       - ./data/relay:/app/data
+  # Operator view (#49): one dashboard behind an SSH forward, e.g.
+  # `ssh -L 3000:127.0.0.1:3000 box`, then http://localhost:3000 (admin/admin, the
+  # default -- no secret arrives with this). LAN-only later is dropping `127.0.0.1:`,
+  # and then the default login has to go. Neither joins `tunnel`: cloudflared has no
+  # route to them.
+  prometheus:
+    image: prom/prometheus:v3.5.5
+    restart: unless-stopped
+    # ponytail: root, because docker creates ./data/prometheus root-owned and the
+    # image's nobody (65534) cannot write it. The relay runs as root on data/relay
+    # too. Upgrade path: `chown 65534 data/prometheus` on the box and drop this line.
+    user: root
+    networks:
+      - jump-n-bump
+    ports:
+      - 127.0.0.1:9090:9090
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./data/prometheus:/prometheus
+  grafana:
+    image: grafana/grafana:13.2.2
+    restart: unless-stopped
+    # No volume: the datasource and the one dashboard are provisioned from git, so a
+    # recreated container loses nothing but a changed password.
+    networks:
+      - jump-n-bump
+    ports:
+      - 127.0.0.1:3000:3000
+    volumes:
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
 
 # Joined by the cloudflared compose project as `external: true`; its Public
-# Hostname points at http://game:8080. The only published port is loopback (above).
+# Hostname points at http://game:8080. Every published port is loopback-only: the
+# relay's 8099 and #49's Prometheus and Grafana.
 #
 # Cloudflare Bot Fight Mode and Under Attack mode must stay OFF for this
 # hostname: both answer the WebSocket upgrade with an HTML challenge page, and
