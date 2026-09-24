@@ -18,7 +18,7 @@ import {
     config_diff,
     default_config,
 } from "../src/net/room_config.js";
-import { flush_stats, start_server } from "../server/index.js";
+import { flush_stats, ratelimit_trips, start_server } from "../server/index.js";
 import { Room } from "../src/net/room.js";
 import { WebSocket_Transport } from "../src/net/websocket_transport.js";
 import { lossy_proxy } from "./lossy_proxy.mjs";
@@ -2729,6 +2729,8 @@ const gone = async ({ socket }) => {
 const bare = from(null, { type: "create" });
 const bare_joined = await bare.answer;
 delete process.env.ROOMS_PER_KEY;
+// `jnb_ratelimit_trips_total` counts each per-key refusal once, whatever address wrote it.
+const trips_before = ratelimit_trips;
 const mine = [1, 2, 3].map((n) =>
     from("10.0.0.1", { type: "create" }, { "X-Forwarded-For": "192.0.2." + n }),
 );
@@ -2756,11 +2758,13 @@ const next_line = from("2001:db8:1:3::a", { type: "create" });
 assert.equal((await next_line.answer).type, "joined", "the next /64 is another key");
 const mapped = from("::ffff:10.0.0.1", { type: "create" });
 assert.equal((await mapped.answer).code, "TOO_MANY_ROOMS", "an IPv4-mapped address is its IPv4");
+assert.equal(ratelimit_trips, trips_before + 3, "each refused room is one rate-limit trip");
 // Without the header the key is the socket's own address, which is where this suite's
 // clients come from.
 process.env.ROOMS_PER_KEY = "1";
 const bare_second = from(null, { type: "create" });
 assert.equal((await bare_second.answer).code, "TOO_MANY_ROOMS", "no header: the socket's key");
+assert.equal(ratelimit_trips, trips_before + 4, "and so is one refused on the socket's key");
 delete process.env.ROOMS_PER_KEY;
 
 // A full server refuses a new room and still lets a client into one that is open.
@@ -2776,6 +2780,7 @@ assert.equal(
 const joiner = from("10.0.0.3", { type: "join", id: bare_joined.id });
 assert.equal((await joiner.answer).type, "joined", "while a join still works");
 delete process.env.MAX_ROOMS;
+assert.equal(ratelimit_trips, trips_before + 4, "a full server is not a rate-limit trip");
 for (const client of [...mine, fourth, neighbour, again, bare, bare_second]) client.socket.close();
 for (const client of [...line, line_fourth, next_line, mapped]) client.socket.close();
 for (const client of [refused_room, refused_quick, joiner]) client.socket.close();
@@ -2784,6 +2789,7 @@ for (const client of [refused_room, refused_quick, joiner]) client.socket.close(
 const http = "http://localhost:" + server.address().port;
 const as = (ip, path = "/healthz", extra = {}) =>
     fetch(http + path, { headers: { "CF-Connecting-IP": ip, ...extra } });
+const http_trips_before = ratelimit_trips;
 for (let n = 0; n < 60; n++) assert.equal((await as("10.9.9.9")).status, 200, "sixty go through");
 assert.equal((await as("10.9.9.9")).status, 429, "and the sixty-first does not");
 assert.equal(
@@ -2791,21 +2797,28 @@ assert.equal(
     429,
     "whatever it says it was forwarded for",
 );
+assert.equal(ratelimit_trips, http_trips_before + 2, "each 429 is one rate-limit trip");
 assert.equal((await as("10.9.9.8")).status, 200, "another key has its own sixty");
 assert.equal((await as("10.9.9.9", "/jbcircle.png")).status, 200, "static is exempt");
 assert.equal((await as("10.9.9.9", "/api/rooms")).status, 200, "and so is the room list");
 assert.equal((await as("10.9.9.9", "/api/stats")).status, 200, "and so are the statistics");
+assert.equal(ratelimit_trips, http_trips_before + 2, "an exempt route never trips");
 
 // A socket that never enters a room is closed at ROOMLESS_MS, and one that is in a room is
 // never closed by it, seats or none: a spectator on the names screen and a client waiting in
 // the queue of a full room hold nothing and are both in it (#158).
 process.env.ROOMLESS_MS = "100";
 const roomless = new WebSocket(url);
+// Pinged before it is in any room, and immediately: ROOMLESS_MS is shorter than PING_MS, so
+// only the ping sent on connection can arrive before the reaper.
+let first;
+roomless.onmessage = ({ data }) => (first ??= JSON.parse(data).type);
 const reaped = new Promise((resolve, reject) => {
     roomless.onclose = resolve;
     setTimeout(() => reject(new Error("the roomless socket was kept")), 2000);
 });
 await reaped;
+assert.equal(first, "ping", "a socket in no room is pinged");
 const full_up = connect({ type: "create", id: "RPFUL" });
 await lobby(full_up);
 await full_up.seats(["Ada", "Bax", "Cal", "Dee"]);

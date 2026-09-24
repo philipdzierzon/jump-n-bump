@@ -91,6 +91,12 @@ const rooms_per_key = () => Number(process.env.ROOMS_PER_KEY || 3);
 const roomless_ms = () => Number(process.env.ROOMLESS_MS || 30000);
 // Requests per limiter key per minute on the HTTP routes the bucket covers (#47).
 const HTTP_PER_MINUTE = 60;
+// `jnb_ratelimit_trips_total` (#47): every refusal by a per-key budget -- the HTTP bucket and
+// the rooms-per-key cap, not `SERVER_FULL`, which is capacity rather than abuse. Unlabelled,
+// per #48's cardinality policy.
+// ponytail: a plain integer read by nobody yet. upgrade path: #48 exposes it on its metrics
+// endpoint (a prom-client Counter fed from this, or one in its place).
+export let ratelimit_trips = 0;
 
 const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
@@ -248,8 +254,10 @@ function create(client, msg) {
     // A room keeps the key that opened it until it ends, host migration or not.
     const live = Object.values(rooms);
     if (live.length >= max_rooms()) return send(client, { type: "error", code: "SERVER_FULL" });
-    if (live.filter((room) => room.key === client.key).length >= rooms_per_key())
+    if (live.filter((room) => room.key === client.key).length >= rooms_per_key()) {
+        ratelimit_trips++;
         return send(client, { type: "error", code: "TOO_MANY_ROOMS" });
+    }
     const id = msg.id ? normalise_room_id(msg.id) : generate_room_id(rooms);
     if (!id) return send(client, { type: "error", code: "BAD_ID" });
     // A host-chosen id is answered honestly when it is taken: this is the creator's own
@@ -1761,8 +1769,10 @@ export function start_server(port = PORT) {
         const key = key_of(req);
         const n = (hits.get(key) || 0) + 1;
         hits.set(key, n);
-        if (n > HTTP_PER_MINUTE) res.sendStatus(429);
-        else next();
+        if (n > HTTP_PER_MINUTE) {
+            ratelimit_trips++;
+            res.sendStatus(429);
+        } else next();
     });
     app.get("/healthz", (_req, res) => res.type("text/plain").send("ok"));
 
