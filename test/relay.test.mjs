@@ -547,11 +547,23 @@ assert.deepEqual(
 
 // Back to the lobby, which is where the rest of this room's assertions live. The host's own
 // walk there ends the match and then hands its seat over, in that order: once the match is
-// over nobody is driving anything, and the final board names the players (#180).
+// over nobody is driving anything, and the final board names the players (#180). Nor is the
+// handover stamped: it would be a frame for a tick of a match that is over, and a room
+// update that changes nothing, sent to everybody (#184).
+// Nothing before the end is an answer to it: the lobby this room started from said
+// `started: false` as well.
+other.events.length = 0;
 sender.socket.send({ type: "match_end", reason: "lobby", matrix: null });
 await other.until((msg) => msg.type === "room" && !msg.started);
+const frames_before = other_saw.length;
+const updates_before = other.events.length;
 sender.socket.send({ type: "driver", seat: 0, driver: "ai" });
 await new Promise((resolve) => setTimeout(resolve, 100));
+assert.deepEqual(
+    [other_saw.slice(frames_before), other.events.slice(updates_before)],
+    [[], []],
+    "a seat handed to the AI after the end reaches nobody (#184)",
+);
 assert.deepEqual(
     labels_now(),
     ["Sender", "Other", null, null],
