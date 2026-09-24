@@ -1702,6 +1702,12 @@ function relay(client, msg) {
             // clears that seat's missing-tick counter, which is AI takeover itself switched
             // off (#7, #42). Counted as forged and answered with nothing, like a forged
             // frame is (#82).
+            //
+            // Outside a match there is nobody to drive: every client that played hands its
+            // seats over on the way out, after the end, and that is #7's rule arriving late
+            // rather than a forgery. Stamping it fanned a frame for a tick of a match that no
+            // longer exists, and a room update, out to everybody (#184).
+            if (!room.started) return;
             if (!client.seats.includes(msg.seat) || !DRIVERS.includes(msg.driver))
                 return void room.forged++;
             stamp_driver(room, msg.seat, msg.driver);
