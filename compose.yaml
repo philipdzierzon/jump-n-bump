@@ -9,6 +9,10 @@ services:
           - jump-n-bump
     ports:
       - 8099:8080
+    # The site statistics (#46). A directory, not the file: SQLite writes a journal beside
+    # it. Backup is `tar czf jnb-data.tgz data/`, which is every bind mount the box has.
+    volumes:
+      - ./data/relay:/app/data
 
 # Joined by the cloudflared compose project as `external: true`; its Public
 # Hostname points at http://game:8080. No port is published on the host.

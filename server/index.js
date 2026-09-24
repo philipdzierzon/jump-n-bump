@@ -10,6 +10,7 @@
 // Rooms live in this process's memory. Ceiling: one process, and a restart drops every
 // room -- the same blast radius a reconnect has to handle anyway (#42).
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
@@ -95,6 +96,96 @@ const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
 // inherits the host when one leaves (#14).
 let arrivals = 0;
+
+// Site-wide statistics (#46): six integers in one row, and nothing per match or per room.
+// `stats` is what `/api/stats` serves, so a request never reads SQLite; `unflushed` is what
+// the next flush adds (the four sums) or raises to (the two maxima), so every write is
+// monotonic and a crash loses at most one interval's tail, never a counter (#20).
+const zeroed = {
+    rooms_ever: 0,
+    matches_ever: 0,
+    minutes_played_total: 0,
+    minutes_played_max_room: 0,
+    bumps_total: 0,
+    bumps_max_match: 0,
+};
+const stats = { ...zeroed };
+let unflushed = { ...zeroed };
+// In-game milliseconds not yet flushed as whole minutes.
+let played_ms = 0;
+let db = null;
+const count = (key, n) => {
+    stats[key] += n;
+    unflushed[key] += n;
+};
+const top = (key, n) => {
+    stats[key] = Math.max(stats[key], n);
+    unflushed[key] = Math.max(unflushed[key], n);
+};
+// Minutes stop accruing this long after the last input bit a room saw (#46).
+// ponytail: idle only stops minutes accruing, the room is not closed, and a room waking from
+// idle is credited the time since its last flush (at most one interval). upgrade path: a
+// reaper, if abandoned rooms ever show up in memory.
+const IDLE_MS = 5 * 60000;
+// Read once, at `start_server`: it exists for the tests, which cannot wait 30 s.
+const stats_flush_ms = () => Number(process.env.STATS_FLUSH_MS || 30000);
+// The host's board, flat. Safe integers and not merely integers: a host sending 1e308 would
+// make `bumps_total` Infinity, which SQLite keeps and a monotonic flush can never heal.
+const bumps_board = (flat) =>
+    flat.length === SEATS * SEATS && flat.every((n) => Number.isSafeInteger(n) && n >= 0);
+
+// Bumps come from the host's board and nowhere else (#19). A match counts on its first bump,
+// in the same call as the bump, so both land in one flush -- and with no minimum duration.
+function credit_bumps(room, flat) {
+    const sum = flat.reduce((a, b) => a + b, 0);
+    if (sum <= room.credited) return;
+    if (!room.credited) count("matches_ever", 1);
+    count("bumps_total", sum - room.credited);
+    room.credited = sum;
+    top("bumps_max_match", sum);
+}
+
+// In-game time since the last bank, capped at IDLE_MS past the last input bit. `played` is
+// the room's whole lifetime, never reset at `begin`, so the maximum is per room.
+function bank(room) {
+    if (!room.started) return;
+    const now = Date.now();
+    const end = Math.min(now, room.last_bit + IDLE_MS);
+    const ms = Math.max(0, end - room.since);
+    room.since = now;
+    room.played += ms;
+    played_ms += ms;
+    top("minutes_played_max_room", Math.floor(room.played / 60000));
+}
+
+export function flush_stats() {
+    for (const room of Object.values(rooms)) bank(room);
+    const whole = Math.floor(played_ms / 60000);
+    const u = unflushed;
+    // Caught, and nothing zeroed: a throw in the interval would take every live room down
+    // with it, and what was not written is retried on the next flush.
+    try {
+        db.prepare(
+            "UPDATE stats SET rooms_ever = rooms_ever + ?, matches_ever = matches_ever + ?, " +
+                "minutes_played_total = minutes_played_total + ?, " +
+                "minutes_played_max_room = MAX(minutes_played_max_room, ?), " +
+                "bumps_total = bumps_total + ?, bumps_max_match = MAX(bumps_max_match, ?)",
+        ).run(
+            u.rooms_ever,
+            u.matches_ever,
+            u.minutes_played_total + whole,
+            u.minutes_played_max_room,
+            u.bumps_total,
+            u.bumps_max_match,
+        );
+    } catch (error) {
+        console.log("stats flush failed: %s", error.message);
+        return;
+    }
+    played_ms -= whole * 60000;
+    stats.minutes_played_total += whole;
+    unflushed = { ...zeroed };
+}
 
 function send(client, msg) {
     if (client.readyState === client.OPEN) client.send(JSON.stringify(msg));
@@ -274,7 +365,14 @@ function create(client, msg) {
         deadline: null,
         timer: null,
         pending: null,
+        // Statistics (#46): the board sum already credited this match, the room's in-game
+        // lifetime in ms, when that was last banked, and the last input bit it saw.
+        credited: 0,
+        played: 0,
+        since: 0,
+        last_bit: 0,
     };
+    count("rooms_ever", 1);
     console.log("room %s created", id);
     admit(client, rooms[id], msg);
 }
@@ -481,6 +579,8 @@ function reset_ready(room) {
 // it -- one that reaches the lobby and one whose room died with its last client.
 function report_match(room) {
     if (!room.started) return;
+    // Every room-level trigger ends here: match end, lobby, host left, last client gone.
+    bank(room);
     console.log(
         "room %s match over: %d frames substituted, %d late, %d forged, %d stale",
         room.id,
@@ -991,9 +1091,9 @@ function keep_snapshot(client, msg) {
     if (msg.t > room.tick) return;
     if (typeof msg.body !== "string" || !msg.body.length || msg.body.length > MAX_SNAPSHOT) return;
     const matrix = msg.matrix;
-    if (!Array.isArray(matrix) || matrix.length !== SEATS * SEATS) return;
-    if (!matrix.every((bumps) => Number.isInteger(bumps) && bumps >= 0)) return;
+    if (!Array.isArray(matrix) || !bumps_board(matrix)) return;
     room.snapshot = { t: msg.t, matrix, body: msg.body };
+    credit_bumps(room, matrix);
     // The frames and the driver changes that state already accounts for are the ones
     // nobody will ever ask for again: what both lists are for is the gap between it and
     // now, and the snapshot's tick is where that gap starts.
@@ -1268,6 +1368,8 @@ function begin(room, msg) {
     room.last_frame = new Array(SEATS).fill(null);
     room.guessed = new Array(SEATS).fill(0);
     room.substituted = room.late = room.forged = room.stale = 0;
+    room.credited = 0;
+    room.since = room.last_bit = Date.now();
     // A fresh match is a legitimately fresh allowance -- for every token in the room, dropped
     // or not (#41, #93). Cleared before the walk below, or the re-point it does is thrown
     // away again.
@@ -1499,6 +1601,10 @@ function relay(client, msg) {
                     if (client.seats.includes(+seat)) seats[seat] = msg.seats[seat];
                     else room.forged++;
                 }
+            // A key held on a seat the sender really holds is what keeps minutes accruing
+            // (#46). Frames the relay substitutes never come through here.
+            if (Object.values(seats).some((k) => k && (k.left || k.right || k.up)))
+                room.last_bit = Date.now();
             // On time, so it is what `substitute` repeats if the next one is not (#141).
             for (const seat in seats) {
                 room.last_frame[seat] = seats[seat];
@@ -1564,6 +1670,12 @@ function relay(client, msg) {
             // client that still believes it is host through a migration is dropped here in
             // silence, which is the relay's flag being the one that counts (#82).
             if (!client.host) return;
+            // The final board, credited before the room leaves the match: snapshots come
+            // every two seconds, so the bump that ends a bump-limit match is only here (#46).
+            {
+                const flat = Array.isArray(msg.matrix) ? msg.matrix.flat() : [];
+                if (room.started && bumps_board(flat)) credit_bumps(room, flat);
+            }
             // The announcement is over with it, so an arrival is told about a room and not
             // about a match nobody is running.
             to_lobby(room, msg);
@@ -1626,6 +1738,13 @@ export function start_server(port = PORT) {
     // authoritative -- the join attempt is. Ten seconds of cache is what keeps a refresh
     // button from being a polling loop in disguise, and is its only limit (#29, #43, #47).
     app.get("/api/rooms", (_req, res) => res.set("Cache-Control", "max-age=10").json(listings()));
+    // Out of memory, never SQLite, beside the room list and before the limiter for the same
+    // reason (#46, #47). `rooms_now` is every room, seated or not, and is never stored.
+    app.get("/api/stats", (_req, res) =>
+        res
+            .set("Cache-Control", "max-age=10")
+            .json({ ...stats, rooms_now: Object.keys(rooms).length }),
+    );
     // The blanket bucket, on whatever is left: registration order is the whole exemption.
     // Static answers any file it finds (a cold load is 16-20 requests) and `/api/rooms` is
     // answered above, so neither reaches it; the WebSocket upgrade is not an Express route.
@@ -1642,6 +1761,21 @@ export function start_server(port = PORT) {
         else next();
     });
     app.get("/healthz", (_req, res) => res.type("text/plain").send("ok"));
+
+    // One row, created once and never reset; `:memory:` unless the deployment names a file.
+    db = new DatabaseSync(process.env.STATS_DB || ":memory:");
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS stats (" +
+            Object.keys(zeroed)
+                .map((key) => key + " INTEGER NOT NULL")
+                .join(", ") +
+            ")",
+    );
+    db.exec("INSERT INTO stats SELECT 0, 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM stats)");
+    Object.assign(stats, db.prepare("SELECT * FROM stats").get());
+    setInterval(flush_stats, stats_flush_ms()).unref();
+    // Synchronous, so it runs inside `exit`: teardown is an early flush.
+    process.on("exit", flush_stats);
 
     const server = app.listen(port, "0.0.0.0");
     // The largest message a client sends is the host's snapshot, whose body is ASCII base64
@@ -1709,5 +1843,9 @@ export function start_server(port = PORT) {
 }
 
 // Run directly rather than imported by a test.
-if (process.argv[1] === import.meta.filename)
+if (process.argv[1] === import.meta.filename) {
+    // Node as PID 1 ignores SIGTERM, so `docker stop` would SIGKILL after ten seconds and the
+    // exit flush above would never run.
+    for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => process.exit(0));
     start_server().then((server) => console.log("listening on :%d", server.address().port));
+}

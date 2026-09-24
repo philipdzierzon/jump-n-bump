@@ -2910,6 +2910,60 @@ async function late_resume_from_the_lobby() {
     assert.deepEqual(errors, [], "with nothing thrown on either page");
 }
 
+// --- the Landing statistics (#46) -----------------------------------------------------
+// Hidden until the first room ever, and wired to the real route: by now `walk` has made a
+// room in-process, and in CI `server/smoke.mjs` made one in the container.
+async function landing_stats() {
+    const block = (root) => root.locator("dl.stats");
+    const zero = {
+        rooms_now: 0,
+        rooms_ever: 0,
+        matches_ever: 0,
+        minutes_played_total: 0,
+        minutes_played_max_room: 0,
+        bumps_total: 0,
+        bumps_max_match: 0,
+    };
+
+    const empty = await make_context("stats-empty");
+    let asked = false;
+    await empty.route("**/api/stats", (route) => {
+        asked = true;
+        return route.fulfill({ json: zero });
+    });
+    const empty_page = await empty.newPage();
+    await empty_page.goto(origin + "/");
+    assert.ok(await screen("landing", empty_page).isVisible(), "the landing screen is up");
+    await until("the page to ask", async () => asked);
+    await settle();
+    assert.equal(await block(empty_page).count(), 0, "no block before the first room ever");
+
+    const full = await make_context("stats-full");
+    await full.route("**/api/stats", (route) =>
+        route.fulfill({
+            json: { ...zero, rooms_now: 2, rooms_ever: 7, matches_ever: 4, bumps_total: 18 },
+        }),
+    );
+    const full_page = await full.newPage();
+    await full_page.goto(origin + "/");
+    await until("the block", async () => (await block(full_page).count()) === 1);
+    const shown = await text(block(full_page));
+    assert.match(shown, /Rooms open now\s*2\b/, "the live gauge");
+    assert.match(shown, /Rooms ever\s*7\b/, "the rooms ever");
+    assert.match(shown, /Bumps per match\s*5\b/, "and bunnies per match, 18 / 4 rounded");
+
+    const real = (await (await fetch(origin + "/api/stats")).json()).rooms_ever;
+    assert.ok(real > 0, "the relay has seen a room by now");
+    const live_page = await (await make_context("stats-live")).newPage();
+    await live_page.goto(origin + "/");
+    await until("the block", async () => (await block(live_page).count()) === 1);
+    assert.match(
+        await text(block(live_page)),
+        new RegExp("Rooms ever\\s*" + real + "\\b"),
+        "the block reads the relay's own route",
+    );
+}
+
 async function phone() {
     const phone_context = await make_context("phone", { viewport: { width: 390, height: 844 } });
     const phone_page = await phone_context.newPage();
@@ -4360,6 +4414,7 @@ async function connecting_keeps_focus() {
 // contexts are still open for the dump and the traces below.
 const walks = [
     walk,
+    landing_stats,
     self_ending_match,
     new_match_outranks_the_hold,
     hidden_tab_freezes,

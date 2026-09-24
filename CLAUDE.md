@@ -7,7 +7,10 @@ so rendering and sound are verified manually: build, open, play.
 Online play needs the relay in `server/`, which has dependencies of its own: `npm ci` in
 `server/` once, then `node server/index.js` from anywhere serves the built client and the
 WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
-`Dockerfile` is how it actually ships.
+`Dockerfile` is how it actually ships. The site statistics (#46) are one SQLite row at
+`STATS_DB` -- `:memory:` when unset, `/app/data/stats.db` in the image, which compose
+bind-mounts from `./data/relay`, so backup is `tar` on `data/`. An idle room (five minutes
+without a key held) stops accruing minutes but is not closed.
 
 `npm test` runs four files, and builds the client first because one of them opens a browser.
 `test/replay.test.mjs` replays the simulation twice from one seed and one input log, with no

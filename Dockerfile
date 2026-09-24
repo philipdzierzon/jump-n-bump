@@ -22,6 +22,9 @@ COPY server/index.js server/smoke.mjs ./
 WORKDIR /app
 COPY src/net/room_id.js src/net/room_config.js ./src/net/
 COPY --from=client /build/game ./game
-ENV CLIENT_DIR=/app/game PORT=8080
+# The site statistics' one row (#46). compose bind-mounts ./data/relay over this directory;
+# without a mount, a plain `docker run` (CI) still has somewhere to open the file.
+RUN mkdir /app/data
+ENV CLIENT_DIR=/app/game PORT=8080 STATS_DB=/app/data/stats.db
 EXPOSE 8080
 CMD ["node", "server/index.js"]
