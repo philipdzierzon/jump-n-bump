@@ -144,6 +144,40 @@ new Gauge({
         this.set(n);
     },
 });
+// Seats in a running match, by who drives them (#182). A lobby room keeps its last match's
+// `drivers` -- nothing clears them at the end -- so only started rooms count. "off" is an
+// empty seat with AI fill off, and null a room before its first match: neither is a seat.
+new Gauge({
+    name: "jnb_seats_occupied",
+    help: "Seats in running matches, by driver.",
+    labelNames: ["driver"],
+    collect() {
+        let human = 0;
+        let ai = 0;
+        for (const room of Object.values(rooms)) {
+            if (!room.started) continue;
+            for (const driver of room.drivers) {
+                if (driver === "local") human++;
+                else if (driver === "ai") ai++;
+            }
+        }
+        this.set({ driver: "human" }, human);
+        this.set({ driver: "ai" }, ai);
+    },
+});
+const ws_bytes = new Counter({
+    name: "jnb_ws_bytes_total",
+    help: "WebSocket payload bytes, received (malformed frames included) and sent.",
+    labelNames: ["dir"],
+});
+const frames_dropped = new Counter({
+    name: "jnb_frames_dropped_total",
+    help: "Input frames refused silently: late, forged or stale (#42, #122).",
+});
+const rooms_created = new Counter({
+    name: "jnb_rooms_created_total",
+    help: "Rooms created, refusals not counted.",
+});
 
 // Site-wide statistics (#46): six integers in one row, and nothing per match or per room.
 // `stats` is what `/api/stats` serves, so a request never reads SQLite; `unflushed` is what
@@ -239,8 +273,13 @@ export function flush_stats() {
     unflushed = { ...zeroed };
 }
 
+// The one outbound path: every broadcast and the ping come through here. Bytes, not
+// characters, because a seat name can be anything Unicode.
 function send(client, msg) {
-    if (client.readyState === client.OPEN) client.send(JSON.stringify(msg));
+    if (client.readyState !== client.OPEN) return;
+    const text = JSON.stringify(msg);
+    client.send(text);
+    ws_bytes.inc({ dir: "out" }, Buffer.byteLength(text));
 }
 
 function broadcast(room, msg, except) {
@@ -427,6 +466,7 @@ function create(client, msg) {
         last_bit: 0,
     };
     count("rooms_ever", 1);
+    rooms_created.inc();
     console.log("room %s created", id);
     admit(client, rooms[id], msg);
 }
@@ -1611,7 +1651,10 @@ function relay(client, msg) {
             // when both ends declared one and `create` never compares at all, so the tab that
             // slips through is one that *creates* a room during a relay upgrade. upgrade path:
             // compare the build on the way in for real (#29).
-            if (!room.started || msg.match !== room.match) return void room.stale++;
+            if (!room.started || msg.match !== room.match) {
+                frames_dropped.inc();
+                return void room.stale++;
+            }
             // Past its deadline: the relay already put a frame in for this tick and
             // the room stepped it, so the real one is for a tick that never comes round
             // again. Dropped silently and counted, because a client cannot be told to send
@@ -1631,6 +1674,7 @@ function relay(client, msg) {
             // stall can be caught up (#136 §1).
             if (msg.t < room.due) {
                 for (const seat of client.seats) room.missing[seat] = 0;
+                frames_dropped.inc();
                 return void room.late++;
             }
             // And the other end of the same clock: a tick further ahead than any client
@@ -1642,7 +1686,10 @@ function relay(client, msg) {
             // minute ahead, which is 3600 substituted ticks in one turn of the event loop.
             // upgrade path: a bound of a few ticks past `room.tick + room.d`, if a client
             // whose clock raced ever turns out not to need the slack.
-            if (msg.t - room.tick > MAX_CATCH_UP) return void room.forged++;
+            if (msg.t - room.tick > MAX_CATCH_UP) {
+                frames_dropped.inc();
+                return void room.forged++;
+            }
             // Monotonic, and a whole delay ahead of any client's real tick, since `t` is
             // already stamped d into the future: stamping too late loses nothing, and
             // letting a slower client drag it backwards would stamp a change for a tick a
@@ -1659,7 +1706,10 @@ function relay(client, msg) {
             if (msg.seats && typeof msg.seats === "object")
                 for (const seat in msg.seats) {
                     if (client.seats.includes(+seat)) seats[seat] = msg.seats[seat];
-                    else room.forged++;
+                    else {
+                        room.forged++;
+                        frames_dropped.inc();
+                    }
                 }
             // A key held on a seat the sender really holds is what keeps minutes accruing
             // (#46). Frames the relay substitutes never come through here.
@@ -1882,6 +1932,9 @@ export function start_server(port = PORT, metrics_port = METRICS_PORT) {
         client.on("error", () => {});
 
         client.on("message", (data) => {
+            // `data` is a Buffer (`ws`'s default), so this is bytes, and counted before the
+            // parse below so a malformed frame counts too.
+            ws_bytes.inc({ dir: "in" }, data.length);
             let msg;
             // ponytail: a malformed frame is dropped and the connection kept. upgrade
             // path: rate limits live with the rest of abuse (#47); the payload cap is

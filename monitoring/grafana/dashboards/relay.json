@@ -173,6 +173,124 @@
           "legendFormat": "rss"
         }
       ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Seats",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "jnb_seats_occupied{driver=\"human\"}",
+          "legendFormat": "human"
+        },
+        {
+          "refId": "B",
+          "expr": "jnb_seats_occupied{driver=\"ai\"}",
+          "legendFormat": "ai"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "WebSocket bytes/s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(jnb_ws_bytes_total{dir=\"in\"}[1m])",
+          "legendFormat": "in"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(jnb_ws_bytes_total{dir=\"out\"}[1m])",
+          "legendFormat": "out"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Frames dropped / 5m",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(jnb_frames_dropped_total[5m])",
+          "legendFormat": "dropped"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Rooms created / 5m",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(jnb_rooms_created_total[5m])",
+          "legendFormat": "created"
+        }
+      ]
     }
   ]
 }
