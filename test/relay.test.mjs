@@ -340,19 +340,29 @@ assert.deepEqual(
     [],
     "and the sender is never echoed its own",
 );
-// Back to the lobby, which is where the rest of this room's assertions live.
-sender.socket.send({ type: "match_end", reason: "lobby", matrix: null });
-await other.until((msg) => msg.type === "room" && !msg.started);
-
 // A client that walks back to the lobby keeps its seats and hands its bunnies to the AI, so
 // the seat is held by somebody who is still in the room and driven by nobody. The board says
 // which: "(AI)" is not only for a holder who dropped its connection (#13, #39).
 other.socket.send({ type: "driver", seat: 1, driver: "ai" });
 await new Promise((resolve) => setTimeout(resolve, 100));
+const labels_now = () => sender.events.filter((msg) => msg.type === "room").pop().labels;
 assert.deepEqual(
-    sender.events.filter((msg) => msg.type === "room").pop().labels,
+    labels_now(),
     ["Sender", "Other (AI)", null, null],
     "a seat its holder handed over is named for the holder, and said to be the AI's",
+);
+
+// Back to the lobby, which is where the rest of this room's assertions live. The host's own
+// walk there ends the match and then hands its seat over, in that order: once the match is
+// over nobody is driving anything, and the final board names the players (#180).
+sender.socket.send({ type: "match_end", reason: "lobby", matrix: null });
+await other.until((msg) => msg.type === "room" && !msg.started);
+sender.socket.send({ type: "driver", seat: 0, driver: "ai" });
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.deepEqual(
+    labels_now(),
+    ["Sender", "Other", null, null],
+    "a seat handed to the AI after the end, or before it, is its player's on the board",
 );
 
 // The token reclaims every seat that client held, across a disconnect (#7).

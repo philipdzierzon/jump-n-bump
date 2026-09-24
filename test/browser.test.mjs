@@ -1650,20 +1650,16 @@ async function two_pages() {
     await on("room", guest);
     await until("the guest's board", () => board_panel(guest).isVisible());
 
-    // A seat's label picks up "(AI)" the moment the client on it hands its bunny back, and
-    // the two pages hear that a broadcast apart -- so the labels are read without it. The
-    // counts under them are the match, and they are what has to agree.
-    const named = (rows) => rows.map((row) => row.map((cell) => cell.replace(" (AI)", "")));
     // The host's board is anchored first, or two empty panels would agree with each other
     // and the comparison below would pass by saying nothing at all.
-    const host_board = named(await grid(board_panel(host)));
+    const host_board = await grid(board_panel(host));
     assert.deepEqual(
         host_board.slice(1).map((row) => row[0]),
         ["Dott", "Zip", "Jiffy", "Miji", "Total deaths"],
         "a row per seat, named by the username on it, and the totals under them (#13)",
     );
     assert.deepEqual(
-        named(await grid(board_panel(guest))),
+        await grid(board_panel(guest)),
         host_board,
         "the host counted the board and it travelled with the announcement, so the two " +
             "pages end on one board, row for row (#19, #22)",
@@ -1684,6 +1680,14 @@ async function two_pages() {
     assert.equal(await notice(guest), FLOW_TEXT.ready_cleared);
     await click("Ready", guest);
     await until("the instruction to retire", async () => (await notice(guest)) === "");
+    // Both pages handed their bunnies to the AI on the way out, after the end and before
+    // that Ready, so the room has said so by now. The board names the players of a match
+    // that is over, and it read "Dott (AI)" once the handover landed (#180).
+    assert.deepEqual(
+        [await grid(board_panel(host)), await grid(board_panel(guest))],
+        [host_board, host_board],
+        "and the board still names its players once the seats have gone to the AI (#180)",
+    );
 
     // And the other half of #88's item B: the countdown running out on a client that never
     // readied takes its seats back, and says so on the screen it lands on (#17, #37).
