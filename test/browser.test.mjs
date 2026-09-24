@@ -45,7 +45,7 @@ import { lossy_proxy } from "./lossy_proxy.mjs";
 // the per-key cap is lifted, here and on CI's container alike (#157).
 process.env.ROOMS_PER_KEY = "1000";
 const given = process.env.JNB_BASE_URL;
-const server = given ? null : await start_server(0);
+const server = given ? null : await start_server(0, 0);
 const origin = given ? given.replace(/\/$/, "") : "http://localhost:" + server.address().port;
 // Generated rather than fixed, so the walk can be run twice against one long-lived
 // container without the second run colliding with the first run's rooms.

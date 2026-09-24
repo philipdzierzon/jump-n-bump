@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import { format } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -66,7 +66,7 @@ process.env.ROOMS_PER_KEY = "1000";
 const stats_db = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jnb-")), "stats.db");
 process.env.STATS_DB = stats_db;
 process.env.STATS_FLUSH_MS = "3600000";
-const server = await start_server(0);
+const server = await start_server(0, 0);
 delete process.env.STATS_FLUSH_MS;
 const url = "ws://localhost:" + server.address().port + "/ws";
 
@@ -141,6 +141,10 @@ const api = async (base = "http://localhost:" + server.address().port) => {
     return { body: await res.json(), headers: res.headers };
 };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+// Operator metrics (#48): their own listener, and one sample read by exact name.
+const metrics_http = "http://localhost:" + server.metrics.address().port;
+const scrape = async () => (await fetch(metrics_http + "/metrics")).text();
+const sample = (text, name) => Number(text.match(new RegExp("^" + name + " (\\S+)$", "m"))?.[1]);
 const board = (...head) => [...head, ...new Array(16 - head.length).fill(0)];
 const real_now = Date.now;
 const T = real_now();
@@ -986,6 +990,7 @@ assert.equal(
 // for months, logged nowhere and counted nowhere (#118). The line is the whole fix, so the
 // line is what is asserted: the relay runs in this process, so its own `console.log` is
 // readable from here.
+const scraped_before = await scrape();
 const said = [];
 const spoke = console.log;
 console.log = (...args) => said.push(format(...args));
@@ -1001,6 +1006,47 @@ assert.ok(
         "place in the room's count (#118) -- said instead: " +
         said.join(" | "),
 );
+// Operator metrics (#48): the same desync, counted once for the whole relay, while the
+// line above keeps which room it was.
+const scraped = await scrape();
+assert.equal(
+    sample(scraped, "jnb_desyncs_total"),
+    sample(scraped_before, "jnb_desyncs_total") + 1,
+    "one desync, counted globally",
+);
+assert.ok(!scraped.includes("SNPZX"), "no metric names a room, and this one is live");
+assert.ok(!/[{,](room|room_id|id|seat|level)="/.test(scraped), "no room, seat or level label");
+for (const line of scraped.split("\n").filter((l) => l && !l.startsWith("#")))
+    assert.match(line, /^jnb_/, "every operator metric is jnb_*: " + line);
+assert.ok(sample(scraped, "jnb_nodejs_eventloop_lag_seconds") >= 0, "default metrics are on");
+assert.equal(sample(scraped, "jnb_rooms"), (await api()).body.rooms_now, "rooms open now");
+const public_http = "http://localhost:" + server.address().port;
+assert.equal((await fetch(public_http + "/metrics")).status, 404, "not on the public origin");
+assert.equal((await fetch(metrics_http + "/")).status, 404, "and nothing but /metrics here");
+// A scrape reads memory only: every way into SQLite is spied on, a statement prepared at
+// boot and read now included (#27).
+const spied = [
+    [DatabaseSync.prototype, ["prepare", "exec"]],
+    [StatementSync.prototype, ["get", "all", "iterate", "run"]],
+];
+const saved = spied.flatMap(([proto, names]) => names.map((n) => [proto, n, proto[n]]));
+let touched = 0;
+for (const [proto, n, fn] of saved)
+    proto[n] = function (...a) {
+        touched++;
+        return fn.apply(this, a);
+    };
+try {
+    await scrape();
+} finally {
+    for (const [proto, n, fn] of saved) proto[n] = fn;
+}
+assert.equal(touched, 0, "a scrape never reads SQLite (#27)");
+const clients_before = sample(await scrape(), "jnb_clients");
+const early_watcher = connect({ type: "join", id: "SNPZX" });
+await lobby(early_watcher);
+assert.equal(sample(await scrape(), "jnb_clients"), clients_before + 1, "sockets in a room now");
+early_watcher.socket.close();
 
 const early_matrix = new Array(16).fill(0);
 early_matrix[1] = 2;
@@ -2803,6 +2849,12 @@ assert.equal((await as("10.9.9.9", "/jbcircle.png")).status, 200, "static is exe
 assert.equal((await as("10.9.9.9", "/api/rooms")).status, 200, "and so is the room list");
 assert.equal((await as("10.9.9.9", "/api/stats")).status, 200, "and so are the statistics");
 assert.equal(ratelimit_trips, http_trips_before + 2, "an exempt route never trips");
+assert.ok(ratelimit_trips > 0, "the limit block tripped");
+assert.equal(
+    sample(await scrape(), "jnb_ratelimit_trips_total"),
+    ratelimit_trips,
+    "#47's counter is exposed",
+);
 
 // A socket that never enters a room is closed at ROOMLESS_MS, and one that is in a room is
 // never closed by it, seats or none: a spectator on the names screen and a client waiting in
@@ -2850,7 +2902,7 @@ for (const client of [full_up, seatless, in_queue]) client.socket.close();
     db.exec("INSERT INTO stats VALUES (41, 0, 0, 0, 0, 0)");
     db.close();
     const boot = async (extra) => {
-        const env = { ...process.env, PORT: "0", STATS_DB: file, ...extra };
+        const env = { ...process.env, PORT: "0", METRICS_PORT: "0", STATS_DB: file, ...extra };
         const child = spawn("node", ["--no-warnings", "server/index.js"], {
             cwd: fileURLToPath(new URL("..", import.meta.url)),
             env,

@@ -12,6 +12,8 @@ services:
     # request (#47); a published port also bypasses the host firewall's INPUT rules.
     ports:
       - 127.0.0.1:8099:8080
+    # :9090 is /metrics (#48). Never published: #49's Prometheus scrapes game:9090 across
+    # the compose network.
     # The site statistics (#46). A directory, not the file: SQLite writes a journal beside
     # it. Backup is `tar czf jnb-data.tgz data/`, which is every bind mount the box has.
     volumes:

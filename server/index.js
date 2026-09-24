@@ -10,10 +10,12 @@
 // Rooms live in this process's memory. Ceiling: one process, and a restart drops every
 // room -- the same blast radius a reconnect has to handle anyway (#42).
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
+import { Counter, Gauge, collectDefaultMetrics, register } from "prom-client";
 import { WebSocketServer } from "ws";
 
 import { generate_room_id, normalise_room_id } from "../src/net/room_id.js";
@@ -26,6 +28,10 @@ import {
 } from "../src/net/room_config.js";
 
 const PORT = process.env.PORT || 8080;
+// Operator metrics (#48): a second listener the tunnel never routes -- it points at
+// game:8080 and nothing else. Never published on the host; #49's Prometheus reaches it
+// across the compose network. CI checks the default inside the image.
+const METRICS_PORT = process.env.METRICS_PORT || 9090;
 const TICK_MS = 1000 / 60;
 const PING_MS = 1000;
 const SEATS = 4;
@@ -94,14 +100,50 @@ const HTTP_PER_MINUTE = 60;
 // `jnb_ratelimit_trips_total` (#47): every refusal by a per-key budget -- the HTTP bucket and
 // the rooms-per-key cap, not `SERVER_FULL`, which is capacity rather than abuse. Unlabelled,
 // per #48's cardinality policy.
-// ponytail: a plain integer read by nobody yet. upgrade path: #48 exposes it on its metrics
-// endpoint (a prom-client Counter fed from this, or one in its place).
+// Exposed by #48's Counter below, which reads it at scrape time.
 export let ratelimit_trips = 0;
 
 const rooms = {};
 // Arrival order, room-independent: the only thing it decides is which seat-holding client
 // inherits the host when one leaves (#14).
 let arrivals = 0;
+
+// Operator metrics (#48), scraped live and never stored: not the statistics below, which
+// are public, cumulative and bump-gated (#20, #46). Read out of memory at scrape time and
+// never out of SQLite. No label ever names a room, a seat or a level -- room ids are minted
+// and destroyed continuously, so a room label is an unbounded series. Which room: the log.
+// Everything is `jnb_*`, the default process metrics included, so no name can be mistaken
+// for a statistic. Event-loop lag is the one that says a 60 Hz relay is dying.
+collectDefaultMetrics({ prefix: "jnb_" });
+const desyncs_total = new Counter({
+    name: "jnb_desyncs_total",
+    help: "Checksum mismatches seen, every room together (#19). Which room: the relay log.",
+});
+// #47's integer, read at scrape time, so the two refusal sites stay one `++` each.
+new Counter({
+    name: "jnb_ratelimit_trips_total",
+    help: "Refusals by a per-key budget: HTTP 429 and TOO_MANY_ROOMS (#47).",
+    collect() {
+        this.reset();
+        this.inc(ratelimit_trips);
+    },
+});
+new Gauge({
+    name: "jnb_rooms",
+    help: "Rooms open now.",
+    collect() {
+        this.set(Object.keys(rooms).length);
+    },
+});
+new Gauge({
+    name: "jnb_clients",
+    help: "Sockets in a room now, spectators and the queue included.",
+    collect() {
+        let n = 0;
+        for (const room of Object.values(rooms)) n += room.clients.size;
+        this.set(n);
+    },
+});
 
 // Site-wide statistics (#46): six integers in one row, and nothing per match or per room.
 // `stats` is what `/api/stats` serves, so a request never reads SQLite; `unflushed` is what
@@ -1272,8 +1314,10 @@ function desync(client, t) {
     // disagreement any more, and must not spend a repair.
     if (!room.clients.has(client) || spent.dropped) return;
     // Counted at detection rather than beside the repair: the counter says what the relay
-    // saw, the log line beneath it says what the relay did about it (#118).
+    // saw, the log line beneath it says what the relay did about it (#118), and
+    // `jnb_desyncs_total` is the same count for every room at once (#48).
     room.desyncs++;
+    desyncs_total.inc();
     // Nothing to repair it with yet: the host's first snapshot is two seconds into a match
     // and the first hashes are half a second in, so the whole allowance would be spent
     // before a single repair could be sent. Marked instead, and answered by that first
@@ -1736,7 +1780,7 @@ function listings() {
         .sort((a, b) => b.seats - a.seats);
 }
 
-export function start_server(port = PORT) {
+export function start_server(port = PORT, metrics_port = METRICS_PORT) {
     const app = express();
     // Resolved from this file rather than from the working directory: the image runs it
     // from /app and a developer runs it from the repo root, and neither should have to
@@ -1792,6 +1836,21 @@ export function start_server(port = PORT) {
     process.on("exit", flush_stats);
 
     const server = app.listen(port, "0.0.0.0");
+    // Its own app, so nothing registered on the public one -- static, the limiter, the API --
+    // is reachable here, and `/metrics` is reachable nowhere else (#27, #48). Not rate-limited:
+    // one scraper, and nobody off the compose network can reach it.
+    // ponytail: the tunnel network can reach game:9090 too; only the tunnel's Public Hostname
+    // config keeps it off the internet. upgrade path: bind to the jump-n-bump network's address
+    // if the tunnel ever routes by wildcard.
+    const metrics_app = express();
+    metrics_app.get("/metrics", (_req, res, next) =>
+        register
+            .metrics()
+            .then((body) => res.set("Content-Type", register.contentType).send(body), next),
+    );
+    const metrics = metrics_app.listen(metrics_port, "0.0.0.0");
+    server.metrics = metrics;
+    server.on("close", () => metrics.close());
     // The largest message a client sends is the host's snapshot, whose body is ASCII base64
     // capped at MAX_SNAPSHOT; the rest of its envelope is a few hundred bytes. Anything past
     // that closes the socket rather than being buffered at ws's 100 MiB default (#156).
@@ -1853,7 +1912,7 @@ export function start_server(port = PORT) {
         });
     });
 
-    return new Promise((resolve) => server.on("listening", () => resolve(server)));
+    return Promise.all([once(server, "listening"), once(metrics, "listening")]).then(() => server);
 }
 
 // Run directly rather than imported by a test.
@@ -1861,5 +1920,11 @@ if (process.argv[1] === import.meta.filename) {
     // Node as PID 1 ignores SIGTERM, so `docker stop` would SIGKILL after ten seconds and the
     // exit flush above would never run.
     for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => process.exit(0));
-    start_server().then((server) => console.log("listening on :%d", server.address().port));
+    start_server().then((server) =>
+        console.log(
+            "listening on :%d, metrics on :%d",
+            server.address().port,
+            server.metrics.address().port,
+        ),
+    );
 }

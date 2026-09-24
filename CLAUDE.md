@@ -9,7 +9,10 @@ Online play needs the relay in `server/`, which has dependencies of its own: `np
 WebSocket on one origin at `:8080`. `server/smoke.mjs` proves that end to end, and the
 `Dockerfile` is how it actually ships. The site statistics (#46) are one SQLite row at
 `STATS_DB` -- `:memory:` when unset, `/app/data/stats.db` in the image, which compose
-bind-mounts from `./data/relay`, so backup is `tar` on `data/`. An idle room (five minutes
+bind-mounts from `./data/relay`, so backup is `tar` on `data/`. Operator metrics (#48) are
+`/metrics` on a second listener at `:9090` (`METRICS_PORT`), never published and never routed
+by the tunnel; they are live `jnb_*` gauges and counters out of memory, never SQLite, and no
+label names a room. An idle room (five minutes
 without a key held) stops accruing minutes but is not closed.
 
 `npm test` runs four files, and builds the client first because one of them opens a browser.
