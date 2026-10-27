@@ -1,5 +1,7 @@
 # Build the client, then serve it and the WebSocket from one Node process (#11).
-FROM node:22-alpine AS client
+# Pinned to the patch, not the line: a cached `22-alpine` can predate the Brotli decoder fix
+# (CVE-2026-111497, fixed in 22.23.4), and nothing re-pulls it. Bump with the next release.
+FROM node:22.23.4-alpine AS client
 WORKDIR /build
 COPY package.json package-lock.json ./
 # Webpack is a dev dependency, so the build stage needs them all -- but `playwright` pulls a
@@ -12,7 +14,7 @@ COPY src ./src
 COPY game ./game
 RUN npm run build
 
-FROM node:22-alpine
+FROM node:22.23.4-alpine
 WORKDIR /app/server
 COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev
