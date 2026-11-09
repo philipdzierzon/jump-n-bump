@@ -9,7 +9,7 @@ COPY package.json package-lock.json .npmrc ./
 # the host, or in CI, against the container this builds (#65).
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm ci
-COPY .babelrc webpack.config.js ./
+COPY webpack.config.js ./
 COPY src ./src
 COPY game ./game
 RUN npm run build

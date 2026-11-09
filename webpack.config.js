@@ -1,66 +1,36 @@
-// We are using node's native package 'path'
-// https://nodejs.org/api/path.html
 const path = require("path");
-
 const webpack = require("webpack");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
-const ExtractTextPlugin = require("extract-text-webpack-plugin");
 
-// Constant with our paths
-const paths = {
-    DIST: path.resolve(__dirname, "game"),
-    JS: path.resolve(__dirname, "src"),
-};
-
-// Webpack configuration
+// No Babel and no loaders: `src/` is modern ES modules that node runs as they are, every
+// browser that plays this does too, and nothing imports CSS or images -- the page loads
+// its sprites by URL from game/. webpack is here for the one bundle `file://` can load.
 module.exports = {
-    entry: path.join(paths.JS, "interaction/viewmodels.js"),
+    mode: "production",
+    // Nothing minified, as under webpack 3. webpack 5 minifies HTML assets in production
+    // too, and that drops the Knockout markup's `<!-- ko -->` comments.
+    optimization: { minimize: false },
+    // One unsplit bundle on purpose (file:// loads no chunks), so the size hint is noise.
+    performance: { hints: false },
+    entry: path.join(__dirname, "src/interaction/viewmodels.js"),
     output: {
-        path: paths.DIST,
+        path: path.resolve(__dirname, "game"),
         filename: "jump-n-bump.js",
     },
-    // Tell webpack to use html plugin
     plugins: [
         // The build this bundle is, stamped in at build time. A lockstep room cannot be
         // played by two different builds of the simulation, and a tab left open across a
         // rebuild goes on running the old one: nothing re-fetches a page nobody reloaded,
         // so the relay is told which build each client is and refuses the mismatch.
         new webpack.DefinePlugin({
-            "process.env.JNB_BUILD": JSON.stringify(String(Date.now())),
+            JNB_BUILD: JSON.stringify(String(Date.now())),
         }),
         new HtmlWebpackPlugin({
             template: path.join(__dirname, "src/jnb.html"),
+            // As webpack 3's plugin did it: a plain script at the end of <body>.
+            inject: "body",
+            scriptLoading: "blocking",
+            minify: false,
         }),
-        new ExtractTextPlugin("style.bundle.css"), // CSS will be extracted to this bundle file
     ],
-    // Loaders configuration
-    // We are telling webpack to use "babel-loader" for .js and .jsx files
-    module: {
-        rules: [
-            {
-                test: /\.(js|jsx)$/,
-                exclude: /node_modules/,
-                use: ["babel-loader"],
-            },
-            // CSS loader for CSS files
-            // Files will get handled by css loader and then passed to the extract text plugin
-            // which will write it to the file we defined above
-            {
-                test: /\.css$/,
-                loader: ExtractTextPlugin.extract({
-                    use: "css-loader",
-                }),
-            },
-            // File loader for image assets
-            // We'll add only image extensions, but you can things like svgs, fonts and videos
-            {
-                test: /\.(png|jpg|gif)$/,
-                use: ["file-loader"],
-            },
-        ],
-    },
-    // Enable importing JS files without specifying their extension
-    resolve: {
-        extensions: [".js"],
-    },
 };
