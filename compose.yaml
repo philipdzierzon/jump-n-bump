@@ -39,7 +39,7 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./data/prometheus:/prometheus
   grafana:
-    image: grafana/grafana:13.2.2
+    image: grafana/grafana:13.2.5
     restart: unless-stopped
     # No volume: the datasource and the one dashboard are provisioned from git, so a
     # recreated container loses nothing but a changed password.

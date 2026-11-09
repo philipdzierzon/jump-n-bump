@@ -169,8 +169,9 @@ JSON and YAML override back to 2 spaces: npm copies `package.json`'s indent into
 `package-lock.json`, so 4 there churns the entire lockfile on every install.
 
 `.githooks/pre-commit` blocks an unformatted commit. It is a two-line shell script, not
-husky — `npm install` runs a `prepare` script that points `core.hooksPath` at `.githooks`,
-which is all husky does. It checks the whole repo rather than the staged files: that takes
+husky — `git config core.hooksPath .githooks`, once per clone, is all husky does. (The
+`prepare` script would do it on `npm install`, but `.npmrc` sets `ignore-scripts`, so it no
+longer runs.) It checks the whole repo rather than the staged files: that takes
 under a second, so a WIP file you did not stage can block the commit. `git commit -n` skips
 it; CI does not.
 

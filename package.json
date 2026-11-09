@@ -18,8 +18,7 @@
   "scripts": {
     "build": "webpack",
     "watch": "webpack --watch",
-    "pretest": "npm run build",
-    "test": "node --no-warnings test/replay.test.mjs && node --no-warnings test/relay.test.mjs && node --no-warnings test/router.test.mjs && node --no-warnings test/browser.test.mjs",
+    "test": "npm run build && node --no-warnings test/replay.test.mjs && node --no-warnings test/relay.test.mjs && node --no-warnings test/router.test.mjs && node --no-warnings test/browser.test.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "git config core.hooksPath .githooks || true"
