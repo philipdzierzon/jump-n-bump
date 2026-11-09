@@ -73,9 +73,9 @@ function recall(id) {
     }
 }
 
-// Stamped into the bundle by webpack at build time, and "dev" when `src/` is run straight
-// from node -- which no relay is ever handed, because nothing there opens a socket.
-var BUILD = (typeof process !== "undefined" && process.env && process.env.JNB_BUILD) || "dev";
+// Stamped into the bundle by webpack's DefinePlugin at build time, and "dev" when `src/` is
+// run straight from node -- which no relay is ever handed, because nothing there opens a socket.
+var BUILD = typeof JNB_BUILD !== "undefined" ? JNB_BUILD : "dev";
 
 function ViewModel() {
     "use strict";

@@ -25,7 +25,7 @@ services:
   # and then the default login has to go. Neither joins `tunnel`: cloudflared has no
   # route to them.
   prometheus:
-    image: prom/prometheus:v3.5.5
+    image: prom/prometheus:v3.15.1
     restart: unless-stopped
     # ponytail: root, because docker creates ./data/prometheus root-owned and the
     # image's nobody (65534) cannot write it. The relay runs as root on data/relay
@@ -39,7 +39,7 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./data/prometheus:/prometheus
   grafana:
-    image: grafana/grafana:13.2.2
+    image: grafana/grafana:13.2.5
     restart: unless-stopped
     # No volume: the datasource and the one dashboard are provisioned from git, so a
     # recreated container loses nothing but a changed password.

@@ -3,20 +3,20 @@
 # (CVE-2026-111497, fixed in 22.23.4), and nothing re-pulls it. Bump with the next release.
 FROM node:22.23.4-alpine AS client
 WORKDIR /build
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 # Webpack is a dev dependency, so the build stage needs them all -- but `playwright` pulls a
 # browser down on install and nothing in this image ever opens one: the browser suite runs on
 # the host, or in CI, against the container this builds (#65).
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm ci
-COPY .babelrc webpack.config.js ./
+COPY webpack.config.js ./
 COPY src ./src
 COPY game ./game
 RUN npm run build
 
 FROM node:22.23.4-alpine
 WORKDIR /app/server
-COPY server/package.json server/package-lock.json ./
+COPY server/package.json server/package-lock.json server/.npmrc ./
 RUN npm ci --omit=dev
 COPY server/index.js server/smoke.mjs ./
 # The repo's own layout, because the relay validates room ids and room config with the
