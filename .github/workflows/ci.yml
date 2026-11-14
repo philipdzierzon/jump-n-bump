@@ -22,12 +22,16 @@ jobs:
         working-directory: server
       - run: npm run format:check
       # The flow suite drives a real browser (#65). Playwright pins its own browser
-      # build, so the version in the lockfile is the cache key: 600-odd MB is worth
-      # keeping, and a version bump invalidates it by itself.
+      # build, so the playwright-core version in the lockfile is the cache key: 600-odd
+      # MB is worth keeping, and a version bump invalidates it by itself. The whole
+      # lockfile's hash was the key before, which minted a second identical entry for
+      # every unrelated dependency change.
+      - id: playwright
+        run: echo "version=$(node -p "require('./package-lock.json').packages['node_modules/playwright-core'].version")" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ hashFiles('package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
       - run: npx playwright install --with-deps chromium
       # Builds the client and runs it exactly as production does, so one
       # assertion run covers webpack, static serving and the WebSocket.
@@ -59,3 +63,4 @@ jobs:
           name: playwright-traces
           path: trace-*.zip
           if-no-files-found: ignore
+          retention-days: 3
